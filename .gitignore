@@ -1,0 +1,28 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Environments
+.env
+.venv
+env/
+venv/
+ENV/
+
+# Testing & Linting
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Temporary and bulky calculation scratch files
+*.tmp
+*.densities*
+*.cpcm*
+*.engrad
+*.opt
+*.gbw
+
+# OS artifacts
+.DS_Store
+Thumbs.db
