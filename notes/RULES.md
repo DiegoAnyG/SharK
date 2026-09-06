@@ -70,3 +70,7 @@ Changes that cannot fail at import time — quantum chemistry binary execution, 
 and signal handling, memory allocation limits, parser handling of varied ORCA output versions,
 and Windows/Linux cross-platform paths — get a test.
 
+## 8. Commits as changelogs
+
+Every git commit message must function as a concise changelog. Use a clear summary title line, followed by bulleted items listing only the most important changes (between 1 and maximum 2 lines per item). Keep descriptions brief and informative.
+
