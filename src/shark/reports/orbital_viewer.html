@@ -1,0 +1,125 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>@@TITLE@@</title>
+<style>
+:root {color-scheme:light; font-family:Arial,sans-serif; color:#203044; background:#f3f6f9}
+body {margin:0} header,main {max-width:1500px;margin:auto;padding:24px}
+header {padding-bottom:8px} h1 {font-size:28px;margin:0 0 10px} p {line-height:1.5}
+.controls {display:flex;flex-wrap:wrap;gap:14px;align-items:end;background:white;border:1px solid #dbe3eb;border-radius:8px;padding:16px}
+label {display:flex;flex-direction:column;gap:6px;font-size:13px;font-weight:600}
+button,select,input {font:inherit;padding:9px;border:1px solid #bccbd9;border-radius:4px;background:white;color:#203044}
+button {cursor:pointer;background:#edf4fa} button:hover {background:#dcebf7}
+button:disabled {opacity:.45;cursor:wait} #plot {background:white;margin-top:18px;border-radius:8px}
+#status {min-height:1.5em;font-size:14px} details {background:white;padding:16px;border-radius:8px;margin:16px 0}
+table {border-collapse:collapse;width:100%;font-size:13px} td,th {text-align:left;padding:9px;border-bottom:1px solid #e2e8ee}
+.muted {color:#52677d} #load {max-width:210px} #scale {width:70px}
+</style>
+<script>@@PLOTLY@@</script>
+</head>
+<body>
+<header><h1>@@TITLE@@</h1><p class="muted">Rotate to inspect the orbital lobes. All panels share the same spatial scale, camera and absolute isovalue.</p></header>
+<main>
+<div class="controls">
+<label>Isovalue |psi| (bohr^-3/2)<select id="iso"></select></label>
+<label>Surface opacity<input id="opacity" type="range" min="0.05" max="1" step="0.05"></label>
+<label>View<select id="view"><option value="initial">Initial view</option><option value="top">Top</option><option value="side">Side</option></select></label>
+<label>Export scale<input id="scale" type="number" min="0.1" max="10" step="0.1"></label>
+<button id="reset" disabled>Reset camera</button><button id="png" disabled>Export PNG</button>
+<button id="save" disabled>Save settings</button>
+<label>Restore settings<input id="load" type="file" accept=".json,application/json" disabled></label>
+</div>
+<p id="status" role="status">Loading orbital surfaces...</p>
+<div id="plot"></div>
+<details><summary>Calculation details and reproducibility</summary>
+<p>Blue/red (or the configured phase colors) show the sign of the orbital amplitude, not electric charge. A global sign reversal has no physical meaning. Bond lines indicate inferred connectivity.</p>
+<p>The available isovalues were generated from the original scalar grids without amplitude normalization. To add values, regenerate this report with a settings JSON. A single grid does not establish resolution convergence.</p>
+<div style="overflow:auto"><table><thead><tr><th>Calculation</th><th>Orbital</th><th>Energy (eV)</th><th>Occupation</th><th>Integral |psi|²</th><th>ORCA input</th></tr></thead><tbody id="sources"></tbody></table></div>
+<button id="metadata">Download provenance</button>
+<p>Saved settings can be restored here or passed to the command-line exporter. PNG exports use the current camera; static PDF/SVG exports retain rasterized 3D layers.</p>
+</details>
+</main>
+<script>
+'use strict';
+const figure=@@FIGURE@@, provenance=@@METADATA@@, surfaces=@@SURFACES@@;
+const settings=structuredClone(provenance.settings), initial=structuredClone(settings);
+const scenes=provenance.scene_names, plot=document.getElementById('plot');
+const status=document.getElementById('status'), iso=document.getElementById('iso');
+let syncing=false;
+const amplitudeText=()=>`Isosurface: +/- ${settings.isovalue} bohr^(-3/2) | Phase colors do not indicate charge`;
+function setStatus(message){status.textContent=message;}
+function download(name,data,type='application/json'){
+ const url=URL.createObjectURL(new Blob([data],{type}));const a=document.createElement('a');a.href=url;a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);
+}
+for(const value of settings.isovalues){const option=document.createElement('option');option.value=value;option.textContent=value;iso.append(option);}
+iso.value=settings.isovalue;document.getElementById('opacity').value=settings.opacity;document.getElementById('scale').value=settings.export_scale;
+for(const field of provenance.orbitals){const tr=document.createElement('tr');
+ for(const text of [field.label,`${field.role} / ${field.orbital_index} / operator ${field.operator}`,field.energy_eV,field.occupation,field.diagnostics.norm_integral.toFixed(6),field.calculation.input_keywords||'Unavailable']){
+  const td=document.createElement('td');td.textContent=text;tr.append(td);
+ }document.getElementById('sources').append(tr);
+}
+async function cameraAll(camera){
+ syncing=true;
+ try{const update={};for(const name of scenes)update[`${name}.camera`]=structuredClone(camera);await Plotly.relayout(plot,update);settings.camera=structuredClone(camera);}
+ finally{syncing=false;}
+}
+async function updateSurfaces(){
+ const indices=surfaces.map(s=>s.trace),update={};
+ for(const coord of ['x','y','z','i','j','k'])update[coord]=surfaces.map(s=>s.variants[String(settings.isovalue)][coord]);
+ update.opacity=indices.map(()=>settings.opacity);
+ update.color=indices.map((_,i)=>i%2===0?settings.positive_color:settings.negative_color);
+ await Plotly.restyle(plot,update,indices);
+ const annotations=structuredClone(plot.layout.annotations);annotations[annotations.length-1].text=amplitudeText();
+ await Plotly.relayout(plot,{annotations,'meta.isovalue':settings.isovalue});
+ const absent=surfaces.filter(s=>s.variants[String(settings.isovalue)].x.length===0).length;
+ setStatus(absent?`${absent} phase surface(s) absent at this isovalue. No amplitudes were rescaled.`:`${provenance.orbitals.length} orbital fields | shared isovalue ${settings.isovalue} bohr^-3/2`);
+}
+iso.addEventListener('change',async()=>{settings.isovalue=Number(iso.value);await updateSurfaces();});
+document.getElementById('opacity').addEventListener('change',async e=>{settings.opacity=Number(e.target.value);await updateSurfaces();});
+document.getElementById('view').addEventListener('change',async e=>{
+ let camera=structuredClone(initial.camera);
+ const distance=Math.hypot(initial.camera.eye.x,initial.camera.eye.y,initial.camera.eye.z);
+ if(e.target.value==='top')camera={eye:{x:0,y:0,z:distance},up:{x:0,y:1,z:0},center:{x:0,y:0,z:0},projection:{type:'orthographic'}};
+ if(e.target.value==='side')camera={eye:{x:0,y:-distance,z:0},up:{x:0,y:0,z:1},center:{x:0,y:0,z:0},projection:{type:'orthographic'}};
+ await cameraAll(camera);
+});
+document.getElementById('reset').onclick=()=>cameraAll(initial.camera);
+document.getElementById('scale').onchange=e=>{
+ const value=Number(e.target.value);if(!Number.isFinite(value)||value<=0||value>10){e.target.value=settings.export_scale;setStatus('Export scale must be greater than zero and at most 10.');return;}settings.export_scale=value;
+};
+document.getElementById('save').onclick=()=>download('orbital-view-settings.json',JSON.stringify({schema_version:1,settings},null,2));
+document.getElementById('metadata').onclick=()=>download('orbital-provenance.json',JSON.stringify(provenance,null,2));
+document.getElementById('load').onchange=async e=>{
+ try{
+  const loaded=JSON.parse(await e.target.files[0].text()).settings;
+  if(!loaded||!initial.isovalues.includes(loaded.isovalue))throw Error('This isovalue is not bundled; regenerate the report using this settings file.');
+  if(!Number.isFinite(loaded.opacity)||loaded.opacity<=0||loaded.opacity>1)throw Error('Invalid opacity.');
+  if(!loaded.camera||!loaded.camera.eye||!['x','y','z'].every(k=>Number.isFinite(loaded.camera.eye[k])))throw Error('Invalid camera.');
+  // Geometry-affecting settings require regeneration rather than silent substitution.
+  for(const key of ['alignment','bond_factor','padding_angstrom','scene_scale','columns','atom_radius_scale','atom_resolution'])if(loaded[key]!==initial[key])throw Error(`${key} differs; regenerate the report with these settings.`);
+  for(const key of ['positive_color','negative_color','width','panel_height','title'])if(loaded[key]!==initial[key])throw Error(`${key} differs; regenerate the report with these settings.`);
+  if(JSON.stringify(loaded.atom_colors)!==JSON.stringify(initial.atom_colors))throw Error('Atom colors differ; regenerate the report with these settings.');
+  if(!Number.isFinite(loaded.export_scale)||loaded.export_scale<=0||loaded.export_scale>10)throw Error('Invalid export scale.');
+  settings.isovalue=loaded.isovalue;settings.opacity=loaded.opacity;settings.export_scale=loaded.export_scale;
+  iso.value=settings.isovalue;document.getElementById('opacity').value=settings.opacity;document.getElementById('scale').value=settings.export_scale;
+  await updateSurfaces();await cameraAll(loaded.camera);setStatus('Settings restored.');
+ }catch(error){setStatus(`Could not restore settings: ${error.message}`);}
+};
+document.getElementById('png').onclick=async()=>{
+ const button=document.getElementById('png');button.disabled=true;setStatus('Rendering PNG...');
+ try{
+  const data=await Plotly.toImage(plot,{format:'png',width:initial.width,height:figure.layout.height,scale:settings.export_scale});
+  const a=document.createElement('a');a.href=data;a.download='frontier-orbitals.png';a.click();setStatus('PNG exported. Save settings to reproduce this view.');
+ }catch(error){setStatus(`Export failed: ${error.message}`);}finally{button.disabled=false;}
+};
+Plotly.newPlot(plot,figure.data,figure.layout,{responsive:true,displaylogo:false,displayModeBar:false}).then(async()=>{
+ plot.on('plotly_relayout',async event=>{
+  if(syncing)return;
+  for(const name of scenes){if(event[`${name}.camera`]){await cameraAll(event[`${name}.camera`]);break;}}
+ });
+ for(const id of ['reset','png','save','load'])document.getElementById(id).disabled=false;
+ await updateSurfaces();window.sharkReady=true;
+}).catch(error=>setStatus(`Unable to render 3D: ${error.message}`));
+</script>
+</body></html>

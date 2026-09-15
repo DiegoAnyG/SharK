@@ -2,6 +2,7 @@
 
 import tempfile
 import unittest
+import os
 from pathlib import Path
 
 from shark.core.parser import parse_orca_results
@@ -14,7 +15,9 @@ class TestSharKVisualizers(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         root = Path(__file__).resolve().parent.parent
-        cls.dft_dir = root / "dft_benzofuroxan"
+        cls.dft_dir = Path(os.environ.get('SHARK_TEST_DATA', os.environ.get('TOPICS_TEST_DATA', root / 'dft_benzofuroxan')))
+        if not (cls.dft_dir / 'tautomer_1_oxide.out').is_file():
+            raise unittest.SkipTest('Private benchmark unavailable; set SHARK_TEST_DATA')
         cls.r1 = parse_orca_results(cls.dft_dir / "tautomer_1_oxide", name="tautomer_1")
         cls.r3 = parse_orca_results(cls.dft_dir / "tautomer_3_oxide", name="tautomer_3")
 
@@ -49,4 +52,3 @@ class TestSharKVisualizers(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

@@ -1,6 +1,7 @@
 """Unit tests for SharK core parser, thermo calculations, and spectra convolution."""
 
 import unittest
+import os
 from pathlib import Path
 import numpy as np
 
@@ -13,7 +14,9 @@ class TestSharKCore(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         root = Path(__file__).resolve().parent.parent
-        cls.dft_dir = root / "dft_benzofuroxan"
+        cls.dft_dir = Path(os.environ.get('SHARK_TEST_DATA', os.environ.get('TOPICS_TEST_DATA', root / 'dft_benzofuroxan')))
+        if not (cls.dft_dir / 'tautomer_1_oxide.out').is_file():
+            raise unittest.SkipTest('Private benchmark unavailable; set SHARK_TEST_DATA')
 
     def test_parse_orca_tautomer_1(self):
         res = parse_orca_results(self.dft_dir / "tautomer_1_oxide", name="tautomer_1")
@@ -65,4 +68,3 @@ class TestSharKCore(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

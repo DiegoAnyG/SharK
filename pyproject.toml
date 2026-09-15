@@ -13,13 +13,24 @@ dependencies = [
     "numpy",
     "pandas",
     "scipy",
-    "matplotlib"
+    "matplotlib",
+    "rdkit",
+    "plotly>=6.1",
+    "scikit-image>=0.23"
 ]
 
 [project.optional-dependencies]
+export = ["kaleido>=1.0"]
 dev = [
     "pytest>=7.0",
 ]
+
+[project.scripts]
+shark = "shark.cli:main"
+shark-orbitals = "shark.reports.orbital_viewer:main"
+
+[tool.setuptools.package-data]
+"shark.reports" = ["orbital_viewer.html"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
@@ -27,4 +38,3 @@ where = ["src"]
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 testpaths = ["tests"]
-

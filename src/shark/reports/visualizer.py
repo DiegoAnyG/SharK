@@ -3,6 +3,7 @@
 from __future__ import annotations
 import os
 import tempfile
+import html
 from pathlib import Path
 from typing import List, Optional
 
@@ -226,6 +227,7 @@ def generate_html_report(
     out_path: str | Path,
     title: str = "SharK Quantum Chemical Analysis Report",
     subtitle: str = "Tautomer & Conformer Evaluation",
+    interactive_reports: Optional[List[Path]] = None,
 ) -> Path:
     """Export an interactive, self-contained HTML research report."""
     out_file = Path(out_path)
@@ -244,6 +246,9 @@ def generate_html_report(
         """)
 
     images_section = "\n".join(image_cards)
+    for report in interactive_reports or []:
+        relative = html.escape(os.path.relpath(report, out_file.parent), quote=True)
+        images_section += f'<div class="card"><a href="{relative}">Open interactive orbital viewer</a></div>'
 
     html_content = f"""<!DOCTYPE html>
 <html lang="en">

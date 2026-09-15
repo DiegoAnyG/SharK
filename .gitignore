@@ -26,3 +26,8 @@ htmlcov/
 # OS artifacts
 .DS_Store
 Thumbs.db
+
+# Private working notes, calculations, and reports
+/notes/
+/dft_benzofuroxan/
+/reports/

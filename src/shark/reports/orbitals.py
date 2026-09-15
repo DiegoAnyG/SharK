@@ -13,83 +13,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 
-PERIODIC_TABLE = {
-    1: ("H", "#FFFFFF", 0.31),
-    6: ("C", "#505050", 0.76),
-    7: ("N", "#3050F8", 0.71),
-    8: ("O", "#FF0D0D", 0.66),
-    9: ("F", "#90E050", 0.57),
-    15: ("P", "#FF8000", 1.07),
-    16: ("S", "#FFFF30", 1.05),
-    17: ("Cl", "#1FF01F", 1.02),
-}
-
-BOHR_TO_ANGSTROM = 0.529177249
-
-
-def parse_cube_file(cube_path: str | Path) -> Dict[str, Any]:
-    """
-    Parse a standard Gaussian .cube file containing 3D volumetric scalar fields
-    (molecular orbitals, electron density, or electrostatic potential).
-    """
-    path = Path(cube_path)
-    with open(path, "r", encoding="utf-8", errors="ignore") as f:
-        title = f.readline().strip()
-        comment = f.readline().strip()
-        line3 = f.readline().split()
-        natoms = abs(int(line3[0]))
-        origin = np.array([float(x) for x in line3[1:4]])
-
-        nx, vx_x, vx_y, vx_z = f.readline().split()
-        ny, vy_x, vy_y, vy_z = f.readline().split()
-        nz, vz_x, vz_y, vz_z = f.readline().split()
-
-        nx, ny, nz = int(nx), int(ny), int(nz)
-        vx = np.array([float(vx_x), float(vx_y), float(vx_z)])
-        vy = np.array([float(vy_x), float(vy_y), float(vy_z)])
-        vz = np.array([float(vz_x), float(vz_y), float(vz_z)])
-
-        atoms = []
-        for _ in range(natoms):
-            aline = f.readline().split()
-            atno = int(aline[0])
-            charge = float(aline[1])
-            pos = np.array([float(aline[2]), float(aline[3]), float(aline[4])])
-            elem, color, radius = PERIODIC_TABLE.get(atno, (f"X{atno}", "#888888", 0.7))
-            atoms.append({
-                "atno": atno,
-                "element": elem,
-                "color": color,
-                "radius": radius,
-                "charge": charge,
-                "pos_bohr": pos,
-                "pos_ang": pos * BOHR_TO_ANGSTROM,
-            })
-
-        # Check for optional MO line (if natoms was negative in line 3)
-        pos_after_atoms = f.tell()
-        line_next = f.readline()
-        if len(line_next.split()) <= 2 and line_next.strip():
-            pass  # Orbital header line
-        else:
-            f.seek(pos_after_atoms)
-
-        # Read remaining scalar data
-        data_str = f.read()
-        raw_vals = np.fromstring(data_str, sep=" ")
-        grid = raw_vals.reshape((nx, ny, nz))
-
-    return {
-        "title": title,
-        "comment": comment,
-        "natoms": natoms,
-        "origin_bohr": origin,
-        "origin_ang": origin * BOHR_TO_ANGSTROM,
-        "voxel_vectors_bohr": (vx, vy, vz),
-        "shape": (nx, ny, nz),
-        "atoms": atoms,
-        "grid": grid,
-    }
+from ..core.cube import BOHR_TO_ANGSTROM, parse_cube_file
 
 
 def _draw_molecule_2d_projection(ax, atoms: List[Dict[str, Any]], plane: str = "xy") -> None:
@@ -146,94 +70,52 @@ def plot_frontier_orbitals_panel(
     t3_homo_cube: str | Path,
     t3_lumo_cube: str | Path,
     out_path: str | Path,
-    t1_energies: Tuple[float, float] = (-6.342, -2.895),
-    t3_energies: Tuple[float, float] = (-6.412, -2.917),
+    t1_energies: Tuple[float, float] | None = None,
+    t3_energies: Tuple[float, float] | None = None,
     dpi: int = 300,
 ) -> Path:
+    """Compatibility adapter for the original two-calculation API.
+
+    New code should use discover_frontier_fields and export_orbital_report,
+    which accept any number of calculations and configurable view settings.
     """
-    Generate a 4-panel publication-grade figure of Frontier Molecular Orbitals (HOMO & LUMO)
-    for both benzofuroxan tautomers, showing wave-function phases and molecular structures.
-    """
+    from ..core.frontier import OrbitalField, read_orbital_metadata
+    from .orbital_viewer import ViewSettings, build_orbital_figure
+
+    fields = []
+    for paths, energies in (((t1_homo_cube, t1_lumo_cube), t1_energies),
+                            ((t3_homo_cube, t3_lumo_cube), t3_energies)):
+        for position, (cube_path, role) in enumerate(zip(paths, ('HOMO', 'LUMO'))):
+            path = Path(cube_path)
+            cube = parse_cube_file(path)
+            index, operator = cube['orbital_index'], cube['operator']
+            if index is None or operator is None:
+                raise ValueError('Frontier plotting requires an identified orbital CUBE')
+            energy = energies[position] if energies is not None else None
+            metadata, occupation = {}, None
+            outputs = [p for p in path.parent.glob('*.out') if path.name.startswith(p.stem + '.')]
+            label = path.stem
+            if len(outputs) == 1:
+                label = outputs[0].stem
+                metadata = read_orbital_metadata(outputs[0])
+                entries = metadata['channels'].get(operator, [])
+                occupied = [r for r in entries if r['occupation'] > 0]
+                virtual = [r for r in entries if r['occupation'] == 0]
+                expected = (max(occupied, key=lambda r: (r['energy_eV'], r['index'])) if role == 'HOMO'
+                            else min(virtual, key=lambda r: (r['energy_eV'], r['index'])))
+                if index != expected['index']:
+                    raise ValueError(f'{path.name} is not the {role} in the associated ORCA output')
+                occupation = expected['occupation']
+                if energy is None:
+                    energy = expected['energy_eV']
+            if occupation is None:
+                raise ValueError('Use the generic OrbitalField API with explicit metadata when ORCA output is unavailable')
+            fields.append(OrbitalField(label, role, index, operator, occupation, energy, path, cube, metadata))
+    settings = ViewSettings(export_scale=dpi / 96)
+    fig, _, _ = build_orbital_figure(fields, settings)
     out_file = Path(out_path)
     out_file.parent.mkdir(parents=True, exist_ok=True)
-
-    cubes = {
-        "T1_HOMO": (parse_cube_file(t1_homo_cube), t1_energies[0], "Benzofuroxan 1-oxide — HOMO"),
-        "T1_LUMO": (parse_cube_file(t1_lumo_cube), t1_energies[1], "Benzofuroxan 1-oxide — LUMO"),
-        "T3_HOMO": (parse_cube_file(t3_homo_cube), t3_energies[0], "Benzofuroxan 3-oxide — HOMO"),
-        "T3_LUMO": (parse_cube_file(t3_lumo_cube), t3_energies[1], "Benzofuroxan 3-oxide — LUMO"),
-    }
-
-    fig, axes = plt.subplots(2, 2, figsize=(13, 11), dpi=dpi)
-    ax_list = [axes[0, 0], axes[0, 1], axes[1, 0], axes[1, 1]]
-    keys = ["T1_HOMO", "T1_LUMO", "T3_HOMO", "T3_LUMO"]
-
-    for ax, key in zip(ax_list, keys):
-        data, ev, title = cubes[key]
-        atoms = data["atoms"]
-        grid = data["grid"]
-        shape = data["shape"]
-        origin_ang = data["origin_ang"]
-        vx, vy, vz = data["voxel_vectors_bohr"]
-
-        # Project volumetric orbital slice across the molecular plane
-        # Aromatic/heterocyclic HOMO and LUMO are pi orbitals with a nodal plane (psi = 0)
-        # coinciding with the molecular ring plane. Slicing at ~0.70 Å above the plane
-        # captures the peak amplitude of 2p_z lobes without destructive cancellation across the nodal plane.
-        z_atoms = float(np.mean([a["pos_ang"][2] for a in atoms]))
-        dz = vz[2] * BOHR_TO_ANGSTROM
-        z_atom_idx = int(round((z_atoms - origin_ang[2]) / dz))
-        offset_voxels = max(1, int(round(0.70 / dz)))
-        slice_idx = min(shape[2] - 1, max(0, z_atom_idx + offset_voxels))
-        slice_2d = grid[:, :, slice_idx]
-
-        extent = [
-            origin_ang[0],
-            origin_ang[0] + shape[0] * vx[0] * BOHR_TO_ANGSTROM,
-            origin_ang[1],
-            origin_ang[1] + shape[1] * vy[1] * BOHR_TO_ANGSTROM,
-        ]
-
-        # Draw filled orbital contour lobes (Diverging Colormap: Red = negative, Blue = positive)
-        levels = np.linspace(-0.08, 0.08, 31)
-        cf = ax.contourf(
-            slice_2d.T,
-            levels=levels,
-            extent=extent,
-            cmap="RdBu",
-            alpha=0.75,
-            extend="both",
-            zorder=1,
-        )
-        ax.contour(
-            slice_2d.T,
-            levels=[-0.02, 0.02],
-            extent=extent,
-            colors=["#b2182b", "#2166ac"],
-            linewidths=1.2,
-            zorder=1,
-        )
-
-        _draw_molecule_2d_projection(ax, atoms, plane="xy")
-
-        ax.set_title(f"{title}\n$E = {ev:.3f}$ eV", fontsize=12, fontweight="bold", pad=8)
-        ax.set_xlabel("X (Å)", fontsize=10)
-        ax.set_ylabel("Y (Å)", fontsize=10)
-        ax.set_aspect("equal")
-
-        # Colorbar inside / beside
-        cbar = fig.colorbar(cf, ax=ax, shrink=0.75, pad=0.04)
-        cbar.set_label(r"Wavefunction Amplitude $\psi$", fontsize=9)
-
-    fig.suptitle(
-        "SharK: Frontier Molecular Orbital (FMO) Spatial Profiles (ORCA 6 DFT / B3LYP)",
-        fontsize=14,
-        fontweight="bold",
-        y=0.99,
-    )
-    plt.tight_layout()
-    fig.savefig(out_file, bbox_inches="tight")
-    plt.close(fig)
+    fig.write_image(out_file, scale=settings.export_scale)
     return out_file
 
 

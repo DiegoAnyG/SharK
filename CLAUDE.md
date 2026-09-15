@@ -45,6 +45,10 @@ settled. If out of date, update there first, then act.
    keep parsing cleanly.
 7. **Verify what only shows up at runtime.** Subprocess lifecycle, ORCA signal handling (no zombie
    MPI processes), memory bounds, and cross-platform path handling get explicit tests.
+8. **Keep changelogs concise.** Record every change in the session changelog using one or two lines
+   maximum per change; use the same limit for each change item in commit messages.
+9. **No emojis anywhere in development.** Backend, frontend, interfaces, source code, comments,
+   terminal output, logs, tests, documentation, changelogs, and commit messages must use plain text labels.
 
 ## Environment and running
 
@@ -63,4 +67,3 @@ settled. If out of date, update there first, then act.
   - `conformers.py`: Conformational ensemble generation, pruning, and hierarchical refinement.
   - `solvation.py`: Gas-phase vs implicit solvent comparisons (\(\Delta G_{solv}\)).
 - `shark/cli.py` — Scriptable command-line interface.
-

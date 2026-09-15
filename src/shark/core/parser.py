@@ -198,3 +198,16 @@ def parse_orca_results(base_path: str | Path, name: Optional[str] = None) -> Cal
         raise FileNotFoundError(f"No ORCA output files found for stem: {directory / stem}")
 
     return result
+
+
+def parse_orca_output(base_path: str | Path) -> dict:
+    """Convenience dictionary parser for ORCA results."""
+    res = parse_orca_results(base_path)
+    return {
+        "energy_scf": res.el_energy,
+        "dipole_total": res.dipole_magnitude,
+        "homo_ev": res.homo_energy,
+        "lumo_ev": res.lumo_energy,
+        "gap_ev": res.homo_lumo_gap,
+        "converged": res.converged
+    }

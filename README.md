@@ -12,7 +12,6 @@
   <a href="#overview">Overview</a> •
   <a href="#key-features">Key Features</a> •
   <a href="#quickstart">Quickstart</a> •
-  <a href="#pilot-benchmark">Pilot Benchmark</a> •
   <a href="#license">Philosophy</a>
 </p>
 
@@ -22,17 +21,17 @@
 
 **SharK** is an open-source, reproducible Python orchestrator and analysis engine for quantum chemistry, designed as an accessible alternative to proprietary workflows like WEASEL. 
 
-SharK bridges high-throughput virtual screening (such as [**PoliScreen**](https://github.com/DiegoAnyG)) with rigorous quantum mechanics (DFT via ORCA 6.x). It automates the extraction of electronic structures, thermochemical equilibria, simulated infrared (FTIR) spectra, and frontier orbital visualizations into publication-grade reports.
+SharK bridges high-throughput virtual screening (such as [**PoliScreen**](https://github.com/DiegoAnyG/PoliScreen)) with rigorous quantum mechanics (DFT via ORCA 6.x). It automates the extraction of electronic structures, thermochemical equilibria, simulated infrared (FTIR) spectra, and frontier orbital visualizations into publication-grade reports.
 
 ---
 
 ## Key Features
 
-- 🔬 **Robust ORCA 6 Parser**: Instant extraction of electronic energies ($E_{el}$), thermochemical corrections ($ZPE$, $H$, $G$, $S$), dipole moments, and vibrational modes from `.property.txt` and `.out` files.
-- ⚖️ **Boltzmann Thermodynamics**: Calculates relative free energies ($\Delta G, \Delta H, \Delta E$) and equilibrium Boltzmann population distributions ($P_i$) at physiological or custom temperatures.
-- 📈 **FTIR Transmittance Simulator**: Convolutes harmonic transitions with Lorentzian line-shapes into standardized FTIR transmittance spectra ($\%T$, 100% baseline, downward absorption dips) with shaded functional-group zones.
-- 🌌 **Frontier Molecular Orbitals (FMO)**: Direct Gaussian `.cube` parsing to generate publication-quality 4-panel HOMO and LUMO phase-colored contour maps and total electron density ($\rho$) envelopes.
-- 📑 **Zero-Dependency Reporting**: One-command generation of 300-DPI publication figures, GitHub-flavored Markdown summaries, and interactive standalone HTML dossiers.
+- **Robust ORCA 6 Parser**: Instant extraction of electronic energies ($E_{el}$), thermochemical corrections ($ZPE$, $H$, $G$, $S$), dipole moments, and vibrational modes from `.property.txt` and `.out` files.
+- **Boltzmann Thermodynamics**: Calculates relative free energies ($\Delta G, \Delta H, \Delta E$) and equilibrium Boltzmann population distributions ($P_i$) at specified temperatures.
+- **FTIR Transmittance Simulator**: Convolutes harmonic transitions with Lorentzian line-shapes into standardized FTIR transmittance spectra ($\%T$, 100% baseline, downward absorption dips) with shaded functional-group zones.
+- **Frontier Molecular Orbitals (FMO)**: Signed 3D HOMO/LUMO surfaces from ORCA CUBE fields, with offline interaction, source hashes and configurable exports.
+- **Offline Reporting**: One-command generation of 300-DPI publication figures, GitHub-flavored Markdown summaries, and interactive standalone HTML dossiers.
 
 ---
 
@@ -56,8 +55,8 @@ from shark.analysis.thermo import calculate_relative_thermo
 from shark.reports.visualizer import plot_boltzmann_equilibrium, plot_ir_comparison
 
 # 1. Parse ORCA calculation results
-res1 = parse_orca_results("dft_benzofuroxan/tautomer_1_oxide", name="1-oxide")
-res3 = parse_orca_results("dft_benzofuroxan/tautomer_3_oxide", name="3-oxide")
+res1 = parse_orca_results("calculations/state_a", name="state_a")
+res3 = parse_orca_results("calculations/state_b", name="state_b")
 
 # 2. Compute relative thermochemistry and Boltzmann populations
 df = calculate_relative_thermo([res1, res3], temperature=298.15)
@@ -76,20 +75,83 @@ pytest -v
 
 ---
 
-## Pilot Benchmark: Benzofuroxan Tautomerism
+## PoliScreen to isolated-ligand DFT
 
-SharK was benchmarked against the tautomeric equilibrium of benzofuroxan-5-carboxylic acid (B3LYP/def2-SVP/D4/CPCM Water):
+```bash
+# Prepare one unique candidate, excluding crystallographic controls.
+shark run-qm --session screening.poliscreen --work-dir ../qm_jobs
 
-| Species | Converged | $N_{imag}$ | $\Delta G$ (kcal/mol) | Boltzmann Pop (%) | Dipole (D) | HOMO-LUMO Gap |
-|---|:---:|:---:|:---:|:---:|:---:|:---:|
-| **Benzofuroxan 3-oxide** | Yes | 0 | **0.000** | **78.15%** | 3.60 D | 3.49 eV |
-| **Benzofuroxan 1-oxide** | Yes | 0 | **+0.755** | **21.85%** | 4.25 D | 3.45 eV |
+# Optimize in CPCM water, calculate frequencies, and export 3D frontier orbitals.
+shark run-qm --session screening.poliscreen --work-dir ../qm_results \
+  --execute --frequencies --nprocs 2 --maxcore 1024
 
-The 3-oxide is thermodynamically favored in solution, validating the conformer selected for docking studies.
+# Regenerate geometry from recorded SMILES, selecting a target and Pareto leaders.
+shark run-qm --session screening.poliscreen --target target_ready~Pk1 \
+  --pareto --top 3 --geometry smiles --work-dir ../selected_jobs
+```
 
-<p align="center">
-  <img src="reports/benzofuroxan_tautomers/frontier_orbitals_comparison.png" alt="FMO Comparison" width="85%"/>
-</p>
+`--dft --session ...` is an alias for `run-qm`. Preparation never runs ORCA;
+`--execute` launches it. Output directories must be new or empty. By default,
+outputs use a unique directory under `SHARK_SCRATCH` or the system temporary directory.
+Choose `--work-dir` to retain jobs outside temporary storage.
+
+The default method is `r2SCAN-3c`, geometry optimization, CPCM water and singlet spin.
+These are starting settings, not a validated protocol for every compound. Override with
+`--theory`, `--solvent` (`gas` disables CPCM), `--multiplicity`, `--single-point`,
+and `--frequencies`. `--charge` checks the charge against the input molecular structure;
+it does not change protonation. CPU and memory defaults honor `SHARK_NPROCS` and
+`SHARK_MAXCORE` (MB per process). `SHARK_ORCA` accepts an executable or installation
+directory, with `orca` on PATH as fallback. `--timeout` limits each external process.
+ORCA is installed separately and keeps its own license.
+
+Selection uses exact compound and target identities, including pocket suffixes. Use
+`--compound NAME` (repeatable) for explicit selection or `--include-controls` to include
+reference compounds. Across pockets, a ligand is prepared once; target associations
+remain in its record. Without explicit names, `--top` selects by recorded docking score;
+this is a prioritization criterion, not evidence of affinity.
+
+Geometry comes from the input SDF/MOL/MOL2 when valid 3D coordinates are available;
+otherwise RDKit ETKDGv3 generates a seeded conformer. If there is no input structure,
+recorded SMILES can supply the chemistry. Invalid inputs or disagreement with the
+recorded SMILES stop preparation. `--geometry smiles` explicitly regenerates the geometry
+from SMILES, useful for unsupported MOL2 representations. PDB/PDBQT coordinates alone
+are not used to infer chemistry. This workflow evaluates the isolated input ligand,
+not its docking pose or a protein cluster. It does not enumerate protonation states,
+tautomers or conformer ensembles.
+
+Each `job-NNN/` contains `geometry.xyz`, `calculation.inp` and `job.json`. Execution adds
+raw ORCA output, the GBW wavefunction and calculated results. Records include source and
+input hashes, parameters, seed, software versions, execution status, output hashes and
+failures. Changed inputs and already-executed jobs require fresh preparation. Raw engine
+logs may contain local runtime paths; keep calculation directories private.
+
+The offline `dossier.html` distinguishes prepared, completed, failed and interrupted jobs.
+Only normally terminated calculations with a final energy and orbital table provide
+results; optimization also requires ORCA's convergence marker. Frequencies are required
+to assess a stationary minimum. Electronic energies and orbital gaps are not binding free
+energies or evidence of biological activity.
+
+Completed runs export frontier CUBE fields using the actual final orbital indices and
+spin channels, then generate an offline `frontier_orbitals.html` viewer per job.
+`--orbital-grid` controls resolution (default 60 points per axis); a single grid does not
+establish spatial convergence. `--no-orbital-plots` retains eigenvalues without exporting
+surfaces. Export failures are recorded separately from completed DFT calculations.
+
+Existing CUBE fields can also be rendered with `shark-orbitals <calculation-directory>
+--output <report-directory> --formats html`. For static PNG/PDF exports, install
+`pip install -e '.[export]'` and Chrome/Chromium, then use `--formats html png pdf`.
+Use `--config <saved-settings.json>` to reproduce a saved view.
+
+Input syntax, parallel invocation and orbital export follow the official
+[ORCA input documentation](https://www.faccts.de/docs/orca/6.1/manual/contents/essentialelements/input.html),
+[parallel execution guide](https://www.faccts.de/docs/orca/6.1/tutorials/first_steps/parallel.html),
+and [orca_plot documentation](https://www.faccts.de/docs/orca/6.1/manual/contents/utilitiesvisualization/utilities.html).
+
+Protein-cluster QM and the GROMACS bridge remain experimental. The CLI rejects MD requests
+until that workflow is validated; it does not generate example energies or trajectory metrics.
+Private notes, calculations and reports are excluded from version control. Tests using
+private benchmark data can locate it through `SHARK_TEST_DATA` (or `TOPICS_TEST_DATA`)
+and skip when it is unavailable. The session and DFT workflow tests use synthetic inputs.
 
 ---
 
