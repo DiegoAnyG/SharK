@@ -16,7 +16,7 @@ button:disabled {opacity:.45;cursor:wait} #plot {background:white;margin-top:18p
 table {border-collapse:collapse;width:100%;font-size:13px} td,th {text-align:left;padding:9px;border-bottom:1px solid #e2e8ee}
 .muted {color:#52677d} #load {max-width:210px} #scale {width:70px}
 </style>
-<script>@@PLOTLY@@</script>
+<script>/* @@PLOTLY@@ */</script>
 </head>
 <body>
 <header><h1>@@TITLE@@</h1><p class="muted">Rotate to inspect the orbital lobes. All panels share the same spatial scale, camera and absolute isovalue.</p></header>
@@ -47,7 +47,7 @@ table {border-collapse:collapse;width:100%;font-size:13px} td,th {text-align:lef
 </main>
 <script>
 'use strict';
-const figure=@@FIGURE@@, provenance=@@METADATA@@, surfaces=@@SURFACES@@;
+const figure = /* @@FIGURE@@ */ {}, provenance = /* @@METADATA@@ */ {}, surfaces = /* @@SURFACES@@ */ [];
 const settings=structuredClone(provenance.settings), initial=structuredClone(settings);
 const originalScenes=provenance.scene_names;
 let scenes=[...originalScenes], renderedIndices=figure.data.map((_,i)=>i);

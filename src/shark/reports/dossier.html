@@ -13,8 +13,8 @@
 .context-help{position:relative;display:inline-block;margin:4px 0 12px}.help-button{min-height:28px;width:28px;height:28px;padding:0;border-radius:50%;font-weight:700;color:var(--blue)}.help-content{display:none;position:absolute;top:100%;left:0;width:min(440px,75vw);z-index:10;background:white;border:1px solid var(--line);border-radius:10px;padding:16px;box-shadow:0 8px 24px #16283f26;font-size:14px;color:var(--muted)}.context-help:hover .help-content,.context-help:focus-within .help-content,.context-help[data-open] .help-content{display:block}@media print{.help-content{display:block;position:static;width:auto;box-shadow:none}.help-button{display:none}}
 .help-bubble{display:inline-flex;align-items:center;justify-content:center;width:17px;height:17px;border-radius:50%;background:#e2e8f0;color:#334155;font-size:11px;font-weight:700;cursor:help;position:relative;vertical-align:middle;margin-left:6px;line-height:1;transition:all .15s ease;user-select:none;text-decoration:none}.help-bubble:hover,.help-bubble:focus{background:#1e40af;color:#fff;outline:none}.help-bubble[data-tooltip]::after{content:attr(data-tooltip);position:absolute;bottom:calc(100% + 8px);left:50%;transform:translateX(-50%);background:#0f172a;color:#f8fafc;padding:8px 12px;border-radius:6px;font-size:12px;font-weight:400;line-height:1.4;white-space:normal;width:max-content;max-width:320px;box-shadow:0 4px 14px rgba(0,0,0,0.18);pointer-events:none;opacity:0;visibility:hidden;transition:opacity .15s ease,visibility .15s ease;z-index:100}.help-bubble[data-tooltip]::before{content:'';position:absolute;bottom:calc(100% + 2px);left:50%;transform:translateX(-50%);border-width:6px 6px 0 6px;border-style:solid;border-color:#0f172a transparent transparent transparent;opacity:0;visibility:hidden;transition:opacity .15s ease,visibility .15s ease;z-index:100}.help-bubble:hover::after,.help-bubble:hover::before,.help-bubble:focus::after,.help-bubble:focus::before,.help-bubble.active::after,.help-bubble.active::before{opacity:1;visibility:visible}
 </style>
-<script>@@PLOTLY@@</script>
-<script>@@THREEDMOL@@</script>
+<script>/* @@PLOTLY@@ */</script>
+<script>/* @@THREEDMOL@@ */</script>
 </head>
 <body>
 <a class="skip" href="#main">Skip to report</a>
@@ -22,7 +22,7 @@
 <main id="main">
 <header class="hero"><div><span class="eyebrow">Quantum chemistry · Molecular simulation</span><h1>@@TITLE@@</h1><p>Recorded calculations, inspectable orbitals and scientific context in one portable report.</p><span class="badge">Self-contained HTML · SharK @@VERSION@@</span></div><button id="download-data">Download evidence JSON</button></header>
 <div class="metrics" aria-label="Calculation overview"><div class="metric"><small>@@CARD1_TITLE@@</small><strong>@@CARD1_MAIN@@</strong><small>@@CARD1_SUB@@</small></div><div class="metric"><small>@@CARD2_TITLE@@</small><strong>@@CARD2_MAIN@@</strong><small>@@CARD2_SUB@@</small></div><div class="metric"><small>@@CARD3_TITLE@@</small><strong>@@CARD3_MAIN@@</strong><small>@@CARD3_SUB@@</small></div><div class="metric"><small>@@CARD4_TITLE@@</small><strong>@@CARD4_MAIN@@</strong><small>@@CARD4_SUB@@</small></div></div>
-<section id="results"><div class="section-heading"><span>01 / Electronic structure</span><h2>Calculation results <span class="help-bubble" tabindex="0" data-tooltip="Ground-state DFT optimizations in water (CPCM), HOMO/LUMO eigenvalues, and relative electronic stability between tautomers.">?</span></h2></div>@@TABLE@@<div id="tautomer-structures" class="tautomer-structures"></div><div id="level-plot" role="img" aria-label="Relative electronic energies; populations not inferred"></div></section>
+<section id="results"><div class="section-heading"><span>01 / Electronic structure</span><h2>Calculation results <span class="help-bubble" tabindex="0" data-tooltip="Ground-state DFT optimizations in water (CPCM), HOMO/LUMO eigenvalues, and relative electronic stability between tautomers.">?</span></h2></div>@@TABLE@@<div id="tautomer-structures" class="tautomer-structures"></div><div class="two-column" id="results-plots" style="margin-top:20px;"><div id="energy-delta-plot" style="height:380px;background:#fff;border:1px solid var(--line);border-radius:10px;" role="img" aria-label="Relative electronic energies between tautomers"></div><div id="level-plot" style="height:380px;background:#fff;border:1px solid var(--line);border-radius:10px;" role="img" aria-label="Frontier orbital eigenvalues (HOMO and LUMO) in eV"></div></div></section>
 <section id="orbitals"><div class="section-heading"><span>02 / Spatial inspection</span><h2>Frontier orbitals <span class="help-bubble" tabindex="0" data-tooltip="3D interactive isosurfaces of HOMO (nucleophilic / electron donation) and LUMO (electrophilic / electron acceptance). Synchronized camera rotation in real time.">?</span></h2><p>Interactive 3D HOMO and LUMO frontier orbitals. Synchronized orientation and phase isosurfaces.</p></div><iframe id="orbital-frame" title="Interactive HOMO and LUMO viewer" sandbox="allow-scripts allow-downloads" referrerpolicy="no-referrer" hidden></iframe><p id="empty-orbitals" hidden>No orbital fields supplied. Energy values alone do not provide spatial orbital information.</p><div class="two-column" style="margin-top:16px;"><div class="insight" style="padding:10px 16px;"><h3 style="margin:0 0 4px;font-size:15px;display:flex;align-items:center;">HOMO · Occupied Frontier <span class="help-bubble" tabindex="0" data-tooltip="Spatial amplitude of the highest occupied molecular orbital. Guides nucleophilic / electron-donation hypotheses.">?</span></h3><small style="color:var(--muted);">Electron-donation propensity and reactive spatial localization.</small></div><div class="insight" style="padding:10px 16px;"><h3 style="margin:0 0 4px;font-size:15px;display:flex;align-items:center;">LUMO · Unoccupied Frontier <span class="help-bubble" tabindex="0" data-tooltip="Lowest unoccupied molecular orbital where nucleophilic electrons are accepted. Phase colors indicate wavefunction sign (+/-), not electric charge.">?</span></h3><small style="color:var(--muted);">Electrophilic attack locus and acceptance orbital amplitude.</small></div></div></section>
 @@DOCKING@@
 @@MD@@
@@ -34,7 +34,7 @@
 </main>
 <script>
 'use strict';
-const data=@@DATA@@;
+const data = /* @@DATA@@ */ {};
 const frame=document.getElementById('orbital-frame');
 if(data.viewers&&data.viewers.length){
  frame.hidden=false;
@@ -56,8 +56,8 @@ if(structContainer && data.tautomers && data.tautomers.length>1){
  }).join('');
 }
 
-const levelPlotEl=document.getElementById('level-plot');
-if(levelPlotEl && data.tautomers && data.tautomers.length>1){
+const deltaPlotEl=document.getElementById('energy-delta-plot');
+if(deltaPlotEl && data.tautomers && data.tautomers.length>1){
  const t=data.tautomers;
  const colors=['#087b70', '#f97316', '#3b82f6', '#8b5cf6'];
  const traceEnergy={
@@ -67,27 +67,59 @@ if(levelPlotEl && data.tautomers && data.tautomers.length>1){
   text:t.map(x=>x.delta_e_kcal===0?'0.00 kcal/mol':`+${x.delta_e_kcal.toFixed(2)} kcal/mol`),
   textposition:'outside',
   marker:{color:t.map((_,i)=>colors[i%colors.length]),line:{color:'#16283f',width:1}},
-  xaxis:'x',
-  yaxis:'y',
   name:'Relative electronic energy (ΔE)',
   hovertemplate:'%{x}<br>ΔE: %{y:.3f} kcal/mol<extra></extra>'
  };
 
- Plotly.newPlot('level-plot',[traceEnergy],{
-  title:{text:'Relative electronic energies of supplied states'},
-  margin:{l:65,r:30,t:70,b:65},yaxis:{title:{text:'ΔE / kcal mol⁻¹'}},
+ Plotly.newPlot('energy-delta-plot',[traceEnergy],{
+  title:{text:'Relative Electronic Energies (ΔE)',font:{size:14,color:'#16283f'}},
+  margin:{l:55,r:25,t:50,b:60},yaxis:{title:{text:'ΔE / kcal mol⁻¹'}},
   paper_bgcolor:'#fff',plot_bgcolor:'#fff',showlegend:false
  },{responsive:true,displayModeBar:false});
+}else if(deltaPlotEl){
+ deltaPlotEl.hidden=true;
+ const plotsGrid=document.getElementById('results-plots');
+ if(plotsGrid)plotsGrid.style.gridTemplateColumns='1fr';
+}
 
- }else if(levelPlotEl && data.levels && data.levels.length){
-  const traces=[];
-  for(const [i,item] of data.levels.entries()){
-   for(const role of ['homo','lumo'])traces.push({type:'scatter',mode:'lines+markers',x:[i-.25,i+.25],y:[item[role],item[role]],name:role.toUpperCase(),legendgroup:role,showlegend:i===0,line:{color:role==='homo'?'#1e40af':'#087b70',width:4,dash:role==='homo'?'solid':'dash'},hovertemplate:item.label+'<br>Spin '+item.spin+' · '+role.toUpperCase()+': %{y:.4f} eV<extra></extra>'});
-  }
-  Plotly.newPlot('level-plot',traces,{margin:{l:65,r:20,t:30,b:85},yaxis:{title:{text:'Orbital energy / eV'},zeroline:false},xaxis:{tickmode:'array',tickvals:data.levels.map((_,i)=>i),ticktext:data.levels.map(x=>x.label+'<br>Spin '+x.spin)},font:{family:'system-ui',color:'#16283f'},legend:{orientation:'h'},paper_bgcolor:'#fff',plot_bgcolor:'#fff'},{responsive:true,displayModeBar:false});
- }else if(levelPlotEl){
-  levelPlotEl.hidden=true;
- }
+const levelPlotEl=document.getElementById('level-plot');
+if(levelPlotEl && data.levels && data.levels.length){
+ const labels=data.levels.map(x=>x.label.replace(/\s*\/\s*job\s*\d+/i, ''));
+ const homos=data.levels.map(x=>x.homo);
+ const lumos=data.levels.map(x=>x.lumo);
+ 
+ const traceHomo={
+  type:'bar',
+  name:'HOMO',
+  x:labels,
+  y:homos,
+  text:homos.map(v=>`${v.toFixed(2)} eV`),
+  textposition:'outside',
+  marker:{color:'#1e40af',line:{color:'#0f172a',width:1}},
+  hovertemplate:'%{x}<br>HOMO: %{y:.4f} eV<extra></extra>'
+ };
+ const traceLumo={
+  type:'bar',
+  name:'LUMO',
+  x:labels,
+  y:lumos,
+  text:lumos.map(v=>`${v.toFixed(2)} eV`),
+  textposition:'outside',
+  marker:{color:'#087b70',line:{color:'#0f172a',width:1}},
+  hovertemplate:'%{x}<br>LUMO: %{y:.4f} eV<extra></extra>'
+ };
+
+ Plotly.newPlot('level-plot',[traceHomo,traceLumo],{
+  title:{text:'Frontier Orbital Eigenvalues (HOMO / LUMO)',font:{size:14,color:'#16283f'}},
+  barmode:'group',
+  margin:{l:55,r:25,t:50,b:60},
+  yaxis:{title:{text:'Orbital energy / eV'},zeroline:true,zerolinecolor:'#cbd5e1'},
+  legend:{orientation:'h',y:1.15},
+  paper_bgcolor:'#fff',plot_bgcolor:'#fff'
+ },{responsive:true,displayModeBar:false});
+}else if(levelPlotEl){
+ levelPlotEl.hidden=true;
+}
  document.getElementById('download-data').onclick=()=>{const url=URL.createObjectURL(new Blob([JSON.stringify(data.provenance,null,2)],{type:'application/json'}));const a=document.createElement('a');a.href=url;a.download='shark-evidence.json';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);};
  document.querySelectorAll('.help-bubble').forEach(el=>{
   el.addEventListener('click',e=>{e.stopPropagation();el.classList.toggle('active');});

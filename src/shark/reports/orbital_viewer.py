@@ -10,6 +10,7 @@ import html
 import importlib.metadata
 import json
 import math
+import re
 
 import numpy as np
 import plotly.graph_objects as go
@@ -353,7 +354,12 @@ def write_viewer(fig, metadata: dict, surfaces: list[dict], path: Path) -> Path:
                         PLOTLY=get_plotlyjs(), FIGURE=_safe_json(json.loads(fig.to_json())),
                         METADATA=_safe_json(metadata), SURFACES=_safe_json(surfaces))
     for key, value in replacements.items():
-        template = template.replace(f'@@{key}@@', value)
+        pattern = r'/\*\s*@@' + re.escape(key) + r'@@\s*\*/(?:\s*(?:\{\}|\[\]|null))?|@@' + re.escape(key) + r'@@'
+        template = re.sub(
+            pattern,
+            lambda _, v=value: v,
+            template
+        )
     path.write_text(template, encoding='utf-8')
     return path
 

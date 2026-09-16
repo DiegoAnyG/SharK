@@ -317,26 +317,6 @@ def generate_html_dossier(project_name: str, poses_data: list[dict], out_html: s
             '</tr></thead><tbody>' + ''.join(contact_rows) + '</tbody></table></div>'
         ) if contact_rows else '<p>No nucleophiles within pocket cutoff distance.</p>'
 
-        covalent_plots = (
-            '<div class="covalent-visuals" style="margin-top:24px;">'
-            '<h3>Interactive 3D Binding Pocket &amp; Near-Attack Geometry</h3>'
-            '<p>3D visualization of the docked ligand, surrounding pocket nucleophiles, and the reactive attack trajectory vector. Drag to rotate in 3D, scroll to zoom.</p>'
-            '<div id="covalent-3d-plot" style="height:500px;background:#fff;border:1px solid var(--line);border-radius:8px;" role="img" aria-label="3D Pocket and Near-Attack Conformation"></div>'
-            '<div class="two-column" style="margin-top:20px;">'
-            '<div>'
-            '<h3>Bruice Near-Attack Feasibility Curve</h3>'
-            '<p>Uncalibrated distance score. The sigmoid is a ranking heuristic, not a reaction probability or kinetic model.</p>'
-            '<div id="covalent-curve-plot" style="height:360px;background:#fff;border:1px solid var(--line);border-radius:8px;" role="img" aria-label="Bruice NAC Feasibility Sigmoid Curve"></div>'
-            '</div>'
-            '<div>'
-            '<h3>Conceptual DFT / Warhead Electrophilicity</h3>'
-            '<p>Frontier-energy descriptors; conventions and units are explicit below. These do not establish a reaction mechanism.</p>'
-            '<div id="fukui-bar-plot" style="height:360px;background:#fff;border:1px solid var(--line);border-radius:8px;" role="img" aria-label="CDFT Electrophilicity Profile"></div>'
-            '</div>'
-            '</div>'
-            '</div>'
-        )
-
         tot_feas = covalent_summary.get('total_feasibility', {})
         tot_feas_block = ''
         if tot_feas:
@@ -392,6 +372,34 @@ def generate_html_dossier(project_name: str, poses_data: list[dict], out_html: s
             except Exception:
                 adduct_viewer_block = ''
 
+        scatter_3d_html = (
+            '<div id="covalent-3d-plot" style="display:none;" role="img" aria-label="3D Pocket and Near-Attack Conformation"></div>'
+            if adduct_viewer_block else
+            (
+                '<h3>Interactive 3D Binding Pocket &amp; Near-Attack Geometry</h3>'
+                '<p>3D visualization of the docked ligand, surrounding pocket nucleophiles, and the reactive attack trajectory vector. Drag to rotate in 3D, scroll to zoom.</p>'
+                '<div id="covalent-3d-plot" style="height:500px;background:#fff;border:1px solid var(--line);border-radius:8px;" role="img" aria-label="3D Pocket and Near-Attack Conformation"></div>'
+            )
+        )
+
+        covalent_plots = (
+            '<div class="covalent-visuals" style="margin-top:20px;">'
+            + scatter_3d_html
+            + '<div class="two-column" style="margin-top:16px;">'
+            '<div>'
+            '<h3>Bruice Near-Attack Feasibility Curve</h3>'
+            '<p>Uncalibrated distance score. The sigmoid is a ranking heuristic, not a reaction probability or kinetic model.</p>'
+            '<div id="covalent-curve-plot" style="height:360px;background:#fff;border:1px solid var(--line);border-radius:8px;" role="img" aria-label="Bruice NAC Feasibility Sigmoid Curve"></div>'
+            '</div>'
+            '<div>'
+            '<h3>Conceptual DFT / Warhead Electrophilicity</h3>'
+            '<p>Frontier-energy descriptors; conventions and units are explicit below. These do not establish a reaction mechanism.</p>'
+            '<div id="fukui-bar-plot" style="height:360px;background:#fff;border:1px solid var(--line);border-radius:8px;" role="img" aria-label="CDFT Electrophilicity Profile"></div>'
+            '</div>'
+            '</div>'
+            '</div>'
+        )
+
         covalent_html = (
             '<section id="covalent">'
             '<div class="section-heading"><span>03 / Covalent Feasibility</span><h2>Covalent Near-Attack Conformations (NAC) <span class="help-bubble" tabindex="0" data-tooltip="Pre-reactive near-attack conformation, Bürgi-Dunitz trajectory, and Eyring chemical kinetics governing covalent bond formation.">?</span></h2></div>'
@@ -401,8 +409,8 @@ def generate_html_dossier(project_name: str, poses_data: list[dict], out_html: s
             + ts_block
             + adduct_viewer_block
             + cdft_block
-            + contact_table
             + covalent_plots
+            + contact_table
             + '</section>'
         )
     # Legacy callers may still provide an explicit mesh rather than orbital exports.
@@ -497,7 +505,11 @@ def generate_html_dossier(project_name: str, poses_data: list[dict], out_html: s
                         PLOTLY=get_plotlyjs(),
                         THREEDMOL=_get_3dmol_js())
     template = Path(__file__).with_name('dossier.html').read_text(encoding='utf-8')
-    content = re.sub(r'@@([A-Z0-9_]+)@@', lambda m: replacements.get(m[1], ''), template)
+    content = re.sub(
+        r'/\*\s*@@([A-Z0-9_]+)@@\s*\*/(?:\s*(?:\{\}|\[\]|null))?|@@([A-Z0-9_]+)@@',
+        lambda m: replacements.get(m[1] or m[2], ''),
+        template
+    )
     def contextual_help(match):
         attrs, body = match.group(1), match.group(2)
         if 'notice' in attrs or 'empty-orbitals' in attrs:
