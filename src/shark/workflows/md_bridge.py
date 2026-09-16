@@ -15,9 +15,12 @@ import subprocess
 from typing import Optional
 
 
-def find_gromacs_pipeline() -> Optional[Path]:
+def find_gromacs_pipeline(custom_dir: Optional[str | Path] = None) -> Optional[Path]:
     """Locates the GROMACS pipeline root directory dynamically."""
-    env_dir = os.environ.get("GROMACS_PIPELINE_DIR")
+    if custom_dir and Path(custom_dir).is_dir():
+        return Path(custom_dir).resolve()
+
+    env_dir = os.environ.get("SHARK_GROMACS_PIPELINE") or os.environ.get("GROMACS_PIPELINE_DIR")
     if env_dir and Path(env_dir).is_dir():
         return Path(env_dir).resolve()
 
@@ -52,20 +55,23 @@ def setup_and_launch_md(
     ligand_name: str = "LIG",
     sim_time_ns: float = 10.0,
     enable_metal_restraint: bool = True,
-    run_now: bool = False
+    run_now: bool = False,
+    pipeline_dir: Optional[str | Path] = None,
+    work_dir: Optional[str | Path] = None
 ) -> MDRunResult:
     """Sets up a GROMACS MD run directory and optionally executes the pipeline."""
-    pipeline_root = find_gromacs_pipeline()
+    pipeline_root = find_gromacs_pipeline(pipeline_dir)
     if pipeline_root is None:
         raise FileNotFoundError(
-            "GROMACS pipeline not found. Set GROMACS_PIPELINE_DIR environment variable."
+            "GROMACS pipeline not found. Set SHARK_GROMACS_PIPELINE or GROMACS_PIPELINE_DIR environment variable."
         )
 
     rec_p = Path(receptor_pdb).resolve()
     lig_p = Path(ligand_pose_file).resolve()
 
     run_id = f"run_{ligand_name}_{int(sim_time_ns)}ns"
-    run_dir = pipeline_root / "runs" / run_id
+    base_run_dir = Path(work_dir).resolve() if work_dir else (pipeline_root / "runs")
+    run_dir = base_run_dir / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
     prep_dir = run_dir / "00_prep"
     prep_dir.mkdir(exist_ok=True)
@@ -123,3 +129,34 @@ RESTRAINT_FE_N={"true" if enable_metal_restraint else "false"}
         status=status,
         dashboard_path=dash_path if dash_path.is_file() else None
     )
+
+
+def run_md_from_session(
+    session: object,
+    ligand_id: str,
+    pose_idx: int = 1,
+    sim_time_ns: float = 10.0,
+    enable_metal_restraint: bool = True,
+    run_now: bool = False,
+    pipeline_dir: Optional[str | Path] = None,
+    work_dir: Optional[str | Path] = None
+) -> MDRunResult:
+    """Extracts raw receptor and pose from PoliScreen session and prepares/launches MD."""
+    pose = session.get_pose(ligand_id, pose_idx=pose_idx)
+    if pose is None:
+        raise ValueError(f"Pose not found in session: ligand={ligand_id}, pose_idx={pose_idx}")
+
+    # Retrieve the raw receptor PDB required for pdb2gmx
+    raw_receptor_pdb = session.receptor_for(pose.receptor_id, raw=True)
+
+    return setup_and_launch_md(
+        receptor_pdb=raw_receptor_pdb,
+        ligand_pose_file=pose.pose_file,
+        ligand_name=ligand_id,
+        sim_time_ns=sim_time_ns,
+        enable_metal_restraint=enable_metal_restraint,
+        run_now=run_now,
+        pipeline_dir=pipeline_dir,
+        work_dir=work_dir
+    )
+

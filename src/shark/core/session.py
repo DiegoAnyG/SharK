@@ -64,12 +64,34 @@ class PoliScreenSession:
             raise ValueError("Ambiguous pose; specify receptor_id including its pocket identifier")
         return matches[0] if matches else None
 
-    def receptor_for(self, receptor_id: str) -> Path:
-        # PoliScreen uses '~PkN' to score several pockets on one prepared receptor.
+    def receptor_for(self, receptor_id: str, raw: bool = False) -> Path:
+        """Return receptor PDB path for a given receptor ID or target.
+        
+        If raw=True, seeks the original/raw unprocessed receptor structure
+        (e.g., stripping '_ready' or '~PkN' suffixes like '8HTB_ready~Pk1' -> '8HTB'),
+        which is required for classical force-field parameterization (pdb2gmx in MD).
+        """
         stem = receptor_id.split("~", 1)[0]
-        if stem not in self.receptors:
-            raise ValueError(f"No prepared receptor for target {receptor_id}")
-        return self.receptors[stem]
+        if raw:
+            raw_stem = re.sub(r"_(?:ready|prep|docking|prepared)$", "", stem, flags=re.IGNORECASE)
+            if raw_stem in self.receptors:
+                return self.receptors[raw_stem]
+            for r_name, r_path in self.receptors.items():
+                if r_name.casefold() == raw_stem.casefold():
+                    return r_path
+            for folder in ("receptors", "receptores", ""):
+                cand = self.extract_dir / folder / f"{raw_stem}.pdb"
+                if cand.is_file():
+                    return cand
+
+        if stem in self.receptors:
+            return self.receptors[stem]
+
+        for r_name, r_path in self.receptors.items():
+            if r_name.casefold() == stem.casefold():
+                return r_path
+
+        raise ValueError(f"No prepared receptor for target {receptor_id}")
 
 
 def _table(root: Path, *names: str) -> pd.DataFrame | None:

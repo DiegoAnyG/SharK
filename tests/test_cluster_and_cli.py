@@ -70,3 +70,44 @@ def test_html_dossier_generation(tmp_path):
     assert "SharK Quantum & MD Dossier" in text
     assert "VOR" in text
     assert "-39.14 kcal/mol" in text
+
+
+def test_cli_covalent_and_run_md(tmp_path):
+    archive = tmp_path / "test_session.poliscreen"
+    with zipfile.ZipFile(archive, "w") as z:
+        z.writestr("manifest.json", json.dumps({"format": 1, "full": True, "project": "CliTest"}))
+        z.writestr("receptors/8HTB.pdb", "ATOM      1  N   CYS A 145      10.000  10.000  10.000  1.00 20.00           N\nATOM      2  SG  CYS A 145      10.000  12.000  10.000  1.00 20.00           S\nEND\n")
+        z.writestr("receptors/8HTB_ready.pdb", "ATOM      1  N   CYS A 145      10.000  10.000  10.000  1.00 20.00           N\nATOM      2  SG  CYS A 145      10.000  12.000  10.000  1.00 20.00           S\nEND\n")
+        z.writestr("poses/docking_8HTB_ready~Pk1_compounds_a_LIG1-model1.pdb", "ATOM      1  C1  LIG A   1      10.000  14.500  10.000  1.00 20.00           C\nEND\n")
+        z.writestr("docking_results.csv", "receptor,pose_name,compound_name,docking_score,engine\n8HTB_ready~Pk1,docking_8HTB_ready~Pk1_compounds_a_LIG1-model1,LIG1,-9.2,vina\n")
+
+    # 1. Test --covalent flag generating HTML report with NAC data
+    out_html = tmp_path / "covalent_out.html"
+    code = cli_main(["--session", str(archive), "--covalent", "--html", str(out_html)])
+    assert code == 0
+    assert out_html.is_file()
+    html_text = out_html.read_text(encoding="utf-8")
+    assert "Covalent Near-Attack Conformations (NAC)" in html_text
+    assert "CYS145:A" in html_text
+
+    # 2. Test --run-md flag preparing simulation
+    mock_pipeline = tmp_path / "mock_pipe"
+    (mock_pipeline / "scripts").mkdir(parents=True)
+    (mock_pipeline / "inputs").mkdir(parents=True)
+    (mock_pipeline / "mdp_templates").mkdir(parents=True)
+    (mock_pipeline / "runs").mkdir(parents=True)
+    (mock_pipeline / "scripts" / "02_prepare_receptor.py").write_text("# mock", encoding="utf-8")
+    (mock_pipeline / "scripts" / "run_pipeline.sh").write_text("#!/bin/bash\nexit 0\n", encoding="utf-8")
+
+    md_code = cli_main([
+        "--session", str(archive),
+        "--run-md",
+        "--pipeline-dir", str(mock_pipeline),
+        "--time-ns", "5.0"
+    ])
+    assert md_code == 0
+    prepared_run = mock_pipeline / "runs" / "run_LIG1_5ns"
+    assert prepared_run.is_dir()
+    assert (prepared_run / "00_prep" / "receptor_raw.pdb").is_file()
+    assert (prepared_run / "config.env").is_file()
+

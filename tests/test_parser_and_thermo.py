@@ -65,6 +65,18 @@ class TestSharKCore(unittest.TestCase):
         idx_1700 = int(np.where(wn == 1700.0)[0][0])
         self.assertGreater(absorp[idx_1700], 10.0)
 
+    def test_parse_population_analysis(self):
+        res = parse_orca_results(self.dft_dir / "tautomer_1_oxide", name="tautomer_1")
+        self.assertEqual(len(res.loewdin_charges), 17)
+        self.assertEqual(len(res.mulliken_charges), 17)
+        self.assertEqual(len(res.atomic_numbers), 17)
+        self.assertEqual(len(res.atomic_symbols), 17)
+        self.assertEqual(len(res.coordinates_angstrom), 17)
+        self.assertEqual(res.atomic_symbols[0], "O")
+        self.assertEqual(res.atomic_symbols[1], "C")
+        self.assertAlmostEqual(res.loewdin_charges[0], -0.20976, places=3)
+        self.assertAlmostEqual(res.mulliken_charges[0], -0.24615, places=3)
+
 
 if __name__ == "__main__":
     unittest.main()

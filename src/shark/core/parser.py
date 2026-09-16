@@ -27,6 +27,11 @@ class CalculationResult:
     homo_energy: Optional[float] = None # eV
     lumo_energy: Optional[float] = None # eV
     homo_lumo_gap: Optional[float] = None # eV
+    loewdin_charges: List[float] = field(default_factory=list)
+    mulliken_charges: List[float] = field(default_factory=list)
+    atomic_numbers: List[int] = field(default_factory=list)
+    atomic_symbols: List[str] = field(default_factory=list)
+    coordinates_angstrom: List[Tuple[float, float, float]] = field(default_factory=list)
 
     @property
     def is_stationary_minimum(self) -> bool:
@@ -92,6 +97,71 @@ def _parse_property_file(prop_path: Path, result: CalculationResult) -> None:
             if freqs:
                 result.frequencies = freqs
                 result.imaginary_frequencies = [f for f in freqs if f < -1e-3]
+
+    # Geometry & Coordinates
+    geom_m = re.search(r"\$Geometry\s+(.*?)\$End", content, re.DOTALL)
+    if geom_m:
+        coords_match = re.search(r"&CartesianCoordinates.*?\[.*?Units\s+\"([^\"]+)\"\s*\]\s+(.*?)(?=&|\Z)", geom_m.group(1), re.DOTALL)
+        if coords_match:
+            unit = coords_match.group(1).strip().lower()
+            scale = 0.529177210903 if "bohr" in unit else 1.0
+            symbols = []
+            coords = []
+            for line in coords_match.group(2).strip().splitlines():
+                parts = line.strip().split()
+                if len(parts) >= 4 and parts[0].isalpha():
+                    symbols.append(parts[0])
+                    try:
+                        coords.append((float(parts[1]) * scale, float(parts[2]) * scale, float(parts[3]) * scale))
+                    except ValueError:
+                        pass
+            if symbols:
+                result.atomic_symbols = symbols
+                result.coordinates_angstrom = coords
+
+    # Loewdin Population Analysis
+    loewdin_m = re.search(r"\$SCF_Loewdin_Population_Analysis\s+(.*?)\$End", content, re.DOTALL)
+    if loewdin_m:
+        block = loewdin_m.group(1)
+        atno_m = re.search(r"&ATNO\s+\[.*?\]\s*(.*?)(?=&|\$End)", block, re.DOTALL)
+        if atno_m:
+            atnos = []
+            for line in atno_m.group(1).strip().splitlines():
+                parts = line.strip().split()
+                if len(parts) >= 2 and parts[0].isdigit() and parts[1].isdigit():
+                    atnos.append(int(parts[1]))
+            if atnos:
+                result.atomic_numbers = atnos
+
+        chg_m = re.search(r"&AtomicCharges\s+\[.*?\]\s*(.*?)(?=&|\$End)", block, re.DOTALL)
+        if chg_m:
+            charges = []
+            for line in chg_m.group(1).strip().splitlines():
+                parts = line.strip().split()
+                if len(parts) >= 2 and parts[0].isdigit():
+                    try:
+                        charges.append(float(parts[1]))
+                    except ValueError:
+                        pass
+            if charges:
+                result.loewdin_charges = charges
+
+    # Mulliken Population Analysis
+    mulliken_m = re.search(r"\$SCF_Mulliken_Population_Analysis\s+(.*?)\$End", content, re.DOTALL)
+    if mulliken_m:
+        block = mulliken_m.group(1)
+        chg_m = re.search(r"&AtomicCharges\s+\[.*?\]\s*(.*?)(?=&|\$End)", block, re.DOTALL)
+        if chg_m:
+            charges = []
+            for line in chg_m.group(1).strip().splitlines():
+                parts = line.strip().split()
+                if len(parts) >= 2 and parts[0].isdigit():
+                    try:
+                        charges.append(float(parts[1]))
+                    except ValueError:
+                        pass
+            if charges:
+                result.mulliken_charges = charges
 
 
 def _parse_out_file(out_path: Path, result: CalculationResult) -> None:
@@ -166,6 +236,29 @@ def _parse_out_file(out_path: Path, result: CalculationResult) -> None:
         if homo_ev is not None and lumo_ev is not None:
             result.homo_lumo_gap = lumo_ev - homo_ev
 
+    # Fallback atomic charges from .out if not found in property file
+    if not result.mulliken_charges:
+        mull_m = re.search(r"MULLIKEN ATOMIC CHARGES\s+-+\s+(.*?)(?=\n\n|\n[A-Z]|\Z)", content, re.DOTALL)
+        if mull_m:
+            m_charges = []
+            for line in mull_m.group(1).strip().splitlines():
+                m = re.match(r"^\s*(\d+)\s+([A-Za-z]+)\s*:\s*([-\d.eE+]+)", line)
+                if m:
+                    m_charges.append(float(m.group(3)))
+            if m_charges:
+                result.mulliken_charges = m_charges
+
+    if not result.loewdin_charges:
+        loew_m = re.search(r"LOEWDIN ATOMIC CHARGES\s+-+\s+(.*?)(?=\n\n|\n[A-Z]|\Z)", content, re.DOTALL)
+        if loew_m:
+            l_charges = []
+            for line in loew_m.group(1).strip().splitlines():
+                m = re.match(r"^\s*(\d+)\s+([A-Za-z]+)\s*:\s*([-\d.eE+]+)", line)
+                if m:
+                    l_charges.append(float(m.group(3)))
+            if l_charges:
+                result.loewdin_charges = l_charges
+
 
 def parse_orca_results(base_path: str | Path, name: Optional[str] = None) -> CalculationResult:
     """
@@ -209,5 +302,9 @@ def parse_orca_output(base_path: str | Path) -> dict:
         "homo_ev": res.homo_energy,
         "lumo_ev": res.lumo_energy,
         "gap_ev": res.homo_lumo_gap,
-        "converged": res.converged
+        "converged": res.converged,
+        "loewdin_charges": res.loewdin_charges,
+        "mulliken_charges": res.mulliken_charges,
+        "atomic_symbols": res.atomic_symbols,
+        "atomic_numbers": res.atomic_numbers,
     }

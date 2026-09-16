@@ -27,8 +27,11 @@ SharK bridges high-throughput virtual screening (such as [**PoliScreen**](https:
 
 ## Key Features
 
-- **Robust ORCA 6 Parser**: Instant extraction of electronic energies ($E_{el}$), thermochemical corrections ($ZPE$, $H$, $G$, $S$), dipole moments, and vibrational modes from `.property.txt` and `.out` files.
+- **Robust ORCA 6 Parser**: Instant extraction of electronic energies ($E_{el}$), thermochemical corrections ($ZPE$, $H$, $G$, $S$), dipole moments, Loewdin/Mulliken atomic charges, and vibrational modes from `.property.txt` and `.out` files.
 - **Boltzmann Thermodynamics**: Calculates relative free energies ($\Delta G, \Delta H, \Delta E$) and equilibrium Boltzmann population distributions ($P_i$) at specified temperatures.
+- **Conceptual DFT & Warhead Reactivity**: Calculates chemical hardness ($\eta$), chemical potential ($\mu$), global electrophilicity index ($\omega$), chemical softness ($S$), and condensed Fukui functions ($f_k^+, \omega_k$) to automatically rank electrophilic warhead centers.
+- **Covalent Near-Attack Conformation (NAC) Matching**: Autonomous 3D spatial scanning of catalytic pocket nucleophiles (Cys, Ser, Thr, Lys, His, Tyr) against ligand warheads ($d \le 3.5\text{ \AA}$) to assess covalent reaction feasibility without prior manual residue specification.
+- **GROMACS MD Pipeline Bridge**: Automated orchestration of nanosecond classical molecular dynamics from PoliScreen screening sessions, strictly selecting raw receptor structures for accurate force-field topology generation (`pdb2gmx`).
 - **FTIR Transmittance Simulator**: Convolutes harmonic transitions with Lorentzian line-shapes into standardized FTIR transmittance spectra ($\%T$, 100% baseline, downward absorption dips) with shaded functional-group zones.
 - **Frontier Molecular Orbitals (FMO)**: Signed 3D HOMO/LUMO surfaces from ORCA CUBE fields, with offline interaction, source hashes and configurable exports.
 - **Offline Reporting**: One-command generation of 300-DPI publication figures, GitHub-flavored Markdown summaries, and interactive standalone HTML dossiers.
@@ -147,8 +150,10 @@ Input syntax, parallel invocation and orbital export follow the official
 [parallel execution guide](https://www.faccts.de/docs/orca/6.1/tutorials/first_steps/parallel.html),
 and [orca_plot documentation](https://www.faccts.de/docs/orca/6.1/manual/contents/utilitiesvisualization/utilities.html).
 
-Protein-cluster QM and the GROMACS bridge remain experimental. The CLI rejects MD requests
-until that workflow is validated; it does not generate example energies or trajectory metrics.
+The GROMACS MD bridge is configured via `SHARK_GROMACS_PIPELINE` or `--pipeline-dir`.
+The orchestrator extracts raw receptor PDB files from PoliScreen sessions to ensure clean
+`pdb2gmx` topology builds, prepares simulation directories, and launches production runs.
+Covalent Near-Attack Conformations can be evaluated via `--covalent` across poses or MD trajectory frames.
 Private notes, calculations and reports are excluded from version control. Tests using
 private benchmark data can locate it through `SHARK_TEST_DATA` (or `TOPICS_TEST_DATA`)
 and skip when it is unavailable. The session and DFT workflow tests use synthetic inputs.

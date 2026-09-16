@@ -20,6 +20,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+md = ["MDAnalysis>=2.10"]
 export = ["kaleido>=1.0"]
 dev = [
     "pytest>=7.0",
@@ -30,7 +31,7 @@ shark = "shark.cli:main"
 shark-orbitals = "shark.reports.orbital_viewer:main"
 
 [tool.setuptools.package-data]
-"shark.reports" = ["orbital_viewer.html"]
+"shark.reports" = ["orbital_viewer.html", "dossier.html"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
