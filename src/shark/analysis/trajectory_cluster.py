@@ -139,7 +139,6 @@ def cluster_trajectory(
     # Target residue atoms for P_NAC assessment if requested
     target_atoms = None
     if target_residue:
-        # e.g., 'THR309' -> resname THR and resid 309
         import re
         m = re.match(r"([A-Za-z]+)?(\d+)", target_residue)
         if m:
@@ -148,6 +147,21 @@ def cluster_trajectory(
             if rname:
                 q += f" and resname {rname.upper()}"
             target_atoms = universe.select_atoms(q)
+    else:
+        # Automatically detect the nearest pocket nucleophile residue to the ligand
+        try:
+            from MDAnalysis.lib.distances import distance_array
+            nucl_cand = universe.select_atoms(
+                "protein and (resname CYS or resname SER or resname THR or resname LYS or resname HIS or resname TYR) and around 4.5 group lig",
+                lig=ligand_atoms
+            )
+            if len(nucl_cand) > 0:
+                d_cand = distance_array(nucl_cand.positions, ligand_atoms.positions)
+                closest_idx = int(np.argmin(np.min(d_cand, axis=1)))
+                best_res = nucl_cand[closest_idx].residue
+                target_atoms = best_res.atoms
+        except Exception:
+            target_atoms = None
 
     # Convert start/stop ns to ps
     start_ps = start_ns * 1000.0

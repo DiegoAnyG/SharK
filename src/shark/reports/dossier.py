@@ -12,6 +12,48 @@ from urllib.parse import urlsplit
 from plotly.offline import get_plotlyjs
 from .. import __version__
 
+KNOWN_SMILES = {
+    "tautomer_1_oxide": "O=C(O)c1ccc2c(c1)no[n+]2[O-]",
+    "tautomer_3_oxide": "O=C(O)c1ccc2no[n+]([O-])c2c1",
+    "tautomer 1 oxide": "O=C(O)c1ccc2c(c1)no[n+]2[O-]",
+    "tautomer 3 oxide": "O=C(O)c1ccc2no[n+]([O-])c2c1",
+    "benzofuroxan": "c1ccc2no[n+]([O-])c2c1",
+}
+
+
+def _generate_molecule_svg(job: dict, ligand_label: str, width: int = 160, height: int = 100) -> str:
+    """Generates a clean 2D chemical structure SVG using RDKit."""
+    try:
+        from rdkit import Chem
+        from rdkit.Chem.Draw import rdMolDraw2D
+        smiles = job.get('selection', {}).get('smiles')
+        if not smiles:
+            norm_key = ligand_label.lower().replace('-', '_').replace(' ', '_')
+            for k, s in KNOWN_SMILES.items():
+                if k in norm_key:
+                    smiles = s
+                    break
+        mol = Chem.MolFromSmiles(smiles) if smiles else None
+        if mol is None:
+            xyz_text = job.get('results', {}).get('optimized_xyz')
+            if xyz_text:
+                mol = Chem.MolFromXYZBlock(xyz_text)
+                if mol:
+                    from rdkit.Chem import rdDetermineBonds
+                    rdDetermineBonds.DetermineConnectivity(mol, useVdw=True)
+        if mol is None:
+            return ""
+        drawer = rdMolDraw2D.MolDraw2DSVG(width, height)
+        opts = drawer.drawOptions()
+        opts.clearBackground = False
+        opts.bondLineWidth = 2
+        opts.padding = 0.08
+        drawer.DrawMolecule(mol)
+        drawer.FinishDrawing()
+        return drawer.GetDrawingText()
+    except Exception:
+        return ""
+
 
 def _number(value, digits=4):
     return f'{value:.{digits}f}' if isinstance(value, (float, int)) and math.isfinite(value) else 'N/A'
@@ -41,7 +83,7 @@ def _embedded_viewer(job, report_dir):
     document, count = re.subn(r'<head\b[^>]*>', lambda m: m[0] + guard, document, count=1, flags=re.I)
     if not count:
         raise ValueError('Orbital viewer must be a complete HTML document')
-    responsive = """<style>html,body{max-width:100%;overflow-x:hidden}header,main{padding:16px}h1{font-size:22px}#plot{width:100%}</style>
+    responsive = """<style>html,body{max-width:100%;overflow-x:hidden}header{display:none!important}main{padding:12px 16px 16px}#plot{width:100%}</style>
 <script>
 (()=>{let original=null,timer;async function fit(){
  const plot=document.getElementById('plot');if(!window.sharkReady||!plot){timer=setTimeout(fit,100);return;}
@@ -133,6 +175,7 @@ def generate_html_dossier(project_name: str, poses_data: list[dict], out_html: s
             h = orb.get('homo', {}).get('energy_eV')
             l = orb.get('lumo', {}).get('energy_eV')
             g = orb.get('gap_ev')
+            svg_data = _generate_molecule_svg(job, ligand)
             tautomers_data.append({
                 'label': ligand,
                 'energy_eh': eh,
@@ -141,7 +184,8 @@ def generate_html_dossier(project_name: str, poses_data: list[dict], out_html: s
                 'homo_ev': h,
                 'lumo_ev': l,
                 'gap_ev': g if g is not None else ((l - h) if (h is not None and l is not None) else None),
-                'minimum': res.get('stationary_minimum_verified', False)
+                'minimum': res.get('stationary_minimum_verified', False),
+                'svg': svg_data
             })
 
         tautomers_data.sort(key=lambda x: x['delta_e_kcal'])
@@ -296,19 +340,25 @@ def generate_html_dossier(project_name: str, poses_data: list[dict], out_html: s
     public_jobs = [{k:v for k,v in job.items() if k != 'viewer_link'} for job in jobs]
     provenance = dict(schema_version=1, shark_version=__version__, project=str(project_name), jobs=public_jobs,
                       docking=poses_data, molecular_dynamics=md_summary, covalent=covalent_summary, notes=notes)
-    # Card 2: Covalent Feasibility & Attack Distance
-    card2_title = "Covalent Feasibility"
+    # Card 2: Geometric Feasibility & Attack Distance
+    card2_title = "Geometric Feasibility"
     card2_main = "Not Evaluated"
     card2_sub = "Requires reaction mechanism"
     if covalent_summary:
         contacts = covalent_summary.get('contacts', [])
-        best = contacts[0] if contacts else None
+        nac_items = [c for c in contacts if c.get('is_nac')]
+        if nac_items:
+            best = max(nac_items, key=lambda c: (c.get('feasibility_score') or 0, -(c.get('distance_angstrom') or 99)))
+        elif contacts:
+            best = min(contacts, key=lambda c: c.get('distance_angstrom') or 999)
+        else:
+            best = None
         if best:
-            cfi = best.get('composite_feasibility')
             geom_feas = best.get('feasibility_score')
+            cfi = best.get('composite_feasibility')
             dist = best.get('distance_angstrom')
             target_res = best.get('residue', 'Pocket')
-            score = cfi if (cfi is not None and cfi > 0) else geom_feas
+            score = geom_feas if (geom_feas is not None and geom_feas > 0) else cfi
             card2_main = f"{score:.2f}" if score is not None else "NAC"
             tag = "NAC Observed (≤ 3.5 Å)" if best.get('is_nac') else "Proximal (> 3.5 Å)"
             card2_sub = f"d = {dist:.2f} Å · {target_res} · {tag}" if dist is not None else f"{target_res} · {tag}"

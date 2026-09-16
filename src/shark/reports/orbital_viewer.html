@@ -22,6 +22,7 @@ table {border-collapse:collapse;width:100%;font-size:13px} td,th {text-align:lef
 <header><h1>@@TITLE@@</h1><p class="muted">Rotate to inspect the orbital lobes. All panels share the same spatial scale, camera and absolute isovalue.</p></header>
 <main>
 <div class="controls">
+<label id="group-filter-label" style="display:none">Tautomer / State<select id="group-filter"></select></label>
 <label>Isovalue |psi| (bohr^-3/2)<select id="iso"></select></label>
 <label>Surface opacity<input id="opacity" type="range" min="0.05" max="1" step="0.05"></label>
 <label>View<select id="view"><option value="initial">Initial view</option><option value="top">Top</option><option value="side">Side</option></select></label>
@@ -46,7 +47,10 @@ const figure=@@FIGURE@@, provenance=@@METADATA@@, surfaces=@@SURFACES@@;
 const settings=structuredClone(provenance.settings), initial=structuredClone(settings);
 const scenes=provenance.scene_names, plot=document.getElementById('plot');
 const status=document.getElementById('status'), iso=document.getElementById('iso');
-let syncing=false;
+const groupFilter=document.getElementById('group-filter'), groupFilterLabel=document.getElementById('group-filter-label');
+let syncing=false, isDragging=false, rafSyncId=null, lastCamEyeA=null, lastCamEyeB=null;
+let initialLayoutDomains={}, initialAnnotations=[], calcGroups=[], activePair=[scenes[0], scenes[1] || scenes[0]];
+
 const amplitudeText=()=>`Isosurface: +/- ${settings.isovalue} bohr^(-3/2) | Phase colors do not indicate charge`;
 function setStatus(message){status.textContent=message;}
 function download(name,data,type='application/json'){
@@ -59,6 +63,158 @@ for(const field of provenance.orbitals){const tr=document.createElement('tr');
   const td=document.createElement('td');td.textContent=text;tr.append(td);
  }document.getElementById('sources').append(tr);
 }
+
+// Group orbitals by calculation / tautomer label
+const calcMap=new Map();
+for(let i=0;i<provenance.orbitals.length;i++){
+ const orb=provenance.orbitals[i];
+ const key=orb.label||`Calculation ${i+1}`;
+ if(!calcMap.has(key)){
+  const grp={label:key,indices:[]};
+  calcMap.set(key,grp);
+  calcGroups.push(grp);
+ }
+ calcMap.get(key).indices.push(i);
+}
+
+if(calcGroups.length>1){
+ groupFilterLabel.style.display='inline-flex';
+ calcGroups.forEach((grp,idx)=>{
+  const opt=document.createElement('option');
+  opt.value=String(idx);
+  opt.textContent=`${grp.label} (HOMO & LUMO)`;
+  groupFilter.append(opt);
+ });
+ const allOpt=document.createElement('option');
+ allOpt.value='all';
+ allOpt.textContent='All ('+calcGroups.length+' calculations, full grid)';
+ groupFilter.append(allOpt);
+
+ // Default to dominant or 3-oxide if available
+ let defaultIdx=0;
+ calcGroups.forEach((grp,idx)=>{
+  const l=grp.label.toLowerCase();
+  if(l.includes('3-oxide')||l.includes('3_oxide')||l.includes('dominant'))defaultIdx=idx;
+ });
+ groupFilter.value=String(defaultIdx);
+}
+
+function getActivePairScenes(){
+ return (activePair&&activePair.length>=2)?activePair:[scenes[0],scenes[1]||scenes[0]];
+}
+
+async function applyGroupSelection(val){
+ if(!plot||!plot.data)return;
+ const updateLayout={};
+ const visibleTraces=[];
+ if(val==='all'){
+  activePair=[scenes[0],scenes[1]||scenes[0]];
+  for(let p=0;p<provenance.orbitals.length;p++){
+   const sc=scenes[p];
+   updateLayout[`${sc}.domain`]=structuredClone(initialLayoutDomains[sc]||{x:[0,1],y:[0,1]});
+  }
+  for(let t=0;t<figure.data.length;t++)visibleTraces.push(true);
+  updateLayout.annotations=structuredClone(initialAnnotations);
+  updateLayout.height=initial.height||figure.layout.height||960;
+ }else{
+  const g=Number(val);
+  const grp=calcGroups[g]||calcGroups[0];
+  const activeIndices=grp.indices;
+  activePair=activeIndices.map(idx=>scenes[idx]);
+  for(let p=0;p<provenance.orbitals.length;p++){
+   const sc=scenes[p];
+   if(activeIndices.includes(p)){
+    const col=activeIndices.indexOf(p);
+    updateLayout[`${sc}.domain`]=col===0?{x:[0.0,0.485],y:[0.05,0.95]}:{x:[0.515,1.0],y:[0.05,0.95]};
+   }else{
+    updateLayout[`${sc}.domain`]={x:[0.0,0.0],y:[0.0,0.0]};
+   }
+  }
+  for(let t=0;t<figure.data.length;t++){
+   const tr=figure.data[t];
+   const scName=tr.scene||'scene';
+   visibleTraces.push(activePair.includes(scName));
+  }
+  const newAnns=structuredClone(initialAnnotations);
+  newAnns.forEach((ann,idx)=>{
+   if(idx<provenance.orbitals.length){
+    if(activeIndices.includes(idx)){
+     const col=activeIndices.indexOf(idx);
+     ann.x=col===0?0.24:0.76;
+     ann.y=1.02;
+     ann.visible=true;
+    }else{
+     ann.visible=false;
+    }
+   }
+  });
+  updateLayout.annotations=newAnns;
+  updateLayout.height=540;
+ }
+ await Plotly.restyle(plot,{visible:visibleTraces});
+ await Plotly.relayout(plot,updateLayout);
+ if(parent&&parent.postMessage){
+  parent.postMessage({type:'shark-viewer-size',height:Math.ceil(document.body.getBoundingClientRect().height)},'*');
+ }
+}
+
+groupFilter.addEventListener('change',()=>applyGroupSelection(groupFilter.value));
+
+function tickCameraSync(){
+ if(!isDragging)return;
+ const pair=getActivePairScenes();
+ if(pair&&pair.length>=2){
+  const sA=plot._fullLayout?.[pair[0]]?._scene;
+  const sB=plot._fullLayout?.[pair[1]]?._scene;
+  if(sA&&sB&&sA.getCamera&&sB.getCamera){
+   const camA=sA.getCamera();
+   const camB=sB.getCamera();
+   if(camA&&camA.eye&&camB&&camB.eye){
+    if(!lastCamEyeA){
+     lastCamEyeA={...camA.eye};
+     lastCamEyeB={...camB.eye};
+    }
+    const dA=Math.abs(camA.eye.x-lastCamEyeA.x)+Math.abs(camA.eye.y-lastCamEyeA.y)+Math.abs(camA.eye.z-lastCamEyeA.z);
+    const dB=Math.abs(camB.eye.x-lastCamEyeB.x)+Math.abs(camB.eye.y-lastCamEyeB.y)+Math.abs(camB.eye.z-lastCamEyeB.z);
+    if(dA>0.0005){
+     lastCamEyeA={...camA.eye};
+     lastCamEyeB={...camA.eye};
+     sB.setViewport({camera:camA,aspectratio:sB.glplot.getAspectratio()});
+     sB.glplot.redraw();
+    }else if(dB>0.0005){
+     lastCamEyeB={...camB.eye};
+     lastCamEyeA={...camB.eye};
+     sA.setViewport({camera:camB,aspectratio:sA.glplot.getAspectratio()});
+     sA.glplot.redraw();
+    }
+   }
+  }
+ }
+ rafSyncId=requestAnimationFrame(tickCameraSync);
+}
+
+plot.addEventListener('pointerdown',()=>{
+ isDragging=true;
+ lastCamEyeA=null;
+ lastCamEyeB=null;
+ cancelAnimationFrame(rafSyncId);
+ rafSyncId=requestAnimationFrame(tickCameraSync);
+});
+
+window.addEventListener('pointerup',()=>{
+ if(isDragging){
+  isDragging=false;
+  cancelAnimationFrame(rafSyncId);
+  const pair=getActivePairScenes();
+  if(pair&&pair.length>=2){
+   const sA=plot._fullLayout?.[pair[0]]?._scene;
+   if(sA&&sA.getCamera){
+    settings.camera=structuredClone(sA.getCamera());
+   }
+  }
+ }
+});
+
 async function cameraAll(camera){
  syncing=true;
  try{const update={};for(const name of scenes)update[`${name}.camera`]=structuredClone(camera);await Plotly.relayout(plot,update);settings.camera=structuredClone(camera);}
@@ -96,7 +252,6 @@ document.getElementById('load').onchange=async e=>{
   if(!loaded||!initial.isovalues.includes(loaded.isovalue))throw Error('This isovalue is not bundled; regenerate the report using this settings file.');
   if(!Number.isFinite(loaded.opacity)||loaded.opacity<=0||loaded.opacity>1)throw Error('Invalid opacity.');
   if(!loaded.camera||!loaded.camera.eye||!['x','y','z'].every(k=>Number.isFinite(loaded.camera.eye[k])))throw Error('Invalid camera.');
-  // Geometry-affecting settings require regeneration rather than silent substitution.
   for(const key of ['alignment','bond_factor','padding_angstrom','scene_scale','columns','atom_radius_scale','atom_resolution'])if(loaded[key]!==initial[key])throw Error(`${key} differs; regenerate the report with these settings.`);
   for(const key of ['positive_color','negative_color','width','panel_height','title'])if(loaded[key]!==initial[key])throw Error(`${key} differs; regenerate the report with these settings.`);
   if(JSON.stringify(loaded.atom_colors)!==JSON.stringify(initial.atom_colors))throw Error('Atom colors differ; regenerate the report with these settings.');
@@ -114,12 +269,18 @@ document.getElementById('png').onclick=async()=>{
  }catch(error){setStatus(`Export failed: ${error.message}`);}finally{button.disabled=false;}
 };
 Plotly.newPlot(plot,figure.data,figure.layout,{responsive:true,displaylogo:false,displayModeBar:false}).then(async()=>{
+ scenes.forEach(sc=>{initialLayoutDomains[sc]=structuredClone(plot.layout[sc]?.domain||{x:[0,1],y:[0,1]});});
+ initialAnnotations=structuredClone(plot.layout.annotations||[]);
  plot.on('plotly_relayout',async event=>{
-  if(syncing)return;
+  if(syncing||isDragging)return;
   for(const name of scenes){if(event[`${name}.camera`]){await cameraAll(event[`${name}.camera`]);break;}}
  });
  for(const id of ['reset','png','save','load'])document.getElementById(id).disabled=false;
- await updateSurfaces();window.sharkReady=true;
+ await updateSurfaces();
+ if(calcGroups.length>1){
+  await applyGroupSelection(groupFilter.value);
+ }
+ window.sharkReady=true;
 }).catch(error=>setStatus(`Unable to render 3D: ${error.message}`));
 </script>
 </body></html>
