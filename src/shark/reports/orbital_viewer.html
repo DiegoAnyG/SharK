@@ -131,7 +131,6 @@ async function applyGroupSelection(val){
   for(let p=0;p<provenance.orbitals.length;p++){
    const sc=scenes[p];
    const dom=structuredClone(initialLayoutDomains[sc]||{x:[0,1],y:[0,1]});
-   updateLayout[`${sc}.domain`]=dom;
    updateLayout[`${sc}.domain.x`]=dom.x;
    updateLayout[`${sc}.domain.y`]=dom.y;
   }
@@ -150,12 +149,10 @@ async function applyGroupSelection(val){
     const col=activeIndices.indexOf(p);
     const dx=col===0?[0.0,0.485]:[0.515,1.0];
     const dy=[0.05,0.95];
-    updateLayout[`${sc}.domain`]={x:dx,y:dy};
     updateLayout[`${sc}.domain.x`]=dx;
     updateLayout[`${sc}.domain.y`]=dy;
    }else{
     const off=[2.0,2.5];
-    updateLayout[`${sc}.domain`]={x:off,y:off};
     updateLayout[`${sc}.domain.x`]=off;
     updateLayout[`${sc}.domain.y`]=off;
    }
