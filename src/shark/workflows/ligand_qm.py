@@ -137,10 +137,22 @@ def _resources(nprocs, maxcore):
     cpus = len(os.sched_getaffinity(0)) if hasattr(os, 'sched_getaffinity') else (os.cpu_count() or 1)
     if not 1 <= nprocs <= cpus or maxcore < 1:
         raise ValueError('Requested CPU or memory allocation is invalid for this host')
-    if hasattr(os, 'sysconf'):
-        available_mb = os.sysconf('SC_AVPHYS_PAGES') * os.sysconf('SC_PAGE_SIZE') / 1024**2
-        if nprocs * maxcore > available_mb * 0.75:
-            raise ValueError('ORCA maxcore times nprocs exceeds 75% of available host memory')
+    available_mb = None
+    try:
+        with open('/proc/meminfo', 'r') as f:
+            for line in f:
+                if line.startswith('MemAvailable:'):
+                    available_mb = int(line.split()[1]) / 1024.0
+                    break
+    except Exception:
+        pass
+    if available_mb is None and hasattr(os, 'sysconf'):
+        try:
+            available_mb = os.sysconf('SC_AVPHYS_PAGES') * os.sysconf('SC_PAGE_SIZE') / 1024**2
+        except (ValueError, OSError):
+            available_mb = None
+    if available_mb is not None and nprocs * maxcore > available_mb * 0.75:
+        raise ValueError('ORCA maxcore times nprocs exceeds 75% of available host memory')
     return nprocs, maxcore
 
 

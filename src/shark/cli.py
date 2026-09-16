@@ -445,7 +445,7 @@ def main(argv=None):
                         args.topology = str(gro_cand)
                         args.trajectory = str(xtc_cand)
                         print(f'[MD] Linking trajectory for clustering: {xtc_cand}')
-            if not (args.full_gold_standard and getattr(args, 'trajectory', None)):
+            if not args.full_gold_standard:
                 return 0
 
         covalent_summary = None
