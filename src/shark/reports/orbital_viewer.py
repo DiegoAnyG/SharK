@@ -298,7 +298,7 @@ def build_orbital_figure(fields: list[OrbitalField], settings: ViewSettings | No
                 record['surfaces'][str(sign*value)] = dict(vertex_count=len(vertices), area_angstrom2=surface['area_angstrom2'])
             trace_index = len(fig.data)
             fig.add_trace(go.Mesh3d(**variants[str(settings.isovalue)], color=color, opacity=settings.opacity,
-                                   name=phase, legendgroup=phase, showlegend=panel == 0, flatshading=False,
+                                   name=phase, showlegend=False, flatshading=False,
                                    hoverinfo='skip', lighting=dict(ambient=0.65, diffuse=0.8, specular=0.2, roughness=0.8)), row=row+1, col=col+1)
             surfaces_by_trace.append(dict(trace=trace_index, variants=variants))
         bond_coords = []
@@ -325,8 +325,8 @@ def build_orbital_figure(fields: list[OrbitalField], settings: ViewSettings | No
     fig.update_layout(width=settings.width, height=rows*settings.panel_height+140,
                       title=dict(text=html.escape(settings.title), x=0.5, font=dict(size=25)),
                       paper_bgcolor='white', font=dict(family='Arial, sans-serif', size=14, color='#203044'),
-                      margin=dict(l=20, r=20, t=85, b=95),
-                      legend=dict(orientation='h', x=0.5, xanchor='center', y=-0.04),
+                      margin=dict(l=20, r=20, t=85, b=65),
+                      showlegend=False,
                       meta=dict(isovalue=settings.isovalue))
     methods = {(f.metadata.get('orca_version'), f.metadata.get('input_keywords')) for f in fields}
     if len(methods) == 1:
@@ -334,8 +334,8 @@ def build_orbital_figure(fields: list[OrbitalField], settings: ViewSettings | No
         method_note = f'ORCA {version or "version unavailable"} | {keywords or "Method unavailable"}'
     else:
         method_note = 'Calculation methods are recorded individually in the companion metadata.'
-    fig.add_annotation(text=html.escape(method_note), x=0.5, y=-0.14, xref='paper', yref='paper',
-                       showarrow=False, font=dict(size=11))
+    fig.add_annotation(text=html.escape(method_note), x=0.5, y=-0.08, xref='paper', yref='paper',
+                       showarrow=False, font=dict(size=11, color='#64748b'))
     figure_metadata['scene_names'] = scenes
     figure_metadata['axis_ranges_angstrom'] = [axis(i)['range'] for i in range(3)]
     return fig, figure_metadata, surfaces_by_trace
