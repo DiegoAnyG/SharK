@@ -204,6 +204,253 @@ def _create_capping_hydrogen(
     )
 
 
+AMINO_ACID_PKA = {
+    'ASP': 3.9,
+    'GLU': 4.2,
+    'HIS': 6.5,
+    'CYS': 8.3,
+    'TYR': 10.0,
+    'LYS': 10.5,
+    'ARG': 12.5,
+    'THR': 13.5,
+    'SER': 13.5,
+}
+
+Z_MAP = {
+    'H': 1, 'HE': 2, 'LI': 3, 'BE': 4, 'B': 5, 'C': 6, 'N': 7, 'O': 8, 'F': 9, 'NE': 10,
+    'NA': 11, 'MG': 12, 'AL': 13, 'SI': 14, 'P': 15, 'S': 16, 'CL': 17, 'AR': 18,
+    'K': 19, 'CA': 20, 'BR': 35, 'I': 53
+}
+
+
+def _normalize_vector(v: Tuple[float, float, float]) -> Tuple[float, float, float]:
+    n = math.sqrt(v[0] ** 2 + v[1] ** 2 + v[2] ** 2)
+    return (v[0] / n, v[1] / n, v[2] / n) if n > 1e-6 else (0.0, 0.0, 1.0)
+
+
+def _place_tetrahedral_hydrogen(
+    central_coord: Tuple[float, float, float],
+    neighbor_coords: Sequence[Tuple[float, float, float]],
+    target_bond_length: float = 1.09,
+) -> Tuple[float, float, float]:
+    """Places a hydrogen opposite to given neighbors in tetrahedral geometry."""
+    if not neighbor_coords:
+        return (central_coord[0], central_coord[1], central_coord[2] + target_bond_length)
+    sum_dirs = [0.0, 0.0, 0.0]
+    for nc in neighbor_coords:
+        v = (nc[0] - central_coord[0], nc[1] - central_coord[1], nc[2] - central_coord[2])
+        u = _normalize_vector(v)
+        sum_dirs[0] += u[0]
+        sum_dirs[1] += u[1]
+        sum_dirs[2] += u[2]
+    inv_dir = _normalize_vector((-sum_dirs[0], -sum_dirs[1], -sum_dirs[2]))
+    return (
+        round(central_coord[0] + target_bond_length * inv_dir[0], 4),
+        round(central_coord[1] + target_bond_length * inv_dir[1], 4),
+        round(central_coord[2] + target_bond_length * inv_dir[2], 4),
+    )
+
+
+def _place_methyl_hydrogens(
+    carbon_coord: Tuple[float, float, float],
+    parent_coord: Tuple[float, float, float],
+    target_bond_length: float = 1.09,
+) -> List[Tuple[float, float, float]]:
+    """Places 3 methyl hydrogens in a tripod around the parent-carbon bond vector."""
+    axis = _normalize_vector((carbon_coord[0] - parent_coord[0], carbon_coord[1] - parent_coord[1], carbon_coord[2] - parent_coord[2]))
+    if abs(axis[0]) < 0.9:
+        perp1 = _normalize_vector((0.0, -axis[2], axis[1]))
+    else:
+        perp1 = _normalize_vector((-axis[1], axis[0], 0.0))
+    perp2 = _normalize_vector((
+        axis[1] * perp1[2] - axis[2] * perp1[1],
+        axis[2] * perp1[0] - axis[0] * perp1[2],
+        axis[0] * perp1[1] - axis[1] * perp1[0],
+    ))
+    cos_t = 1.0 / 3.0
+    sin_t = math.sqrt(8.0) / 3.0
+    coords = []
+    for phi_deg in (0.0, 120.0, 240.0):
+        phi_rad = math.radians(phi_deg)
+        cp = math.cos(phi_rad)
+        sp = math.sin(phi_rad)
+        dr = (
+            axis[0] * cos_t + (perp1[0] * cp + perp2[0] * sp) * sin_t,
+            axis[1] * cos_t + (perp1[1] * cp + perp2[1] * sp) * sin_t,
+            axis[2] * cos_t + (perp1[2] * cp + perp2[2] * sp) * sin_t,
+        )
+        u = _normalize_vector(dr)
+        coords.append((
+            round(carbon_coord[0] + target_bond_length * u[0], 4),
+            round(carbon_coord[1] + target_bond_length * u[1], 4),
+            round(carbon_coord[2] + target_bond_length * u[2], 4),
+        ))
+    return coords
+
+
+def _place_hydroxyl_hydrogen(
+    oxygen_coord: Tuple[float, float, float],
+    carbon_coord: Tuple[float, float, float],
+    reference_coord: Optional[Tuple[float, float, float]] = None,
+    target_bond_length: float = 0.96,
+) -> Tuple[float, float, float]:
+    """Places a hydroxyl hydrogen with ~105 deg bent geometry."""
+    axis = _normalize_vector((oxygen_coord[0] - carbon_coord[0], oxygen_coord[1] - carbon_coord[1], oxygen_coord[2] - carbon_coord[2]))
+    if reference_coord:
+        ref_v = _normalize_vector((reference_coord[0] - oxygen_coord[0], reference_coord[1] - oxygen_coord[1], reference_coord[2] - oxygen_coord[2]))
+        dot = ref_v[0] * axis[0] + ref_v[1] * axis[1] + ref_v[2] * axis[2]
+        perp = _normalize_vector((ref_v[0] - dot * axis[0], ref_v[1] - dot * axis[1], ref_v[2] - dot * axis[2]))
+    else:
+        if abs(axis[0]) < 0.9:
+            perp = _normalize_vector((0.0, -axis[2], axis[1]))
+        else:
+            perp = _normalize_vector((-axis[1], axis[0], 0.0))
+    cos_a = math.cos(math.radians(105.0))
+    sin_a = math.sin(math.radians(105.0))
+    dr = (
+        axis[0] * cos_a + perp[0] * sin_a,
+        axis[1] * cos_a + perp[1] * sin_a,
+        axis[2] * cos_a + perp[2] * sin_a,
+    )
+    u = _normalize_vector(dr)
+    return (
+        round(oxygen_coord[0] + target_bond_length * u[0], 4),
+        round(oxygen_coord[1] + target_bond_length * u[1], 4),
+        round(oxygen_coord[2] + target_bond_length * u[2], 4),
+    )
+
+
+def _reconstruct_target_residue_hydrogens(
+    target_atoms_dict: dict[str, dict],
+    res_name: str,
+    res_num: int,
+    chain_id: str = "A",
+    ph: float = 7.4,
+) -> Tuple[List[ClusterAtom], int]:
+    """Reconstructs missing sidechain and backbone hydrogens based on pH and residue chemistry.
+    
+    Returns:
+        (new_hydrogen_atoms, formal_charge_delta)
+    """
+    res = res_name.upper()
+    existing = {k.upper() for k in target_atoms_dict.keys()}
+    has_h = any(at.get("element", "").upper() == "H" for at in target_atoms_dict.values())
+    if has_h:
+        return [], 0
+
+    new_atoms = []
+    charge = 0
+
+    ca = target_atoms_dict.get("CA")
+    n = target_atoms_dict.get("N")
+    c = target_atoms_dict.get("C")
+    cb = target_atoms_dict.get("CB")
+
+    # 1. Alpha-hydrogen (HA)
+    if ca and "HA" not in existing and "H_A" not in existing:
+        neighbors = [a["coords"] for a in (n, c, cb) if a]
+        if neighbors:
+            crd = _place_tetrahedral_hydrogen(ca["coords"], neighbors, target_bond_length=1.09)
+            new_atoms.append(ClusterAtom(
+                element="H", coords=crd, atom_name="HA",
+                res_name=res_name, res_seq=res_num, chain_id=chain_id, is_cap=False
+            ))
+
+    # 2. Sidechain hydrogens depending on residue type
+    if res == "THR":
+        cg2 = target_atoms_dict.get("CG2")
+        og1 = target_atoms_dict.get("OG1")
+        if cb and "HB" not in existing:
+            neighbors = [a["coords"] for a in (ca, cg2, og1) if a]
+            if neighbors:
+                crd = _place_tetrahedral_hydrogen(cb["coords"], neighbors, target_bond_length=1.09)
+                new_atoms.append(ClusterAtom(
+                    element="H", coords=crd, atom_name="HB",
+                    res_name=res_name, res_seq=res_num, chain_id=chain_id, is_cap=False
+                ))
+        if cg2 and cb and not any(k.startswith("HG2") for k in existing):
+            m_coords = _place_methyl_hydrogens(cg2["coords"], cb["coords"])
+            for idx, mc in enumerate(m_coords, 1):
+                new_atoms.append(ClusterAtom(
+                    element="H", coords=mc, atom_name=f"HG2{idx}",
+                    res_name=res_name, res_seq=res_num, chain_id=chain_id, is_cap=False
+                ))
+        pka_thr = AMINO_ACID_PKA.get("THR", 13.5)
+        if og1 and cb and ph < pka_thr and not any(k.startswith("HG1") for k in existing):
+            h_crd = _place_hydroxyl_hydrogen(og1["coords"], cb["coords"])
+            new_atoms.append(ClusterAtom(
+                element="H", coords=h_crd, atom_name="HG1",
+                res_name=res_name, res_seq=res_num, chain_id=chain_id, is_cap=False
+            ))
+
+    elif res == "SER":
+        og = target_atoms_dict.get("OG")
+        if cb and ca and not any(k.startswith("HB") for k in existing):
+            neighbors = [ca["coords"]]
+            if og:
+                neighbors.append(og["coords"])
+            crd = _place_tetrahedral_hydrogen(cb["coords"], neighbors, target_bond_length=1.09)
+            new_atoms.append(ClusterAtom(
+                element="H", coords=crd, atom_name="HB1",
+                res_name=res_name, res_seq=res_num, chain_id=chain_id, is_cap=False
+            ))
+        pka_ser = AMINO_ACID_PKA.get("SER", 13.5)
+        if og and cb and ph < pka_ser and not any(k.startswith("HG") for k in existing):
+            h_crd = _place_hydroxyl_hydrogen(og["coords"], cb["coords"])
+            new_atoms.append(ClusterAtom(
+                element="H", coords=h_crd, atom_name="HG",
+                res_name=res_name, res_seq=res_num, chain_id=chain_id, is_cap=False
+            ))
+
+    elif res == "CYS":
+        sg = target_atoms_dict.get("SG")
+        if cb and ca and not any(k.startswith("HB") for k in existing):
+            neighbors = [ca["coords"]]
+            if sg:
+                neighbors.append(sg["coords"])
+            crd = _place_tetrahedral_hydrogen(cb["coords"], neighbors, target_bond_length=1.09)
+            new_atoms.append(ClusterAtom(
+                element="H", coords=crd, atom_name="HB1",
+                res_name=res_name, res_seq=res_num, chain_id=chain_id, is_cap=False
+            ))
+        pka_cys = AMINO_ACID_PKA.get("CYS", 8.3)
+        if sg and cb:
+            if ph < pka_cys and not any(k.startswith("HG") for k in existing):
+                h_crd = _place_hydroxyl_hydrogen(sg["coords"], cb["coords"], target_bond_length=1.34)
+                new_atoms.append(ClusterAtom(
+                    element="H", coords=h_crd, atom_name="HG",
+                    res_name=res_name, res_seq=res_num, chain_id=chain_id, is_cap=False
+                ))
+            else:
+                charge -= 1
+
+    elif res == "LYS":
+        pka_lys = AMINO_ACID_PKA.get("LYS", 10.5)
+        if ph < pka_lys:
+            charge += 1
+
+    elif res in ("ASP", "GLU"):
+        pka_acid = AMINO_ACID_PKA.get(res, 4.0)
+        if ph >= pka_acid:
+            charge -= 1
+
+    elif res == "HIS":
+        pka_his = AMINO_ACID_PKA.get("HIS", 6.5)
+        if ph < pka_his:
+            charge += 1
+
+    # 3. Backbone amide hydrogen (H)
+    if n and "H" not in existing and "HN" not in existing:
+        ref_pts = [ca["coords"]] if ca else []
+        crd = _place_tetrahedral_hydrogen(n["coords"], ref_pts, target_bond_length=1.01)
+        new_atoms.append(ClusterAtom(
+            element="H", coords=crd, atom_name="H",
+            res_name=res_name, res_seq=res_num, chain_id=chain_id, is_cap=False
+        ))
+
+    return new_atoms, charge
+
+
 def _prepare_ligand_atoms(
     ligand_pose: Union[str, Path, Sequence[Tuple[str, Tuple[float, float, float]]]],
     ligand_smiles: Optional[str] = None
@@ -313,6 +560,7 @@ def extract_qm_cluster(
     multiplicity: int = 1,
     freeze_backbone: bool = True,
     cluster_name: Optional[str] = None,
+    ph: float = 7.4,
 ) -> QMCluster:
     """Extracts an active-site QM cluster with appropriate hydrogen valence capping.
 
@@ -339,6 +587,8 @@ def extract_qm_cluster(
         If True, marks non-reactive backbone atoms as frozen in extended models.
     cluster_name : str or None
         Identifier for the cluster.
+    ph : float
+        Solution pH for residue protonation and microstate assignment (default: 7.4).
     """
     rec_atoms = parse_pdb_atoms(receptor_pdb)
     lig_atoms = _prepare_ligand_atoms(ligand_pose, ligand_smiles=ligand_smiles)
@@ -369,6 +619,7 @@ def extract_qm_cluster(
 
     # Identify nucleophile heteroatom name
     nucl_atom_names = REACTIVE_NUCLEOPHILES.get(target_resname, ("OG1", "OG", "SG", "NZ", "OH"))
+    charge_delta = 0
 
     if model_type.lower() == "minimal":
         # Add target residue atoms
@@ -383,6 +634,16 @@ def extract_qm_cluster(
                 is_cap=False,
                 is_frozen=False,
             ))
+
+        # Reconstruct missing sidechain and backbone hydrogens if not present in input
+        reconstructed_h, charge_delta = _reconstruct_target_residue_hydrogens(
+            target_atoms_dict=target_atoms_dict,
+            res_name=target_resname,
+            res_num=target_resnum,
+            chain_id=target_chain or "A",
+            ph=ph,
+        )
+        cluster_atoms.extend(reconstructed_h)
 
         # Valence capping for cleaved peptide bonds:
         # N-terminus cap: cleaved bond between N(i) and C(i-1)
@@ -421,6 +682,7 @@ def extract_qm_cluster(
                 is_cap=True,
                 is_frozen=False,
             ))
+
 
     else:
         # Extended Pocket Model: Select all residues within cutoff_radius of any ligand heavy atom
@@ -518,7 +780,7 @@ def extract_qm_cluster(
                     electrophile_idx = idx
 
     # Net charge default
-    net_charge = charge if charge is not None else 0
+    net_charge = charge if charge is not None else (charge_delta if model_type.lower() == "minimal" else 0)
 
     c_name = cluster_name or f"QM_Cluster_{target_residue}_{model_type}"
 

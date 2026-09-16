@@ -338,6 +338,7 @@ def main(argv=None):
     parser.add_argument('--scan-start', type=float, default=3.30, help='Starting distance in Angstroms for coordinate scan (default: 3.30)')
     parser.add_argument('--scan-end', type=float, default=1.45, help='Ending distance in Angstroms for coordinate scan (default: 1.45)')
     parser.add_argument('--scan-steps', type=int, default=18, help='Number of scan steps along reaction coordinate (default: 18)')
+    parser.add_argument('--ph', type=float, default=7.4, help='Solution pH for residue protonation and microstate assignment (default: 7.4)')
     args = parser.parse_args(arguments)
     if args.interactive or not arguments:
         try:
@@ -596,19 +597,23 @@ def main(argv=None):
                 print(f"[TIER 4] Using docking pose for {p.ligand_id} against {p.receptor_id}...")
 
             lig_smiles = None
-            for meta in getattr(session, 'ligands_meta', []):
-                if meta.get('name', '').casefold() == p.ligand_id.casefold():
-                    lig_smiles = meta.get('smiles')
-                    break
+            if hasattr(session, 'ligand_metadata') and isinstance(session.ligand_metadata, dict):
+                lig_smiles = session.ligand_metadata.get(p.ligand_id.casefold(), {}).get('smiles')
+            if not lig_smiles:
+                for meta in getattr(session, 'ligands_meta', []):
+                    if meta.get('name', '').casefold() == p.ligand_id.casefold():
+                        lig_smiles = meta.get('smiles')
+                        break
 
             target_residue = args.target_residue or 'THR309'
-            print(f"[TIER 4] Extracting {args.qm_model.upper()} QM cluster for {p.ligand_id} against {target_residue} in {p.receptor_id}...")
+            print(f"[TIER 4] Extracting {args.qm_model.upper()} QM cluster for {p.ligand_id} against {target_residue} in {p.receptor_id} (pH {args.ph:.1f})...")
             cluster = extract_qm_cluster(
                 receptor_pdb=rec_path,
                 ligand_pose=lig_pose,
                 model_type=args.qm_model,
                 target_residue=target_residue,
                 ligand_smiles=lig_smiles,
+                ph=args.ph,
             )
             print(f"[TIER 4] Extracted cluster '{cluster.name}': {cluster.n_atoms} atoms")
             if cluster.nucleophile_idx is not None and cluster.electrophile_idx is not None:
@@ -745,6 +750,7 @@ def main(argv=None):
             print(f"[FEASIBILITY] {tot_feas.summary}")
 
             try:
+                from .analysis.adduct_qm import compute_adduct_quantum_profile
                 target_res = args.target_residue or 'THR309'
                 best_c = all_contacts[0] if all_contacts else None
                 nucl_crd = None
@@ -759,6 +765,33 @@ def main(argv=None):
                         if la['index'] == best_c.get('ligand_atom_index'):
                             el_crd = (la['x'], la['y'], la['z'])
                             break
+
+                # Compute quantum adduct verification profile
+                att_dist = float(best_c.get('distance_angstrom', 3.33)) if (best_c and best_c.get('distance_angstrom') is not None) else 3.33
+                bd_ang = float(best_c.get('burgi_dunitz_angle', 132.7)) if (best_c and best_c.get('burgi_dunitz_angle') is not None) else 132.7
+                nucl_el_sym = str(best_c.get('nucleophile_atom', 'OG1'))[0] if best_c else 'O'
+                el_el_sym = str(best_c.get('ligand_atom_symbol', 'C')) if best_c else 'C'
+                el_idx = int(best_c.get('ligand_atom_index', 0)) if (best_c and best_c.get('ligand_atom_index') is not None) else 0
+                lig_h_atoms = [(str(la.get('element', 'C')), int(la.get('index', i))) for i, la in enumerate(all_lig_atoms) if la.get('element') != 'H'] if all_lig_atoms else None
+
+                is_rev = False
+                w_type = str(best_c.get('warhead_type', '') if best_c else '').lower()
+                if any(k in w_type for k in ('reversible', 'pseudo', 'cyano', 'nitrile', 'furoxan', 'boron')):
+                    is_rev = True
+
+                adduct_qm_prof = compute_adduct_quantum_profile(
+                    distance_angstrom=att_dist,
+                    burgi_dunitz_angle_deg=bd_ang,
+                    nucleophile_homo_ev=-6.40,
+                    electrophile_lumo_ev=-2.89,
+                    target_atom_index=el_idx,
+                    target_atom_symbol=el_el_sym,
+                    ligand_heavy_atoms=lig_h_atoms,
+                    nucleophile_element=nucl_el_sym,
+                    electrophile_element=el_el_sym,
+                    is_reversible_warhead=is_rev,
+                )
+                covalent_summary['adduct_qm'] = adduct_qm_prof.to_dict()
 
                 lig_input = None
                 rec_input = None
@@ -784,6 +817,7 @@ def main(argv=None):
                         attack_distance=best_c.get('distance_angstrom') if best_c else None,
                         burgi_dunitz_angle=best_c.get('burgi_dunitz_angle') if best_c else None,
                         dyad_residue=best_c.get('catalytic_dyad_residue') if best_c else 'ASP199',
+                        adduct_qm_data=covalent_summary.get('adduct_qm'),
                         standalone=False
                     )
             except Exception as e:

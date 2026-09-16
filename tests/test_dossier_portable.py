@@ -122,3 +122,45 @@ def test_load_dft_records_and_render_combined(tmp_path):
     assert "tautomer_3_oxide" in content
     assert "Verified Quantum Minima" in content
     assert "2/2 Minima" in content
+
+
+def test_covalent_dossier_with_adduct_qm(tmp_path):
+    from shark.analysis.adduct_qm import compute_adduct_quantum_profile
+
+    prof = compute_adduct_quantum_profile(
+        distance_angstrom=3.33,
+        burgi_dunitz_angle_deg=132.7,
+        nucleophile_homo_ev=-6.40,
+        electrophile_lumo_ev=-2.89,
+        target_atom_index=10,
+        target_atom_symbol="O",
+    )
+
+    covalent_data = {
+        "has_nac": True,
+        "summary": "Verified reactive trajectory against THR309:OG1.",
+        "contacts": [
+            {
+                "residue": "THR309:A",
+                "nucleophile_atom": "OG1",
+                "ligand_atom_index": 10,
+                "distance_angstrom": 3.33,
+                "burgi_dunitz_angle": 132.7,
+                "feasibility_score": 0.88,
+                "is_nac": True,
+            }
+        ],
+        "adduct_qm": prof.to_dict(),
+    }
+
+    out_file = tmp_path / "adduct_qm_dossier.html"
+    res_path = generate_html_dossier("AdductQMTest", [], out_file, covalent_summary=covalent_data)
+    text = res_path.read_text(encoding="utf-8")
+
+    assert "Quantum Chemical Adduct Verification &amp; FMO Overlap Theory" in text
+    assert "1. FMO Phase Symmetry" in text
+    assert "Constructive Allowed" in text
+    assert "2. Pocket Polarization" in text
+    assert "3. Regiospecificity" in text
+    assert "4. Formed Bond Nature" in text
+    assert "Wiberg Bond Order" in text

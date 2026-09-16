@@ -302,11 +302,36 @@ if(eqPlotEl && data.tautomers && data.tautomers.length>1){
   }
  const fukuiEl=document.getElementById('fukui-bar-plot');
  if(fukuiEl){
-  const cdft=cov.cdft||{};
-  const cdftLabels=['Frontier gap','−μ','μ² / (2 gap)'];
-  const cdftVals=[cdft.hardness_ev||0,Math.abs(cdft.chemical_potential_ev||0),cdft.electrophilicity_ev||0];
-  const fukuiTraces=[{type:'bar',x:cdftLabels,y:cdftVals,marker:{color:['#3b82f6','#8b5cf6','#dc2626','#087b70']},hovertemplate:'%{x}: %{y:.3f} eV<extra></extra>'}];
-  Plotly.newPlot('fukui-bar-plot',fukuiTraces,{margin:{l:55,r:20,t:25,b:45},yaxis:{title:{text:'Value / eV'},zeroline:false},paper_bgcolor:'#fff',plot_bgcolor:'#fff'},{responsive:true});
+  const adductQm=cov.adduct_qm;
+  if(adductQm && adductQm.regiospecificity && adductQm.regiospecificity.sites && adductQm.regiospecificity.sites.length){
+   const sites=adductQm.regiospecificity.sites.slice(0, 10);
+   const xLabels=sites.map(s=>`${s.atom_symbol}#${s.atom_index}${s.is_target_site?' (Target)':''}`);
+   const yVals=sites.map(s=>s.fukui_electrophilic);
+   const barColors=sites.map(s=>s.is_target_site?'#dc2626':'#087b70');
+   const fukuiTraces=[{
+    type:'bar',
+    x:xLabels,
+    y:yVals,
+    text:yVals.map(v=>v.toFixed(3)),
+    textposition:'auto',
+    marker:{color:barColors,line:{color:'#0f172a',width:1}},
+    hovertemplate:'<b>%{x}</b><br>f_k^+: %{y:.4f}<extra></extra>'
+   }];
+   Plotly.newPlot('fukui-bar-plot',fukuiTraces,{
+    title:{text:'<b>Local Fukui Electrophilic Function (f<sub>k</sub><sup>+</sup>)</b>',font:{size:13,color:'#16283f'}},
+    margin:{l:55,r:20,t:35,b:55},
+    xaxis:{tickangle:-20,tickfont:{size:11,color:'#16283f'}},
+    yaxis:{title:{text:'f_k^+ (Susceptibility)'},zeroline:false},
+    paper_bgcolor:'#fff',
+    plot_bgcolor:'#fff'
+   },{responsive:true});
+  } else {
+   const cdft=cov.cdft||{};
+   const cdftLabels=['Frontier gap','−μ','μ² / (2 gap)'];
+   const cdftVals=[cdft.hardness_ev||0,Math.abs(cdft.chemical_potential_ev||0),cdft.electrophilicity_ev||0];
+   const fukuiTraces=[{type:'bar',x:cdftLabels,y:cdftVals,marker:{color:['#3b82f6','#8b5cf6','#dc2626','#087b70']},hovertemplate:'%{x}: %{y:.3f} eV<extra></extra>'}];
+   Plotly.newPlot('fukui-bar-plot',fukuiTraces,{margin:{l:55,r:20,t:25,b:45},yaxis:{title:{text:'Value / eV'},zeroline:false},paper_bgcolor:'#fff',plot_bgcolor:'#fff'},{responsive:true});
+  }
  }
 }
 document.querySelectorAll('.help-button').forEach(button=>{

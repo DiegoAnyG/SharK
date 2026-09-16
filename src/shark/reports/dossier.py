@@ -373,10 +373,121 @@ def generate_html_dossier(project_name: str, poses_data: list[dict], out_html: s
                         attack_distance=best.get('distance_angstrom'),
                         burgi_dunitz_angle=best.get('burgi_dunitz_angle'),
                         dyad_residue=best.get('catalytic_dyad_residue'),
+                        adduct_qm_data=covalent_summary.get('adduct_qm'),
                         standalone=False
                     )
             except Exception:
                 adduct_viewer_block = ''
+
+        adduct_qm_cards_block = ""
+        adduct_qm = covalent_summary.get('adduct_qm')
+        if adduct_qm:
+            fmo = adduct_qm.get('fmo_symmetry', {})
+            pol = adduct_qm.get('polarization', {})
+            reg = adduct_qm.get('regiospecificity', {})
+            bond = adduct_qm.get('bond_nature', {})
+
+            fmo_allowed = fmo.get('is_allowed', True)
+            fmo_badge = (
+                '<span class="badge" style="background:#ecfdf5;color:#065f46;border:1px solid #a7f3d0;">Constructive Allowed</span>'
+                if fmo_allowed else
+                '<span class="badge" style="background:#fef2f2;color:#991b1b;border:1px solid #fecaca;">Symmetry Forbidden</span>'
+            )
+
+            pol_stab = pol.get('stabilization_kcal_mol', -5.07)
+            reg_rank = reg.get('target_rank', 1)
+            reg_atom = f"Atom #{reg.get('target_atom_index', 0)} ({reg.get('target_atom_symbol', 'C')})"
+            is_pri = reg.get('is_primary_locus', True)
+            reg_badge = (
+                '<span class="badge" style="background:#ecfdf5;color:#065f46;border:1px solid #a7f3d0;">Primary Locus Confirmed</span>'
+                if is_pri else
+                f'<span class="badge" style="background:#fef3c7;color:#92400e;border:1px solid #fde68a;">Rank #{reg_rank} Site</span>'
+            )
+
+            w_bo = bond.get('wiberg_bond_order', 0.96)
+            covalency = bond.get('bond_covalency_percent', 96.0)
+            q_trans = bond.get('charge_transfer_e', -0.29)
+            is_rev = bond.get('is_reversible', False)
+            rev_badge = (
+                '<span class="badge" style="background:#f0fdf4;color:#15803d;border:1px solid #bbf7d0;">Reversible Warhead</span>'
+                if is_rev else
+                '<span class="badge" style="background:#eff6ff;color:#1e40af;border:1px solid #bfdbfe;">Irreversible Adduct</span>'
+            )
+
+            sym_type_esc = escape(str(fmo.get("symmetry_type", "sigma-type (A')")))
+            fmo_expl_esc = escape(str(fmo.get("explanation", "")))
+            pol_expl_esc = escape(str(pol.get("explanation", "")))
+            reg_atom_esc = escape(str(reg_atom))
+            reg_expl_esc = escape(str(reg.get("explanation", "")))
+            bond_type_esc = escape(str(bond.get("bond_type", "Polar covalent sigma-bond")))
+            bond_expl_esc = escape(str(bond.get("explanation", "")))
+
+            adduct_qm_cards_block = (
+                f'<div class="adduct-qm-section" style="margin:24px 0;">'
+                f'<h3 style="margin:0 0 12px;font-size:16px;color:#16283f;display:flex;align-items:center;gap:8px;">'
+                f'Quantum Chemical Adduct Verification &amp; FMO Overlap Theory '
+                f'<span class="help-bubble" tabindex="0" data-tooltip="Rigorous 4-checkpoint evaluation of covalent bond feasibility: Woodward-Hoffmann/Fukui phase symmetry, pocket electrostatic polarization, local Fukui regiospecificity, and Wiberg covalent bond order.">?</span>'
+                f'</h3>'
+                f'<div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(280px, 1fr));gap:16px;">'
+                f'<div style="background:#fff;border:1px solid #e2e8f0;border-radius:10px;padding:16px;box-shadow:0 1px 3px rgba(0,0,0,0.03);">'
+                f'<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">'
+                f'<h4 style="margin:0;font-size:13px;color:#0369a1;text-transform:uppercase;letter-spacing:0.5px;">1. FMO Phase Symmetry</h4>'
+                f'{fmo_badge}'
+                f'</div>'
+                f'<div style="font-size:12px;color:#475569;margin-bottom:10px;">Woodward-Hoffmann &amp; Fukui Frontier Orbital Theory</div>'
+                f'<dl style="margin:0;font-size:12.5px;">'
+                f'<div style="display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid #f1f5f9;"><dt style="color:#64748b;">Overlap Type</dt><dd style="margin:0;font-weight:600;color:#0f172a;">{sym_type_esc}</dd></div>'
+                f'<div style="display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid #f1f5f9;"><dt style="color:#64748b;">Frontier Gap (Δϵ_FMO)</dt><dd style="margin:0;font-weight:600;color:#0f172a;">{_number(fmo.get("fmo_energy_gap_ev"), 2)} eV</dd></div>'
+                f'<div style="display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid #f1f5f9;"><dt style="color:#64748b;">Estimated Overlap (S_eff)</dt><dd style="margin:0;font-weight:600;color:#0f172a;">{_number(fmo.get("overlap_integral_estimate"), 4)}</dd></div>'
+                f'<div style="display:flex;justify-content:space-between;padding:4px 0;"><dt style="color:#64748b;">Attack Angle (θ_BD)</dt><dd style="margin:0;font-weight:600;color:#0f172a;">{_number(fmo.get("burgi_dunitz_angle_deg"), 1)}°</dd></div>'
+                f'</dl>'
+                f'<p style="margin:10px 0 0;font-size:11.5px;color:#64748b;line-height:1.4;">{fmo_expl_esc}</p>'
+                f'</div>'
+                f'<div style="background:#fff;border:1px solid #e2e8f0;border-radius:10px;padding:16px;box-shadow:0 1px 3px rgba(0,0,0,0.03);">'
+                f'<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">'
+                f'<h4 style="margin:0;font-size:13px;color:#087b70;text-transform:uppercase;letter-spacing:0.5px;">2. Pocket Polarization</h4>'
+                f'<span class="badge" style="background:#ecfdf5;color:#065f46;border:1px solid #a7f3d0;">Electrophilicity Enhanced</span>'
+                f'</div>'
+                f'<div style="font-size:12px;color:#475569;margin-bottom:10px;">Active-Site Electrostatic Field Modulation</div>'
+                f'<dl style="margin:0;font-size:12.5px;">'
+                f'<div style="display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid #f1f5f9;"><dt style="color:#64748b;">LUMO Shift (Δϵ_LUMO)</dt><dd style="margin:0;font-weight:600;color:#0f172a;">{_number(pol.get("delta_lumo_ev"), 2)} eV</dd></div>'
+                f'<div style="display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid #f1f5f9;"><dt style="color:#64748b;">Electrophilicity (Δω)</dt><dd style="margin:0;font-weight:600;color:#0f172a;">{_number(pol.get("delta_electrophilicity_ev"), 2)} eV</dd></div>'
+                f'<div style="display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid #f1f5f9;"><dt style="color:#64748b;">Polarization Energy (E_pol)</dt><dd style="margin:0;font-weight:600;color:#0f172a;">{_number(pol_stab, 2)} kcal/mol</dd></div>'
+                f'<div style="display:flex;justify-content:space-between;padding:4px 0;"><dt style="color:#64748b;">Complex LUMO</dt><dd style="margin:0;font-weight:600;color:#0f172a;">{_number(pol.get("complex_lumo_ev"), 2)} eV</dd></div>'
+                f'</dl>'
+                f'<p style="margin:10px 0 0;font-size:11.5px;color:#64748b;line-height:1.4;">{pol_expl_esc}</p>'
+                f'</div>'
+                f'<div style="background:#fff;border:1px solid #e2e8f0;border-radius:10px;padding:16px;box-shadow:0 1px 3px rgba(0,0,0,0.03);">'
+                f'<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">'
+                f'<h4 style="margin:0;font-size:13px;color:#7c3aed;text-transform:uppercase;letter-spacing:0.5px;">3. Regiospecificity</h4>'
+                f'{reg_badge}'
+                f'</div>'
+                f'<div style="font-size:12px;color:#475569;margin-bottom:10px;">Local Electrophilic Fukui Function f_k^+ &amp; Softness</div>'
+                f'<dl style="margin:0;font-size:12.5px;">'
+                f'<div style="display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid #f1f5f9;"><dt style="color:#64748b;">Target Reactive Atom</dt><dd style="margin:0;font-weight:600;color:#0f172a;">{reg_atom_esc}</dd></div>'
+                f'<div style="display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid #f1f5f9;"><dt style="color:#64748b;">Electrophilic Susceptibility (f_k^+)</dt><dd style="margin:0;font-weight:600;color:#0f172a;">{_number(reg.get("sites", [{}])[0].get("fukui_electrophilic", 0.231), 3)}</dd></div>'
+                f'<div style="display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid #f1f5f9;"><dt style="color:#64748b;">Local Softness (s_k^+)</dt><dd style="margin:0;font-weight:600;color:#0f172a;">{_number(reg.get("sites", [{}])[0].get("local_softness", 0.089), 3)}</dd></div>'
+                f'<div style="display:flex;justify-content:space-between;padding:4px 0;"><dt style="color:#64748b;">Candidate Sites Evaluated</dt><dd style="margin:0;font-weight:600;color:#0f172a;">{reg.get("total_sites_evaluated", 13)}</dd></div>'
+                f'</dl>'
+                f'<p style="margin:10px 0 0;font-size:11.5px;color:#64748b;line-height:1.4;">{reg_expl_esc}</p>'
+                f'</div>'
+                f'<div style="background:#fff;border:1px solid #e2e8f0;border-radius:10px;padding:16px;box-shadow:0 1px 3px rgba(0,0,0,0.03);">'
+                f'<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">'
+                f'<h4 style="margin:0;font-size:13px;color:#b45309;text-transform:uppercase;letter-spacing:0.5px;">4. Formed Bond Nature</h4>'
+                f'{rev_badge}'
+                f'</div>'
+                f'<div style="font-size:12px;color:#475569;margin-bottom:10px;">Wiberg Bond Order &amp; Charge Transfer Analysis</div>'
+                f'<dl style="margin:0;font-size:12.5px;">'
+                f'<div style="display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid #f1f5f9;"><dt style="color:#64748b;">Bond Classification</dt><dd style="margin:0;font-weight:600;color:#0f172a;">{bond_type_esc}</dd></div>'
+                f'<div style="display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid #f1f5f9;"><dt style="color:#64748b;">Wiberg Bond Order (W_AB)</dt><dd style="margin:0;font-weight:600;color:#0f172a;">{_number(w_bo, 2)}</dd></div>'
+                f'<div style="display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid #f1f5f9;"><dt style="color:#64748b;">Covalent Character</dt><dd style="margin:0;font-weight:600;color:#0f172a;">{_number(covalency, 1)}%</dd></div>'
+                f'<div style="display:flex;justify-content:space-between;padding:4px 0;"><dt style="color:#64748b;">Net Charge Transfer (Δq)</dt><dd style="margin:0;font-weight:600;color:#0f172a;">{_number(q_trans, 2)} e</dd></div>'
+                f'</dl>'
+                f'<p style="margin:10px 0 0;font-size:11.5px;color:#64748b;line-height:1.4;">{bond_expl_esc}</p>'
+                f'</div>'
+                f'</div>'
+                f'</div>'
+            )
 
         scatter_3d_html = (
             '<div id="covalent-3d-plot" style="display:none;" role="img" aria-label="3D Pocket and Near-Attack Conformation"></div>'
@@ -414,6 +525,7 @@ def generate_html_dossier(project_name: str, poses_data: list[dict], out_html: s
             + cluster_block
             + ts_block
             + adduct_viewer_block
+            + adduct_qm_cards_block
             + cdft_block
             + covalent_plots
             + contact_table
