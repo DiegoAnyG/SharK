@@ -131,6 +131,10 @@ def generate_adduct_viewer_html(
 
     dist_str = f"{attack_distance:.2f} Å" if attack_distance is not None else "N/A"
     angle_str = f"{burgi_dunitz_angle:.1f}°" if burgi_dunitz_angle is not None else "N/A"
+    angle_suffix = f" (θ={angle_str})" if burgi_dunitz_angle is not None else ""
+    full_dist_label = f"d = {dist_str}{angle_suffix}"
+    full_dist_json = json.dumps(full_dist_label)
+    dyad_display = html.escape(dyad_residue) if dyad_residue else "None (Isolated Nucleophile)"
 
     safe_pdb = json.dumps(pdb_data)
     safe_cube = json.dumps(cube_data) if cube_data else "null"
@@ -153,7 +157,7 @@ def generate_adduct_viewer_html(
       </h3>
       <div style="font-size:12px;color:#64748b;margin-top:3px;">
         Nucleophile: <strong style="color:#059669;">{html.escape(target_residue)}</strong> |
-        Dyad Partner: <strong style="color:#2563eb;">{html.escape(dyad_residue or "None")}</strong> |
+        Dyad Partner: <strong style="color:#2563eb;">{dyad_display}</strong> |
         Reaction Distance: <strong style="color:#dc2626;">{dist_str}</strong> |
         Bürgi-Dunitz Angle (θ_BD): <strong style="color:#d97706;">{angle_str}</strong>
       </div>
@@ -197,25 +201,24 @@ def generate_adduct_viewer_html(
       viewer.addModel(pdbStr, 'pdb');
     }}
 
-    // Color definitions
-    // 1. Nucleophile Thr309: Bright green sticks
-    viewer.setStyle({{ resi: {target_resi} }}, {{
-      stick: {{ radius: 0.22, color: '#10b981', colorscheme: 'greenCarbon' }},
-      sphere: {{ radius: 0.45, color: '#059669' }}
+    // 1. Base style for all atoms in active site
+    viewer.setStyle({{}}, {{
+      stick: {{ radius: 0.18, colorscheme: 'Jmol' }}
     }});
 
-    // 2. Catalytic Dyad Asp199: Blue sticks
-    {f"viewer.setStyle({{ resi: {dyad_resi} }}, {{ stick: {{ radius: 0.18, color: '#3b82f6', colorscheme: 'blueCarbon' }} }});" if dyad_resi else ""}
-
-    // 3. Ligand: Orange sticks & spheres
-    viewer.setStyle({{ resn: ['LIG', 'UNL', 'MOL'] }}, {{
-      stick: {{ radius: 0.24, color: '#f59e0b', colorscheme: 'yellowCarbon' }},
-      sphere: {{ radius: 0.42, color: '#d97706' }}
+    // 2. Nucleophile (e.g. Thr309): green carbons
+    viewer.addStyle({{ resi: ['{target_resi}', '{target_residue}', {target_resi}] }}, {{
+      stick: {{ radius: 0.26, colorscheme: 'greenCarbon' }},
+      sphere: {{ radius: 0.42, color: '#10b981' }}
     }});
 
-    // Fallback styling for any remaining atoms
-    viewer.setStyle({{ not: {{ resi: [{target_resi}{f', {dyad_resi}' if dyad_resi else ''}], resn: ['LIG', 'UNL', 'MOL'] }} }}, {{
-      stick: {{ radius: 0.12, color: '#94a3b8' }}
+    // 3. Catalytic Dyad partner (e.g. Asp199): blue carbons if present
+    {f"viewer.addStyle({{ resi: ['{dyad_resi}', {dyad_resi}] }}, {{ stick: {{ radius: 0.22, colorscheme: 'blueCarbon' }} }});" if dyad_resi else ""}
+
+    // 4. Ligand: orange carbons
+    viewer.addStyle({{ resn: ['LIG', 'UNL', 'MOL'] }}, {{
+      stick: {{ radius: 0.26, colorscheme: 'yellowCarbon' }},
+      sphere: {{ radius: 0.40, color: '#f59e0b' }}
     }});
 
     const nuclCrd = {nucl_json};
@@ -237,9 +240,9 @@ def generate_adduct_viewer_html(
       const midY = (nuclCrd[1] + elCrd[1]) / 2;
       const midZ = (nuclCrd[2] + elCrd[2]) / 2;
 
-      const dLabel = viewer.addLabel('d = {dist_str}' + (' (θ={angle_str})' if '{angle_str}' !== 'N/A' else ''), {{
-        position: {{ x: midX, y: midY, z: midZ + 0.3 }},
-        backgroundColor: 'rgba(15, 23, 42, 0.85)',
+      const dLabel = viewer.addLabel({full_dist_json}, {{
+        position: {{ x: midX, y: midY, z: midZ + 0.35 }},
+        backgroundColor: 'rgba(15, 23, 42, 0.88)',
         fontColor: '#fca5a5',
         fontSize: 12,
         borderColor: '#ef4444',
@@ -248,21 +251,32 @@ def generate_adduct_viewer_html(
       labels.push(dLabel);
 
       const nuclLabel = viewer.addLabel('{html.escape(target_residue)} (OG1)', {{
-        position: {{ x: nuclCrd[0], y: nuclCrd[1], z: nuclCrd[2] + 0.4 }},
-        backgroundColor: 'rgba(16, 185, 129, 0.85)',
+        position: {{ x: nuclCrd[0], y: nuclCrd[1], z: nuclCrd[2] + 0.45 }},
+        backgroundColor: 'rgba(16, 185, 129, 0.88)',
         fontColor: '#ffffff',
         fontSize: 11
       }});
       labels.push(nuclLabel);
 
       const elLabel = viewer.addLabel('Electrophile (Ligand)', {{
-        position: {{ x: elCrd[0], y: elCrd[1], z: elCrd[2] - 0.4 }},
-        backgroundColor: 'rgba(245, 158, 11, 0.85)',
+        position: {{ x: elCrd[0], y: elCrd[1], z: elCrd[2] - 0.45 }},
+        backgroundColor: 'rgba(245, 158, 11, 0.88)',
         fontColor: '#ffffff',
         fontSize: 11
       }});
       labels.push(elLabel);
     }}
+
+    setTimeout(function() {{
+      viewer.resize();
+      viewer.zoomTo();
+      viewer.render();
+    }}, 150);
+
+    window.addEventListener('resize', function() {{
+      viewer.resize();
+      viewer.render();
+    }});
 
     // Overlay ORCA CUBE isosurface if provided
     const cubeData = {safe_cube};
@@ -362,3 +376,4 @@ body {{ margin: 0; padding: 20px; font-family: system-ui, -apple-system, sans-se
 </html>
 """
     return html_content
+

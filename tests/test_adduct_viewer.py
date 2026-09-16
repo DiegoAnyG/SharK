@@ -80,3 +80,4 @@ def test_generate_adduct_viewer_html():
     )
     assert "<!doctype html>" in html_standalone
     assert "</html>" in html_standalone
+
