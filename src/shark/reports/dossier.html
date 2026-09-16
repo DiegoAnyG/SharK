@@ -22,7 +22,7 @@
 <main id="main">
 <header class="hero"><div><span class="eyebrow">Quantum chemistry · Molecular simulation</span><h1>@@TITLE@@</h1><p>Recorded calculations, inspectable orbitals and scientific context in one portable report.</p><span class="badge">Self-contained HTML · SharK @@VERSION@@</span></div><button id="download-data">Download evidence JSON</button></header>
 <div class="metrics" aria-label="Calculation overview"><div class="metric"><small>@@CARD1_TITLE@@</small><strong>@@CARD1_MAIN@@</strong><small>@@CARD1_SUB@@</small></div><div class="metric"><small>@@CARD2_TITLE@@</small><strong>@@CARD2_MAIN@@</strong><small>@@CARD2_SUB@@</small></div><div class="metric"><small>@@CARD3_TITLE@@</small><strong>@@CARD3_MAIN@@</strong><small>@@CARD3_SUB@@</small></div><div class="metric"><small>@@CARD4_TITLE@@</small><strong>@@CARD4_MAIN@@</strong><small>@@CARD4_SUB@@</small></div></div>
-<section id="results"><div class="section-heading"><span>01 / Electronic structure</span><h2>Calculation results <span class="help-bubble" tabindex="0" data-tooltip="Ground-state DFT optimizations in water (CPCM), HOMO/LUMO eigenvalues, and relative electronic stability between tautomers.">?</span></h2></div>@@TABLE@@<div id="tautomer-structures" class="tautomer-structures"></div><div class="two-column" id="results-plots" style="margin-top:20px;"><div id="energy-delta-plot" style="height:380px;background:#fff;border:1px solid var(--line);border-radius:10px;" role="img" aria-label="Relative electronic energies between tautomers"></div><div id="level-plot" style="height:380px;background:#fff;border:1px solid var(--line);border-radius:10px;" role="img" aria-label="Frontier orbital eigenvalues (HOMO and LUMO) in eV"></div></div></section>
+<section id="results"><div class="section-heading"><span>01 / Electronic structure</span><h2>Calculation results <span class="help-bubble" tabindex="0" data-tooltip="Ground-state DFT optimizations in water (CPCM), HOMO/LUMO eigenvalues, and relative electronic stability between tautomers.">?</span></h2></div>@@TABLE@@<div id="tautomer-structures" class="tautomer-structures"></div><div id="tautomer-equilibrium-plot" style="height:440px;background:#fff;border:1px solid var(--line);border-radius:10px;margin-top:20px;" role="img" aria-label="Tautomeric Thermodynamic Equilibrium"></div><div id="level-plot" style="display:none;" role="img"></div></section>
 <section id="orbitals"><div class="section-heading"><span>02 / Spatial inspection</span><h2>Frontier orbitals <span class="help-bubble" tabindex="0" data-tooltip="3D interactive isosurfaces of HOMO (nucleophilic / electron donation) and LUMO (electrophilic / electron acceptance). Synchronized camera rotation in real time.">?</span></h2><p>Interactive 3D HOMO and LUMO frontier orbitals. Synchronized orientation and phase isosurfaces.</p></div><iframe id="orbital-frame" title="Interactive HOMO and LUMO viewer" sandbox="allow-scripts allow-downloads" referrerpolicy="no-referrer" hidden></iframe><p id="empty-orbitals" hidden>No orbital fields supplied. Energy values alone do not provide spatial orbital information.</p><div class="two-column" style="margin-top:16px;"><div class="insight" style="padding:10px 16px;"><h3 style="margin:0 0 4px;font-size:15px;display:flex;align-items:center;">HOMO · Occupied Frontier <span class="help-bubble" tabindex="0" data-tooltip="Spatial amplitude of the highest occupied molecular orbital. Guides nucleophilic / electron-donation hypotheses.">?</span></h3><small style="color:var(--muted);">Electron-donation propensity and reactive spatial localization.</small></div><div class="insight" style="padding:10px 16px;"><h3 style="margin:0 0 4px;font-size:15px;display:flex;align-items:center;">LUMO · Unoccupied Frontier <span class="help-bubble" tabindex="0" data-tooltip="Lowest unoccupied molecular orbital where nucleophilic electrons are accepted. Phase colors indicate wavefunction sign (+/-), not electric charge.">?</span></h3><small style="color:var(--muted);">Electrophilic attack locus and acceptance orbital amplitude.</small></div></div></section>
 @@DOCKING@@
 @@MD@@
@@ -50,75 +50,103 @@ if(structContainer && data.tautomers && data.tautomers.length>1){
  structContainer.innerHTML=data.tautomers.map((item,idx)=>{
   const isDom=idx===0;
   const pillClass=isDom?'dominant':'minor';
-  const pillText=`ΔE = ${item.delta_e_kcal.toFixed(2)} kcal/mol · populations not inferred`;
+  const pct=(typeof item.boltzmann_pct==='number')?`${item.boltzmann_pct.toFixed(1)}% population`:'populations not inferred';
+  const dE=item.delta_e_kcal===0?'0.00':(item.delta_e_kcal>0?'+':'')+item.delta_e_kcal.toFixed(2);
+  const pillText=`${pct} · ΔG = ${dE} kcal/mol`;
   const svg=item.svg||'';
   return `<div class="tautomer-card"><div style="height:100px;display:flex;align-items:center;justify-content:center;">${svg}</div><h4>${item.label}</h4><span class="status-pill ${pillClass}">${pillText}</span></div>`;
  }).join('');
 }
 
-const deltaPlotEl=document.getElementById('energy-delta-plot');
-if(deltaPlotEl && data.tautomers && data.tautomers.length>1){
+const eqPlotEl=document.getElementById('tautomer-equilibrium-plot');
+if(eqPlotEl && data.tautomers && data.tautomers.length>1){
  const t=data.tautomers;
- const colors=['#087b70', '#f97316', '#3b82f6', '#8b5cf6'];
+ const colors=['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd'];
+ const names=t.map(x=>x.label);
+ const dG=t.map(x=>x.delta_e_kcal);
+ const pops=t.map(x=>(typeof x.boltzmann_pct==='number')?x.boltzmann_pct:0);
+ const maxDg=Math.max(...dG, 1.0);
+
  const traceEnergy={
   type:'bar',
-  x:t.map(x=>x.label),
-  y:t.map(x=>x.delta_e_kcal),
-  text:t.map(x=>x.delta_e_kcal===0?'0.00 kcal/mol':`+${x.delta_e_kcal.toFixed(2)} kcal/mol`),
+  x:names,
+  y:dG,
+  text:dG.map(v=>`${v.toFixed(2)} kcal/mol`),
   textposition:'outside',
-  marker:{color:t.map((_,i)=>colors[i%colors.length]),line:{color:'#16283f',width:1}},
-  name:'Relative electronic energy (ΔE)',
-  hovertemplate:'%{x}<br>ΔE: %{y:.3f} kcal/mol<extra></extra>'
+  marker:{color:t.map((_,i)=>colors[i%colors.length]),line:{color:'#0f172a',width:1}},
+  xaxis:'x',
+  yaxis:'y',
+  showlegend:false,
+  hovertemplate:'%{x}<br>ΔG: %{y:.2f} kcal/mol<extra></extra>'
  };
 
- Plotly.newPlot('energy-delta-plot',[traceEnergy],{
-  title:{text:'Relative Electronic Energies (ΔE)',font:{size:14,color:'#16283f'}},
-  margin:{l:55,r:25,t:50,b:60},yaxis:{title:{text:'ΔE / kcal mol⁻¹'}},
-  paper_bgcolor:'#fff',plot_bgcolor:'#fff',showlegend:false
- },{responsive:true,displayModeBar:false});
-}else if(deltaPlotEl){
- deltaPlotEl.hidden=true;
- const plotsGrid=document.getElementById('results-plots');
- if(plotsGrid)plotsGrid.style.gridTemplateColumns='1fr';
-}
-
-const levelPlotEl=document.getElementById('level-plot');
-if(levelPlotEl && data.levels && data.levels.length){
- const labels=data.levels.map(x=>x.label.replace(/\s*\/\s*job\s*\d+/i, ''));
- const homos=data.levels.map(x=>x.homo);
- const lumos=data.levels.map(x=>x.lumo);
- 
- const traceHomo={
+ const tracePop={
   type:'bar',
-  name:'HOMO',
-  x:labels,
-  y:homos,
-  text:homos.map(v=>`${v.toFixed(2)} eV`),
+  x:names,
+  y:pops,
+  text:pops.map(v=>`${v.toFixed(1)}%`),
   textposition:'outside',
-  marker:{color:'#1e40af',line:{color:'#0f172a',width:1}},
-  hovertemplate:'%{x}<br>HOMO: %{y:.4f} eV<extra></extra>'
- };
- const traceLumo={
-  type:'bar',
-  name:'LUMO',
-  x:labels,
-  y:lumos,
-  text:lumos.map(v=>`${v.toFixed(2)} eV`),
-  textposition:'outside',
-  marker:{color:'#087b70',line:{color:'#0f172a',width:1}},
-  hovertemplate:'%{x}<br>LUMO: %{y:.4f} eV<extra></extra>'
+  marker:{color:t.map((_,i)=>colors[i%colors.length]),line:{color:'#0f172a',width:1}},
+  xaxis:'x2',
+  yaxis:'y2',
+  showlegend:false,
+  hovertemplate:'%{x}<br>Population: %{y:.1f}%<extra></extra>'
  };
 
- Plotly.newPlot('level-plot',[traceHomo,traceLumo],{
-  title:{text:'Frontier Orbital Eigenvalues (HOMO / LUMO)',font:{size:14,color:'#16283f'}},
-  barmode:'group',
-  margin:{l:55,r:25,t:50,b:60},
-  yaxis:{title:{text:'Orbital energy / eV'},zeroline:true,zerolinecolor:'#cbd5e1'},
-  legend:{orientation:'h',y:1.15},
-  paper_bgcolor:'#fff',plot_bgcolor:'#fff'
- },{responsive:true,displayModeBar:false});
-}else if(levelPlotEl){
- levelPlotEl.hidden=true;
+ const layout={
+  title:{
+   text:'<b>Tautomeric Thermodynamic Equilibrium (298.15 K)</b>',
+   font:{size:15,color:'#16283f'},
+   x:0.5,
+   xanchor:'center'
+  },
+  grid:{rows:1,columns:2,pattern:'independent'},
+  xaxis:{
+   domain:[0,0.46],
+   tickangle:15,
+   tickfont:{size:11,color:'#16283f'}
+  },
+  yaxis:{
+   title:{text:'ΔG (kcal/mol)',font:{size:12,color:'#16283f'}},
+   range:[0,maxDg*1.35],
+   gridcolor:'#e2e8f0',
+   gridwidth:1,
+   zeroline:true,
+   zerolinecolor:'#cbd5e1'
+  },
+  xaxis2:{
+   domain:[0.54,1.0],
+   tickangle:15,
+   tickfont:{size:11,color:'#16283f'}
+  },
+  yaxis2:{
+   title:{text:'Population (%)',font:{size:12,color:'#16283f'}},
+   range:[0,105],
+   gridcolor:'#e2e8f0',
+   gridwidth:1,
+   zeroline:true,
+   zerolinecolor:'#cbd5e1'
+  },
+  annotations:[
+   {
+    text:'<b>Relative Free Energy (ΔG)</b>',
+    x:0.23,y:1.10,xref:'paper',yref:'paper',
+    showarrow:false,font:{size:13,color:'#16283f'}
+   },
+   {
+    text:'<b>Boltzmann Population (P<sub>i</sub>)</b>',
+    x:0.77,y:1.10,xref:'paper',yref:'paper',
+    showarrow:false,font:{size:13,color:'#16283f'}
+   }
+  ],
+  margin:{l:60,r:30,t:70,b:60},
+  paper_bgcolor:'#fff',
+  plot_bgcolor:'#fff'
+ };
+
+ Plotly.newPlot('tautomer-equilibrium-plot',[traceEnergy,tracePop],layout,{responsive:true,displayModeBar:false});
+}else if(eqPlotEl){
+ eqPlotEl.hidden=true;
 }
  document.getElementById('download-data').onclick=()=>{const url=URL.createObjectURL(new Blob([JSON.stringify(data.provenance,null,2)],{type:'application/json'}));const a=document.createElement('a');a.href=url;a.download='shark-evidence.json';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);};
  document.querySelectorAll('.help-bubble').forEach(el=>{

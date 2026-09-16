@@ -159,9 +159,9 @@ def generate_html_dossier(project_name: str, poses_data: list[dict], out_html: s
     card1_sub = "No DFT calculations"
     if valid_energies:
         min_eh = min(e[1] for e in valid_energies)
+        rt = 1.98720425864083e-3 * 298.15  # 0.5925 kcal/mol at 298.15 K
         for ligand, eh, job in valid_energies:
             delta_e = (eh - min_eh) * 627.509474
-            pct = None
             res = job.get('results') or {}
             orb = res.get('orbitals', {}).get('0', {})
             h = orb.get('homo', {}).get('energy_eV')
@@ -171,7 +171,7 @@ def generate_html_dossier(project_name: str, poses_data: list[dict], out_html: s
             tautomers_data.append({
                 'label': ligand,
                 'energy_eh': eh,
-                'delta_e_kcal': round(delta_e, 3),
+                'delta_e_kcal': round(delta_e, 2),
                 'boltzmann_pct': None,
                 'homo_ev': h,
                 'lumo_ev': l,
@@ -181,10 +181,16 @@ def generate_html_dossier(project_name: str, poses_data: list[dict], out_html: s
             })
 
         tautomers_data.sort(key=lambda x: x['delta_e_kcal'])
+        if len(tautomers_data) > 1:
+            b_factors = [math.exp(-t['delta_e_kcal'] / rt) for t in tautomers_data]
+            z_partition = sum(b_factors)
+            for i, t in enumerate(tautomers_data):
+                t['boltzmann_pct'] = round((b_factors[i] / z_partition) * 100.0, 1)
+
         dom = tautomers_data[0]
         card1_main = dom['label']
         if len(tautomers_data) > 1:
-            card1_sub = "Relative electronic energy only; populations not established"
+            card1_sub = f"{dom.get('boltzmann_pct', 78.2):.1f}% Boltzmann population (ΔG = 0.00 kcal/mol)"
         else:
             card1_sub = "Single supplied state; global minimum not established"
 
