@@ -538,3 +538,110 @@ def match_covalent_pocket(
         pocket_residue_atoms=pocket_res_atoms
     )
 
+
+@dataclass
+class TotalCovalentFeasibility:
+    """Unified covalent feasibility integrating Pillars 1 (Affinity), 2 (Dynamics), and 3 (Eyring TS)."""
+    cfi_total: float
+    percentage: float
+    tier: str
+    affinity_score: float
+    nac_score: float
+    ts_score: Optional[float]
+    docking_score: Optional[float]
+    p_nac: Optional[float]
+    delta_g_ts: Optional[float]
+    weights: dict
+    summary: str
+
+
+def compute_total_covalent_feasibility(
+    docking_score: Optional[float] = None,
+    p_nac: Optional[float] = None,
+    delta_g_ts: Optional[float] = None,
+    static_cfi: Optional[float] = None,
+    w_aff: float = 0.20,
+    w_nac: float = 0.40,
+    w_ts: float = 0.40
+) -> TotalCovalentFeasibility:
+    """Computes the Unified Total Covalent Feasibility Index (CFI_total).
+
+    Parameters
+    ----------
+    docking_score : float or None
+        Non-covalent docking binding energy in kcal/mol (e.g., -6.8 kcal/mol).
+    p_nac : float or None
+        Near-Attack Conformation persistence from MD trajectory clustering in [0.0, 1.0].
+    delta_g_ts : float or None
+        Eyring activation free energy barrier in kcal/mol (from Tier 4 TS modeling).
+    static_cfi : float or None
+        Fallback static geometric composite feasibility if MD is unavailable.
+    w_aff : float
+        Weight for thermodynamic non-covalent affinity (default 0.20).
+    w_nac : float
+        Weight for conformational dynamics and near-attack persistence (default 0.40).
+    w_ts : float
+        Weight for chemical transition state activation barrier (default 0.40).
+    """
+    # 1. Pillar 1: Non-covalent affinity normalization
+    # Scores <= -8.0 kcal/mol -> 1.0; score >= -4.0 kcal/mol -> 0.0
+    if docking_score is not None and math.isfinite(docking_score):
+        s_aff = min(1.0, max(0.0, (-docking_score - 4.0) / 4.0))
+    else:
+        s_aff = 0.60  # Reasonable neutral prior for screened poses
+
+    # 2. Pillar 2: Near-Attack Conformation dynamics
+    if p_nac is not None and math.isfinite(p_nac):
+        s_nac = min(1.0, max(0.0, p_nac))
+    elif static_cfi is not None and math.isfinite(static_cfi):
+        s_nac = min(1.0, max(0.0, static_cfi))
+    else:
+        s_nac = 0.20
+
+    # 3. Pillar 3: Chemical activation barrier (Eyring kinetics)
+    if delta_g_ts is not None and math.isfinite(delta_g_ts):
+        # Sigmoid centered at 20.0 kcal/mol with width 2.0 kcal/mol
+        z = (delta_g_ts - 20.0) / 2.0
+        z = max(-30.0, min(30.0, z))
+        s_ts = 1.0 / (1.0 + math.exp(z))
+        weights = {"affinity": w_aff, "nac": w_nac, "ts": w_ts}
+        cfi_total = w_aff * s_aff + w_nac * s_nac + w_ts * s_ts
+    else:
+        s_ts = None
+        # Normalize weights between affinity and dynamics
+        norm = w_aff + w_nac
+        w_aff_norm = w_aff / norm if norm > 0 else 0.35
+        w_nac_norm = w_nac / norm if norm > 0 else 0.65
+        weights = {"affinity": round(w_aff_norm, 2), "nac": round(w_nac_norm, 2), "ts": 0.0}
+        cfi_total = w_aff_norm * s_aff + w_nac_norm * s_nac
+
+    cfi_total = round(max(0.0, min(1.0, cfi_total)), 4)
+    pct = round(cfi_total * 100.0, 1)
+
+    if cfi_total >= 0.75:
+        tier = "High Covalent Feasibility"
+    elif cfi_total >= 0.50:
+        tier = "Moderate Covalent Feasibility"
+    else:
+        tier = "Low Covalent Feasibility"
+
+    parts = [f"Total Covalent Feasibility: {pct:.1f}% ({tier})."]
+    parts.append(f"Pillar 1 (Affinity): {s_aff:.2f} (docking = {docking_score} kcal/mol).")
+    parts.append(f"Pillar 2 (Dynamics): {s_nac:.2f} (P_NAC = {p_nac if p_nac is not None else static_cfi}).")
+    if s_ts is not None:
+        parts.append(f"Pillar 3 (Kinetics): {s_ts:.2f} (ΔG‡ = {delta_g_ts:.2f} kcal/mol).")
+
+    return TotalCovalentFeasibility(
+        cfi_total=cfi_total,
+        percentage=pct,
+        tier=tier,
+        affinity_score=round(s_aff, 3),
+        nac_score=round(s_nac, 3),
+        ts_score=round(s_ts, 3) if s_ts is not None else None,
+        docking_score=docking_score,
+        p_nac=p_nac,
+        delta_g_ts=delta_g_ts,
+        weights=weights,
+        summary=" ".join(parts)
+    )
+

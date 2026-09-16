@@ -249,3 +249,4 @@ def test_prepare_ts_workflow_directory(mock_active_site, tmp_path):
     assert wf_dict["optts_template"].is_file()
     assert wf_dict["run_script"].is_file()
     assert "run_tier4_ts.sh" in str(wf_dict["run_script"])
+

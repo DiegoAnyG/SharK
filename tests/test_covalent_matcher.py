@@ -123,3 +123,38 @@ def test_target_residue_filter(synthetic_complex):
     assert len(rep2.pocket_nucleophiles) == 0
     assert rep2.has_nac is False
 
+
+def test_compute_total_covalent_feasibility():
+    from shark.analysis.covalent_matcher import compute_total_covalent_feasibility, TotalCovalentFeasibility
+
+    # Case 1: High feasibility (strong docking, high P_NAC, low activation barrier)
+    res_high = compute_total_covalent_feasibility(
+        docking_score=-7.8,
+        p_nac=0.76,
+        delta_g_ts=17.5,
+    )
+    assert isinstance(res_high, TotalCovalentFeasibility)
+    assert res_high.cfi_total >= 0.70
+    assert res_high.tier in ("High Covalent Feasibility", "Moderate Covalent Feasibility")
+    assert "Pillar 1" in res_high.summary
+    assert "Pillar 2" in res_high.summary
+    assert "Pillar 3" in res_high.summary
+
+    # Case 2: Infeasible (very high TS barrier)
+    res_low = compute_total_covalent_feasibility(
+        docking_score=-4.5,
+        p_nac=0.10,
+        delta_g_ts=32.0,
+    )
+    assert res_low.cfi_total < 0.50
+    assert res_low.tier == "Low Covalent Feasibility"
+
+    # Case 3: No TS modeled yet (falls back to affinity + trajectory P_NAC)
+    res_no_ts = compute_total_covalent_feasibility(
+        docking_score=-8.0,
+        p_nac=0.80,
+        delta_g_ts=None,
+    )
+    assert res_no_ts.ts_score is None
+    assert res_high.cfi_total > 0
+

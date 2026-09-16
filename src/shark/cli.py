@@ -349,7 +349,8 @@ def main(argv=None):
     if args.simple_gold_standard:
         args.covalent = True
     if args.full_gold_standard:
-        args.run_md = True
+        if not (args.topology and args.trajectory):
+            args.run_md = True
         args.covalent = True
     if args.tier_4_ts:
         args.covalent = True
@@ -704,6 +705,84 @@ def main(argv=None):
             else:
                 print(f"[TIER 4] To execute the transition state search manually, run:")
                 print(f"         bash {wf['run_script']}")
+
+        if covalent_summary is not None:
+            from .analysis.covalent_matcher import compute_total_covalent_feasibility
+            from .reports.adduct_viewer import generate_adduct_viewer_html, build_adduct_pdb
+
+            selected_poses = _get_selected_poses()
+            p_top = selected_poses[0] if selected_poses else (session.poses[0] if session.poses else None)
+            d_score = p_top.score if (p_top and math.isfinite(p_top.score)) else None
+            p_nac_val = clustering_info.get('p_nac') if clustering_info else None
+            ts_res = covalent_summary.get('transition_state', {})
+            dg_val = ts_res.get('delta_g_activation_kcal') if ts_res else None
+            static_cfi = all_contacts[0].get('composite_feasibility') if all_contacts else None
+
+            tot_feas = compute_total_covalent_feasibility(
+                docking_score=d_score,
+                p_nac=p_nac_val,
+                delta_g_ts=dg_val,
+                static_cfi=static_cfi
+            )
+            covalent_summary['total_feasibility'] = {
+                'cfi_total': tot_feas.cfi_total,
+                'percentage': tot_feas.percentage,
+                'tier': tot_feas.tier,
+                'affinity_score': tot_feas.affinity_score,
+                'nac_score': tot_feas.nac_score,
+                'ts_score': tot_feas.ts_score,
+                'docking_score': tot_feas.docking_score,
+                'p_nac': tot_feas.p_nac,
+                'delta_g_ts': tot_feas.delta_g_ts,
+                'weights': tot_feas.weights,
+                'summary': tot_feas.summary,
+            }
+            print(f"[FEASIBILITY] {tot_feas.summary}")
+
+            try:
+                target_res = args.target_residue or 'THR309'
+                best_c = all_contacts[0] if all_contacts else None
+                nucl_crd = None
+                el_crd = None
+                if all_nucl_atoms and best_c:
+                    for na in all_nucl_atoms:
+                        if na['residue'] == best_c.get('residue') and na['atom'] == best_c.get('nucleophile_atom'):
+                            nucl_crd = (na['x'], na['y'], na['z'])
+                            break
+                if all_lig_atoms and best_c:
+                    for la in all_lig_atoms:
+                        if la['index'] == best_c.get('ligand_atom_index'):
+                            el_crd = (la['x'], la['y'], la['z'])
+                            break
+
+                lig_input = None
+                rec_input = None
+                if 'cluster_rep' in locals() and cluster_rep and cluster_rep.snapshot_ligand_pdb and cluster_rep.snapshot_receptor_pdb:
+                    lig_input = cluster_rep.snapshot_ligand_pdb
+                    rec_input = cluster_rep.snapshot_receptor_pdb
+                elif p_top:
+                    lig_input = p_top.pose_file
+                    rec_input = session.receptor_for(p_top.receptor_id, raw=False)
+
+                if lig_input and rec_input:
+                    adduct_pdb = build_adduct_pdb(
+                        ligand_pdb_or_xyz=lig_input,
+                        receptor_pdb=rec_input,
+                        target_residue=target_res,
+                        dyad_residue=best_c.get('catalytic_dyad_residue') if best_c else 'ASP199'
+                    )
+                    covalent_summary['adduct_viewer_html'] = generate_adduct_viewer_html(
+                        pdb_data=adduct_pdb,
+                        target_residue=target_res,
+                        nucl_atom_coords=nucl_crd,
+                        el_atom_coords=el_crd,
+                        attack_distance=best_c.get('distance_angstrom') if best_c else None,
+                        burgi_dunitz_angle=best_c.get('burgi_dunitz_angle') if best_c else None,
+                        dyad_residue=best_c.get('catalytic_dyad_residue') if best_c else 'ASP199',
+                        standalone=False
+                    )
+            except Exception as e:
+                print(f"[NOTE] Could not generate 3Dmol adduct viewer: {e}")
 
         if args.dft:
             jobs = prepare_ligand_jobs(
