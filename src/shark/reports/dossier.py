@@ -187,12 +187,33 @@ def generate_html_dossier(project_name: str, poses_data: list[dict], out_html: s
             '</tr></thead><tbody>' + ''.join(contact_rows) + '</tbody></table></div>'
         ) if contact_rows else '<p>No nucleophiles within pocket cutoff distance.</p>'
 
+        covalent_plots = (
+            '<div class="covalent-visuals" style="margin-top:24px;">'
+            '<h3>Interactive 3D Binding Pocket &amp; Near-Attack Geometry</h3>'
+            '<p>3D visualization of the docked ligand, surrounding pocket nucleophiles, and the reactive attack trajectory vector. Drag to rotate in 3D, scroll to zoom.</p>'
+            '<div id="covalent-3d-plot" style="height:500px;background:#fff;border:1px solid var(--line);border-radius:8px;" role="img" aria-label="3D Pocket and Near-Attack Conformation"></div>'
+            '<div class="two-column" style="margin-top:20px;">'
+            '<div>'
+            '<h3>Bruice Near-Attack Feasibility Curve</h3>'
+            '<p>Continuous sigmoidal probability model mapping nucleophile-electrophile distance to geometric reaction feasibility (Bruice criterion, threshold 3.5 Å).</p>'
+            '<div id="covalent-curve-plot" style="height:360px;background:#fff;border:1px solid var(--line);border-radius:8px;" role="img" aria-label="Bruice NAC Feasibility Sigmoid Curve"></div>'
+            '</div>'
+            '<div>'
+            '<h3>Conceptual DFT / Warhead Electrophilicity</h3>'
+            '<p>Reactivity index and frontier electronic descriptors governing warhead electrophilic power and chemical softness.</p>'
+            '<div id="fukui-bar-plot" style="height:360px;background:#fff;border:1px solid var(--line);border-radius:8px;" role="img" aria-label="CDFT Electrophilicity Profile"></div>'
+            '</div>'
+            '</div>'
+            '</div>'
+        )
+
         covalent_html = (
             '<section id="covalent">'
             '<div class="section-heading"><span>03 / Warhead & Reactivity</span><h2>Covalent Near-Attack Conformations (NAC)</h2></div>'
             f'<p>{escape(str(covalent_summary.get("summary", "")))}</p>'
             + cdft_block
             + contact_table
+            + covalent_plots
             + '</section>'
         )
     # Legacy callers may still provide an explicit mesh rather than orbital exports.
@@ -208,7 +229,7 @@ def generate_html_dossier(project_name: str, poses_data: list[dict], out_html: s
                         COVALENT_STATUS=escape(cov_status), COVALENT_SUB=escape(cov_sub),
                         LEGACY=legacy, NOTES=f'<p>{escape(notes)}</p>' if notes else '',
                         PROVENANCE=escape(json.dumps(provenance, indent=2, default=str)),
-                        DATA=_json(dict(viewers=viewers, levels=levels, provenance=provenance, mesh=orbital_mesh)),
+                        DATA=_json(dict(viewers=viewers, levels=levels, provenance=provenance, mesh=orbital_mesh, covalent=covalent_summary)),
                         PLOTLY=get_plotlyjs())
     template = Path(__file__).with_name('dossier.html').read_text(encoding='utf-8')
     content = re.sub(r'@@([A-Z_]+)@@', lambda m: replacements.get(m[1], ''), template)

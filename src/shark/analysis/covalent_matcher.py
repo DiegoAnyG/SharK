@@ -79,6 +79,7 @@ class CovalentMatchReport:
     nac_contacts: List[CovalentContact] = field(default_factory=list)
     best_match: Optional[CovalentContact] = None
     summary: str = ""
+    ligand_atoms: List[Tuple[int, str, Tuple[float, float, float]]] = field(default_factory=list)
 
 
 def _euclidean_distance(p1: Tuple[float, float, float], p2: Tuple[float, float, float]) -> float:
@@ -365,5 +366,7 @@ def match_covalent_pocket(
         has_nac=has_nac,
         nac_contacts=nac_list,
         best_match=best_match,
-        summary=summary
+        summary=summary,
+        ligand_atoms=lig_atoms
     )
+

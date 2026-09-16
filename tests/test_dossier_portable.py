@@ -98,3 +98,27 @@ def test_covalent_dossier_rendering(tmp_path):
     assert "3.12" in text
     assert "Electrophilicity index" in text
     assert "3.09 eV" in text
+    assert "covalent-3d-plot" in text
+    assert "covalent-curve-plot" in text
+    assert "fukui-bar-plot" in text
+    assert "Bruice Near-Attack Feasibility Curve" in text
+
+
+def test_load_dft_records_and_render_combined(tmp_path):
+    from shark.cli import load_dft_records
+    dft_dir = Path("dft_benzofuroxan")
+    records = load_dft_records(dft_dir, tmp_path)
+    assert len(records) == 2
+    for r in records:
+        assert r["status"] == "completed"
+        assert r["results"]["stationary_minimum_verified"] is True
+        assert r["results"]["orbitals"]["0"]["homo"]["energy_eV"] < 0
+        assert r["results"]["orbitals"]["0"]["lumo"]["energy_eV"] < 0
+
+    out_file = tmp_path / "combined_dossier.html"
+    res = generate_html_dossier("CombinedTest", [], out_file, qm_summary={"jobs": records})
+    content = res.read_text(encoding="utf-8")
+    assert "Recorded calculations" in content
+    assert "<strong>2</strong>" in content
+    assert "tautomer_1_oxide" in content
+    assert "tautomer_3_oxide" in content

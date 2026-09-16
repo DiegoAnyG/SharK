@@ -83,6 +83,60 @@ def run_interactive():
     return main(argv)
 
 
+def load_dft_records(dft_dir: Path, report_dir: Path) -> list[dict]:
+    """Parse existing ORCA calculations from a directory and build dossier job records."""
+    from .core.parser import parse_orca_results
+    records = []
+    for out_file in sorted(dft_dir.glob("*.out")):
+        try:
+            res = parse_orca_results(out_file, name=out_file.stem)
+            if not res.converged and res.el_energy == 0.0:
+                continue
+
+            channels = {}
+            if res.homo_energy is not None and res.lumo_energy is not None:
+                channels["0"] = {
+                    "homo": {"number": 0, "energy_eV": res.homo_energy},
+                    "lumo": {"number": 1, "energy_eV": res.lumo_energy},
+                    "gap_ev": res.homo_lumo_gap if res.homo_lumo_gap is not None else (res.lumo_energy - res.homo_energy)
+                }
+
+            viewer_rel = None
+            for cand in [dft_dir / "frontier_orbitals.html", dft_dir / f"{out_file.stem}_orbitals.html",
+                         report_dir / "benzofuroxan_tautomers" / "frontier_orbitals.html"]:
+                if cand.is_file():
+                    try:
+                        viewer_rel = Path(os.path.relpath(cand, report_dir)).as_posix()
+                        break
+                    except ValueError:
+                        pass
+
+            records.append({
+                "selection": {"ligand_id": res.name},
+                "status": "completed" if res.converged else "failed",
+                "parameters": {
+                    "method": "B3LYP/def2-SVP",
+                    "solvent": "CPCM(Water)",
+                    "charge": 0,
+                    "multiplicity": 1,
+                },
+                "results": {
+                    "electronic_energy_hartree": res.el_energy,
+                    "orca_version": "6.0.0",
+                    "optimization_converged": res.converged,
+                    "stationary_minimum_verified": res.is_stationary_minimum,
+                    "frequencies_cm1": res.frequencies,
+                    "imaginary_frequencies_cm1": res.imaginary_frequencies,
+                    "orbitals": channels
+                },
+                "viewer_link": viewer_rel,
+                "source": {"kind": "DFT geometry optimization"}
+            })
+        except Exception:
+            continue
+    return records
+
+
 def main(argv=None):
     arguments = list(sys.argv[1:] if argv is None else argv)
     if arguments and arguments[0] == 'run-qm':
@@ -129,6 +183,7 @@ def main(argv=None):
     parser.add_argument('--time-ns', type=float, default=10.0, help='Simulation time in nanoseconds for MD')
     parser.add_argument('--covalent', action='store_true', help='Perform Conceptual DFT reactivity profiling and pocket Near-Attack Conformation matching')
     parser.add_argument('--target-residue', help='Target nucleophile residue to scan (e.g. CYS145, CYS, 145)')
+    parser.add_argument('--dft-dir', help='Directory with existing ORCA calculation outputs (.out) to load into report')
     args = parser.parse_args(arguments)
     if args.interactive or not arguments:
         try:
@@ -250,6 +305,27 @@ def main(argv=None):
                     if c.is_nac:
                         nac_contacts.append(c)
 
+            all_nucl_atoms = []
+            all_lig_atoms = []
+            if 'rep' in locals() and getattr(rep, 'pocket_nucleophiles', None):
+                for n in rep.pocket_nucleophiles:
+                    all_nucl_atoms.append({
+                        'residue': n.residue_label,
+                        'atom': n.atom_name,
+                        'x': n.coordinates[0],
+                        'y': n.coordinates[1],
+                        'z': n.coordinates[2]
+                    })
+            if 'rep' in locals() and getattr(rep, 'ligand_atoms', None):
+                for idx, elem, crd in rep.ligand_atoms:
+                    all_lig_atoms.append({
+                        'index': idx,
+                        'element': elem,
+                        'x': crd[0],
+                        'y': crd[1],
+                        'z': crd[2]
+                    })
+
             covalent_summary = {
                 'has_nac': len(nac_contacts) > 0,
                 'summary': " ".join(summaries),
@@ -267,7 +343,10 @@ def main(argv=None):
                     }
                     for c in nac_contacts
                 ],
-                'pocket_nucleophiles': pocket_nucls
+                'pocket_nucleophiles': pocket_nucls,
+                'pocket_nucleophile_atoms': all_nucl_atoms,
+                'ligand_atoms': all_lig_atoms,
+                'ligand_name': selected_poses[0].ligand_id if selected_poses else 'Ligand'
             }
 
         if args.dft:
@@ -305,7 +384,31 @@ def main(argv=None):
             root = Path(os.environ.get('SHARK_SCRATCH', tempfile.gettempdir())).expanduser()
             root.mkdir(parents=True, exist_ok=True)
             out_file = Path(tempfile.mkdtemp(prefix='shark-dft-report-', dir=root)) / 'dossier.html'
-        generate_html_dossier(session.project_name, poses_data, out_file, covalent_summary=covalent_summary)
+
+        qm_summary = None
+        if args.dft_dir:
+            dft_path = Path(args.dft_dir)
+            if dft_path.is_dir():
+                records = load_dft_records(dft_path, out_file.parent)
+                if records:
+                    qm_summary = {'jobs': records}
+                    print(f"[DFT] Loaded {len(records)} existing quantum calculation(s) from {dft_path}")
+                    if covalent_summary and 'cdft' not in covalent_summary:
+                        first_orb = records[0].get('results', {}).get('orbitals', {}).get('0', {})
+                        h = first_orb.get('homo', {}).get('energy_eV')
+                        l = first_orb.get('lumo', {}).get('energy_eV')
+                        if h is not None and l is not None:
+                            from .analysis.reactivity import calculate_cdft_descriptors
+                            desc = calculate_cdft_descriptors(homo_ev=h, lumo_ev=l)
+                            covalent_summary['cdft'] = {
+                                'hardness_ev': desc.hardness_ev,
+                                'chemical_potential_ev': desc.chemical_potential_ev,
+                                'electrophilicity_ev': desc.electrophilicity_ev,
+                                'softness_ev': desc.softness_ev,
+                            }
+
+        generate_html_dossier(session.project_name, poses_data, out_file,
+                              qm_summary=qm_summary, covalent_summary=covalent_summary)
         print(f'[REPORT] {out_file}')
         return 0
     except KeyboardInterrupt:

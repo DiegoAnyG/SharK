@@ -46,6 +46,73 @@ for(const [i,item] of data.levels.entries()){
 if(traces.length){Plotly.newPlot('level-plot',traces,{margin:{l:65,r:20,t:30,b:85},yaxis:{title:{text:'Orbital energy / eV'},zeroline:false},xaxis:{tickmode:'array',tickvals:data.levels.map((_,i)=>i),ticktext:data.levels.map(x=>x.label+'<br>Spin '+x.spin)},font:{family:'system-ui',color:'#16283f'},legend:{orientation:'h'},paper_bgcolor:'#fff',plot_bgcolor:'#fff'},{responsive:true,displayModeBar:false});}else{document.getElementById('level-plot').hidden=true;}
 document.getElementById('download-data').onclick=()=>{const url=URL.createObjectURL(new Blob([JSON.stringify(data.provenance,null,2)],{type:'application/json'}));const a=document.createElement('a');a.href=url;a.download='shark-evidence.json';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);};
 if(data.mesh){const traces=[];for(const [key,color] of [['pos','#2878B5'],['neg','#D64B40']])if(data.mesh[key])traces.push({type:'mesh3d',...data.mesh[key],color,name:key});if(data.mesh.atoms)traces.push({type:'scatter3d',mode:'markers',...data.mesh.atoms,marker:{size:data.mesh.atoms.size||5,color:data.mesh.atoms.color||'#526277'}});Plotly.newPlot('legacy-mesh',traces,{height:480,scene:{aspectmode:'data'}},{responsive:true});}
+if(data.covalent){
+ const cov=data.covalent;
+ const cov3dEl=document.getElementById('covalent-3d-plot');
+ if(cov3dEl){
+  const traces3d=[];
+  const ligAtoms=cov.ligand_atoms||[];
+  if(ligAtoms.length>0){
+   const elemColors={C:'#475569',O:'#ef4444',N:'#3b82f6',S:'#eab308',H:'#94a3b8',P:'#f97316',F:'#10b981',CL:'#22c55e',BR:'#78350f'};
+   const lx=ligAtoms.map(a=>a.x),ly=ligAtoms.map(a=>a.y),lz=ligAtoms.map(a=>a.z);
+   const lc=ligAtoms.map(a=>elemColors[(a.element||'').toUpperCase()]||'#6b7280');
+   const lt=ligAtoms.map(a=>'Ligand Atom #'+a.index+' ('+a.element+')<br>Coords: ('+a.x.toFixed(2)+', '+a.y.toFixed(2)+', '+a.z.toFixed(2)+')');
+   const bx=[],by=[],bz=[];
+   for(let i=0;i<ligAtoms.length;i++){
+    for(let j=i+1;j<ligAtoms.length;j++){
+     const dx=ligAtoms[i].x-ligAtoms[j].x,dy=ligAtoms[i].y-ligAtoms[j].y,dz=ligAtoms[i].z-ligAtoms[j].z;
+     const d=Math.sqrt(dx*dx+dy*dy+dz*dz);
+     if(d>=0.8&&d<=1.85){
+      bx.push(ligAtoms[i].x,ligAtoms[j].x,null);
+      by.push(ligAtoms[i].y,ligAtoms[j].y,null);
+      bz.push(ligAtoms[i].z,ligAtoms[j].z,null);
+     }
+    }
+   }
+   if(bx.length>0){
+    traces3d.push({type:'scatter3d',mode:'lines',x:bx,y:by,z:bz,line:{color:'#64748b',width:4},hoverinfo:'skip',showlegend:false,name:'Ligand Bonds'});
+   }
+   traces3d.push({type:'scatter3d',mode:'markers',x:lx,y:ly,z:lz,text:lt,hoverinfo:'text',marker:{size:7,color:lc,line:{color:'#0f172a',width:1}},name:'Ligand ('+(cov.ligand_name||'Pose')+')'});
+  }
+  const nucls=cov.pocket_nucleophile_atoms||[];
+  if(nucls.length>0){
+   const nx=nucls.map(n=>n.x),ny=nucls.map(n=>n.y),nz=nucls.map(n=>n.z);
+   const nt=nucls.map(n=>n.residue+' ('+n.atom+')<br>Coords: ('+n.x.toFixed(2)+', '+n.y.toFixed(2)+', '+n.z.toFixed(2)+')');
+   traces3d.push({type:'scatter3d',mode:'markers+text',x:nx,y:ny,z:nz,text:nucls.map(n=>n.residue+':'+n.atom),textposition:'top center',textfont:{size:10,color:'#065f46'},hoverinfo:'text',hovertext:nt,marker:{size:9,color:'#059669',symbol:'diamond',line:{color:'#064e3b',width:1.5}},name:'Pocket Nucleophiles'});
+  }
+  const contacts=cov.contacts||[];
+  if(contacts.length>0){
+   const best=contacts[0];
+   const targetNucl=nucls.find(n=>n.residue===best.residue&&n.atom===best.nucleophile_atom);
+   const targetLig=ligAtoms.find(a=>a.index===best.ligand_atom_index)||ligAtoms[0];
+   if(targetNucl&&targetLig){
+    traces3d.push({type:'scatter3d',mode:'lines+text',x:[targetLig.x,targetNucl.x],y:[targetLig.y,targetNucl.y],z:[targetLig.z,targetNucl.z],line:{color:best.is_nac?'#dc2626':'#d97706',width:6,dash:'dash'},text:['','d = '+best.distance_angstrom.toFixed(2)+' Å ('+(best.is_nac?'NAC':'Proximal')+')'],textposition:'middle right',textfont:{size:11,color:best.is_nac?'#b91c1c':'#b45309'},hovertemplate:'Attack Vector: '+best.distance_angstrom.toFixed(2)+' Å<br>Feasibility: '+best.feasibility_score.toFixed(2)+'<extra></extra>',name:'Near-Attack Vector ('+best.distance_angstrom.toFixed(2)+' Å)'});
+   }
+  }
+  if(traces3d.length>0){
+   Plotly.newPlot('covalent-3d-plot',traces3d,{scene:{xaxis:{title:'X / Å',showgrid:true,zeroline:false},yaxis:{title:'Y / Å',showgrid:true,zeroline:false},zaxis:{title:'Z / Å',showgrid:true,zeroline:false},aspectmode:'data',camera:{eye:{x:1.4,y:1.4,z:1.2}}},margin:{l:10,r:10,t:30,b:10},legend:{orientation:'h',y:1.05},paper_bgcolor:'#fff'},{responsive:true});
+  }
+ }
+ const curveEl=document.getElementById('covalent-curve-plot');
+ if(curveEl){
+  const curveX=[],curveY=[];
+  for(let d=1.5;d<=6.0;d+=0.05){curveX.push(d);curveY.push(1.0/(1.0+Math.exp((d-3.5)/0.4)));}
+  const curveTraces=[{type:'scatter',mode:'lines',x:curveX,y:curveY,line:{color:'#087b70',width:3},name:'Bruice Sigmoid',hovertemplate:'Distance: %{x:.2f} Å<br>Feasibility: %{y:.3f}<extra></extra>'}];
+  const contacts=cov.contacts||[];
+  if(contacts.length>0){
+   curveTraces.push({type:'scatter',mode:'markers+text',x:contacts.map(c=>c.distance_angstrom),y:contacts.map(c=>c.feasibility_score),text:contacts.map(c=>c.residue+' ('+c.nucleophile_atom+')'),textposition:'top right',textfont:{size:10},marker:{size:contacts.map(c=>c.is_nac?12:8),color:contacts.map(c=>c.is_nac?'#dc2626':'#64748b'),symbol:contacts.map(c=>c.is_nac?'star':'circle'),line:{color:'#16283f',width:1}},name:'Pocket Residues',hovertemplate:'%{text}<br>Distance: %{x:.2f} Å<br>Feasibility: %{y:.3f}<extra></extra>'});
+  }
+  Plotly.newPlot('covalent-curve-plot',curveTraces,{margin:{l:55,r:20,t:25,b:45},xaxis:{title:{text:'Distance / Å'},range:[1.5,6.0],zeroline:false},yaxis:{title:{text:'Feasibility score'},range:[-0.05,1.05]},shapes:[{type:'line',x0:3.5,x1:3.5,y0:0,y1:1,line:{color:'#dc2626',width:2,dash:'dash'}},{type:'rect',x0:1.5,x1:3.5,y0:0,y1:1,fillcolor:'rgba(8, 123, 112, 0.08)',line:{width:0}}],annotations:[{x:2.5,y:0.92,text:'NAC Zone (<= 3.5 Å)',showarrow:false,font:{color:'#087b70',size:11,weight:'bold'}},{x:4.75,y:0.92,text:'Diffusive (> 3.5 Å)',showarrow:false,font:{color:'#64748b',size:11}}],legend:{orientation:'h',y:1.15},paper_bgcolor:'#fff',plot_bgcolor:'#fff'},{responsive:true});
+ }
+ const fukuiEl=document.getElementById('fukui-bar-plot');
+ if(fukuiEl){
+  const cdft=cov.cdft||{};
+  const cdftLabels=['Hardness (η)','Electroneg. (χ)','Electrophilicity (ω)','Softness (10×S)'];
+  const cdftVals=[cdft.hardness_ev||0,Math.abs(cdft.chemical_potential_ev||0),cdft.electrophilicity_ev||0,(cdft.softness_ev||0)*10];
+  const fukuiTraces=[{type:'bar',x:cdftLabels,y:cdftVals,marker:{color:['#3b82f6','#8b5cf6','#dc2626','#087b70']},hovertemplate:'%{x}: %{y:.3f} eV<extra></extra>'}];
+  Plotly.newPlot('fukui-bar-plot',fukuiTraces,{margin:{l:55,r:20,t:25,b:45},yaxis:{title:{text:'Value / eV'},zeroline:false},paper_bgcolor:'#fff',plot_bgcolor:'#fff'},{responsive:true});
+ }
+}
 window.sharkDossierReady=true;
 </script>
 </body></html>

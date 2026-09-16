@@ -98,3 +98,4 @@ def test_run_md_from_session_selects_raw_receptor(mock_pipeline_dir, mock_sessio
     content = prep_rec.read_text()
     assert "RAW RECEPTOR PDB FOR MD" in content
     assert "DOCKING READY PDB" not in content
+

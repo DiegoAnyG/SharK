@@ -42,3 +42,4 @@ def test_raw_receptor_fallback_when_no_ready(tmp_path):
     
     rec_raw = session.receptor_for("3ACX~Pk1", raw=True)
     assert rec_raw.name == "3ACX.pdb"
+

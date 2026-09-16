@@ -122,3 +122,4 @@ def test_target_residue_filter(synthetic_complex):
     rep2 = match_covalent_pocket(rec_pdb, lig_pdb, target_residue="SER")
     assert len(rep2.pocket_nucleophiles) == 0
     assert rep2.has_nac is False
+
