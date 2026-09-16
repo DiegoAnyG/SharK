@@ -103,17 +103,32 @@ function getActivePairScenes(){
  return (activePair&&activePair.length>=2)?activePair:[scenes[0],scenes[1]||scenes[0]];
 }
 
+let resizeTimer;
+window.addEventListener('resize', ()=>{
+ clearTimeout(resizeTimer);
+ resizeTimer = setTimeout(async ()=>{
+  if(plot && plot.data){
+   await Plotly.relayout(plot, {width: Math.max(280, plot.clientWidth)});
+   if(parent && parent.postMessage){
+    parent.postMessage({type:'shark-viewer-size', height: Math.ceil(document.body.getBoundingClientRect().height)}, '*');
+   }
+  }
+ }, 150);
+});
+
 async function applyGroupSelection(val){
  if(!plot||!plot.data)return;
  const updateLayout={};
- const visibleTraces=[];
+ const activeTraces=[];
+ const inactiveTraces=[];
+
  if(val==='all'){
   activePair=[scenes[0],scenes[1]||scenes[0]];
   for(let p=0;p<provenance.orbitals.length;p++){
    const sc=scenes[p];
    updateLayout[`${sc}.domain`]=structuredClone(initialLayoutDomains[sc]||{x:[0,1],y:[0,1]});
   }
-  for(let t=0;t<figure.data.length;t++)visibleTraces.push(true);
+  for(let t=0;t<figure.data.length;t++)activeTraces.push(t);
   updateLayout.annotations=structuredClone(initialAnnotations);
   updateLayout.height=initial.height||figure.layout.height||960;
  }else{
@@ -121,27 +136,35 @@ async function applyGroupSelection(val){
   const grp=calcGroups[g]||calcGroups[0];
   const activeIndices=grp.indices;
   activePair=activeIndices.map(idx=>scenes[idx]);
+
   for(let p=0;p<provenance.orbitals.length;p++){
    const sc=scenes[p];
    if(activeIndices.includes(p)){
     const col=activeIndices.indexOf(p);
     updateLayout[`${sc}.domain`]=col===0?{x:[0.0,0.485],y:[0.05,0.95]}:{x:[0.515,1.0],y:[0.05,0.95]};
    }else{
-    updateLayout[`${sc}.domain`]={x:[0.0,0.0],y:[0.0,0.0]};
+    // Move inactive scenes off-screen with non-zero dimensions to avoid WebGL divide-by-zero
+    updateLayout[`${sc}.domain`]={x:[2.0,2.5],y:[2.0,2.5]};
    }
   }
+
   for(let t=0;t<figure.data.length;t++){
    const tr=figure.data[t];
    const scName=tr.scene||'scene';
-   visibleTraces.push(activePair.includes(scName));
+   if(activePair.includes(scName)){
+    activeTraces.push(t);
+   }else{
+    inactiveTraces.push(t);
+   }
   }
+
   const newAnns=structuredClone(initialAnnotations);
   newAnns.forEach((ann,idx)=>{
    if(idx<provenance.orbitals.length){
     if(activeIndices.includes(idx)){
      const col=activeIndices.indexOf(idx);
      ann.x=col===0?0.24:0.76;
-     ann.y=1.02;
+     ann.y=1.03;
      ann.visible=true;
     }else{
      ann.visible=false;
@@ -151,8 +174,11 @@ async function applyGroupSelection(val){
   updateLayout.annotations=newAnns;
   updateLayout.height=540;
  }
- await Plotly.restyle(plot,{visible:visibleTraces});
+
+ if(activeTraces.length>0)await Plotly.restyle(plot,{visible:true},activeTraces);
+ if(inactiveTraces.length>0)await Plotly.restyle(plot,{visible:false},inactiveTraces);
  await Plotly.relayout(plot,updateLayout);
+
  if(parent&&parent.postMessage){
   parent.postMessage({type:'shark-viewer-size',height:Math.ceil(document.body.getBoundingClientRect().height)},'*');
  }
@@ -226,10 +252,9 @@ async function updateSurfaces(){
  update.opacity=indices.map(()=>settings.opacity);
  update.color=indices.map((_,i)=>i%2===0?settings.positive_color:settings.negative_color);
  await Plotly.restyle(plot,update,indices);
- const annotations=structuredClone(plot.layout.annotations);annotations[annotations.length-1].text=amplitudeText();
- await Plotly.relayout(plot,{annotations,'meta.isovalue':settings.isovalue});
+ await Plotly.relayout(plot,{'meta.isovalue':settings.isovalue});
  const absent=surfaces.filter(s=>s.variants[String(settings.isovalue)].x.length===0).length;
- setStatus(absent?`${absent} phase surface(s) absent at this isovalue. No amplitudes were rescaled.`:`${provenance.orbitals.length} orbital fields | shared isovalue ${settings.isovalue} bohr^-3/2`);
+ setStatus(absent?`${absent} phase surface(s) absent at this isovalue. No amplitudes were rescaled.`:`Isosurface: +/- ${settings.isovalue} bohr^(-3/2) · Phase colors indicate sign of wavefunction amplitude (blue = positive, red = negative)`);
 }
 iso.addEventListener('change',async()=>{settings.isovalue=Number(iso.value);await updateSurfaces();});
 document.getElementById('opacity').addEventListener('change',async e=>{settings.opacity=Number(e.target.value);await updateSurfaces();});

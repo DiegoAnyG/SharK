@@ -83,18 +83,16 @@ def _embedded_viewer(job, report_dir):
     document, count = re.subn(r'<head\b[^>]*>', lambda m: m[0] + guard, document, count=1, flags=re.I)
     if not count:
         raise ValueError('Orbital viewer must be a complete HTML document')
-    responsive = """<style>html,body{max-width:100%;overflow-x:hidden}header{display:none!important}main{padding:12px 16px 16px}#plot{width:100%}</style>
+    responsive = """<style>html,body{max-width:100%;overflow-x:hidden}header{display:none!important}main{padding:8px 12px 16px}#plot{width:100%}</style>
 <script>
-(()=>{let original=null,timer;async function fit(){
- const plot=document.getElementById('plot');if(!window.sharkReady||!plot){timer=setTimeout(fit,100);return;}
- const names=Object.keys(plot.layout).filter(k=>/^scene[0-9]*$/.test(k));
- if(!original)original={annotations:structuredClone(plot.layout.annotations),domains:names.map(n=>structuredClone(plot.layout[n].domain)),height:plot.layout.height};
- const narrow=innerWidth<650,annotations=structuredClone(original.annotations),update={width:Math.max(240,plot.clientWidth),height:narrow?names.length*370+140:original.height,'title.text':'',margin:{l:12,r:12,t:75,b:90}};
- names.forEach((name,i)=>{const domain=narrow?{x:[0,1],y:[(names.length-i-1)/names.length+.03,(names.length-i)/names.length-.06]}:original.domains[i];update[name+'.domain']=domain;if(narrow&&annotations[i]){annotations[i].x=.5;annotations[i].y=domain.y[1]+.015;}});
- if(narrow)annotations.forEach((a,i)=>{a.font={...a.font,size:10};if(i>=names.length)a.text=a.text.replaceAll(' | ','<br>');});
- update.annotations=annotations;await Plotly.relayout(plot,update);window.sharkEmbeddedReady=true;
- parent.postMessage({type:'shark-viewer-size',height:Math.ceil(document.body.getBoundingClientRect().height)},'*');
- }addEventListener('resize',()=>{clearTimeout(timer);timer=setTimeout(fit,150);});fit();})();
+(()=>{
+ function reportSize(){
+  if(parent && parent.postMessage){
+   parent.postMessage({type:'shark-viewer-size', height:Math.ceil(document.body.getBoundingClientRect().height)}, '*');
+  }
+ }
+ window.addEventListener('load', ()=>{ setTimeout(reportSize, 100); setTimeout(reportSize, 500); });
+})();
 </script>"""
     return document.replace('</body>', responsive+'</body>')
 
