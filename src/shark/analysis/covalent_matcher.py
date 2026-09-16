@@ -88,6 +88,7 @@ class CovalentMatchReport:
     best_match: Optional[CovalentContact] = None
     summary: str = ""
     ligand_atoms: List[Tuple[int, str, Tuple[float, float, float]]] = field(default_factory=list)
+    pocket_residue_atoms: List[dict] = field(default_factory=list)
 
 
 def _euclidean_distance(p1: Tuple[float, float, float], p2: Tuple[float, float, float]) -> float:
@@ -506,6 +507,24 @@ def match_covalent_pocket(
     else:
         summary = f"No reactive pocket nucleophiles (Cys, Ser, Thr, Lys, His, Tyr) within {pocket_cutoff:.1f} A of {lig_lbl}."
 
+    pocket_res_atoms = []
+    if rec_atoms and lig_atoms:
+        for a in rec_atoms:
+            acrd = a["coords"]
+            for _, _, lcrd in lig_atoms:
+                if (acrd[0]-lcrd[0])**2 + (acrd[1]-lcrd[1])**2 + (acrd[2]-lcrd[2])**2 <= 30.25:
+                    pocket_res_atoms.append({
+                        "residue": f"{a['res_name']}{a['res_seq']}:{a['chain_id']}",
+                        "atom": a["atom_name"],
+                        "element": a.get("element") or a["atom_name"][0],
+                        "x": acrd[0],
+                        "y": acrd[1],
+                        "z": acrd[2]
+                    })
+                    break
+            if len(pocket_res_atoms) >= 160:
+                break
+
     return CovalentMatchReport(
         receptor_name=rec_lbl,
         ligand_name=lig_lbl,
@@ -515,6 +534,7 @@ def match_covalent_pocket(
         nac_contacts=nac_list,
         best_match=best_match,
         summary=summary,
-        ligand_atoms=lig_atoms
+        ligand_atoms=lig_atoms,
+        pocket_residue_atoms=pocket_res_atoms
     )
 

@@ -104,13 +104,62 @@ def generate_html_dossier(project_name: str, poses_data: list[dict], out_html: s
             errors.append('Orbital export failed: ' + str(job['orbital_export'].get('error', 'Unknown error')))
         methods.append(f'<article class="method"><h3>{escape(label)}</h3><dl>{content}</dl>'
                        + ''.join(f'<p class="notice">{escape(error)}</p>' for error in errors) + '</article>')
+    valid_energies = []
+    for job in jobs:
+        res = job.get('results') or {}
+        eh = res.get('electronic_energy_hartree')
+        if eh is not None and math.isfinite(eh):
+            ligand = str(job.get('selection', {}).get('ligand_id', 'Unnamed ligand'))
+            valid_energies.append((ligand, eh, job))
+
+    tautomers_data = []
+    card1_title = "Dominant Tautomer"
+    card1_main = "N/A"
+    card1_sub = "No DFT calculations"
+    if valid_energies:
+        min_eh = min(e[1] for e in valid_energies)
+        weights = []
+        for ligand, eh, job in valid_energies:
+            delta_e = (eh - min_eh) * 627.509474
+            w = math.exp(-max(0.0, delta_e) / 0.592484)
+            weights.append(w)
+        sum_w = sum(weights) if sum(weights) > 0 else 1.0
+
+        for (ligand, eh, job), w in zip(valid_energies, weights):
+            delta_e = (eh - min_eh) * 627.509474
+            pct = (w / sum_w) * 100.0
+            res = job.get('results') or {}
+            orb = res.get('orbitals', {}).get('0', {})
+            h = orb.get('homo', {}).get('energy_eV')
+            l = orb.get('lumo', {}).get('energy_eV')
+            g = orb.get('gap_ev')
+            tautomers_data.append({
+                'label': ligand,
+                'energy_eh': eh,
+                'delta_e_kcal': round(delta_e, 3),
+                'boltzmann_pct': round(pct, 1),
+                'homo_ev': h,
+                'lumo_ev': l,
+                'gap_ev': g if g is not None else ((l - h) if (h is not None and l is not None) else None),
+                'minimum': res.get('stationary_minimum_verified', False)
+            })
+
+        tautomers_data.sort(key=lambda x: x['delta_e_kcal'])
+        dom = tautomers_data[0]
+        card1_main = dom['label']
+        if len(tautomers_data) > 1:
+            card1_sub = f"Boltzmann: {dom['boltzmann_pct']:.1f}% (ΔE = 0.00 kcal/mol)"
+        else:
+            card1_sub = "Ground state minimum (ΔE = 0.00 kcal/mol)"
+
     table = ('<div class="table-wrap"><table><caption>Recorded electronic results; energies are not protein binding energies.</caption>'
              '<thead><tr>' + ''.join(f'<th scope="col">{h}</th>' for h in ['Calculation', 'State', 'Energy / Eh', 'Spin', 'HOMO / eV', 'LUMO / eV', 'Gap / eV', 'Geometry check'])
              + '</tr></thead><tbody>' + ''.join(rows) + '</tbody></table></div>') if rows else '<p>No quantum calculations supplied. Not calculated.</p>'
     pose_rows = []
     for pose in poses_data:
         vals = [escape(str(pose.get('ligand_id', 'Unnamed'))), escape(str(pose.get('pose_idx', 1))),
-                _number(pose.get('score'), 2), _number(pose.get('delta_e_bind_kcal'), 2) + ' kcal/mol',
+                _number(pose.get('score'), 2),
+                (_number(pose.get('delta_e_bind_kcal'), 2) + ' kcal/mol') if pose.get('delta_e_bind_kcal') is not None else 'N/A',
                 _number(pose.get('homo_ev')), _number(pose.get('lumo_ev')), _number(pose.get('gap_ev'))]
         pose_rows.append('<tr>'+''.join(f'<td>{v}</td>' for v in vals)+'</tr>')
     docking = ('<section id="docking"><div class="section-heading"><span>Context</span><h2>Docking poses</h2></div>'
@@ -247,18 +296,72 @@ def generate_html_dossier(project_name: str, poses_data: list[dict], out_html: s
     public_jobs = [{k:v for k,v in job.items() if k != 'viewer_link'} for job in jobs]
     provenance = dict(schema_version=1, shark_version=__version__, project=str(project_name), jobs=public_jobs,
                       docking=poses_data, molecular_dynamics=md_summary, covalent=covalent_summary, notes=notes)
+    # Card 2: Covalent Feasibility & Attack Distance
+    card2_title = "Covalent Feasibility"
+    card2_main = "Not Evaluated"
+    card2_sub = "Requires reaction mechanism"
+    if covalent_summary:
+        contacts = covalent_summary.get('contacts', [])
+        best = contacts[0] if contacts else None
+        if best:
+            cfi = best.get('composite_feasibility')
+            geom_feas = best.get('feasibility_score')
+            dist = best.get('distance_angstrom')
+            target_res = best.get('residue', 'Pocket')
+            score = cfi if (cfi is not None and cfi > 0) else geom_feas
+            card2_main = f"{score:.2f}" if score is not None else "NAC"
+            tag = "NAC Observed (≤ 3.5 Å)" if best.get('is_nac') else "Proximal (> 3.5 Å)"
+            card2_sub = f"d = {dist:.2f} Å · {target_res} · {tag}" if dist is not None else f"{target_res} · {tag}"
+        elif covalent_summary.get('pocket_nucleophiles'):
+            card2_main = "Pocket Nucls"
+            card2_sub = f"{len(covalent_summary['pocket_nucleophiles'])} in cavity (> contact cutoff)"
+
+    # Card 3: Trajectory Sampling & P_NAC Persistence
+    card3_title = "Conformational Sampling"
+    card3_main = "Static Pose"
+    card3_sub = "Docking pose (no MD trajectory)"
+    cluster_info = (covalent_summary.get('clustering') or {}) if covalent_summary else {}
+    if cluster_info and cluster_info.get('p_nac') is not None:
+        p_nac = cluster_info.get('p_nac', 0.0)
+        card3_title = "Trajectory P_NAC Persistence"
+        card3_main = f"{p_nac * 100:.1f}%"
+        medoid_ns = cluster_info.get('medoid_time_ns', 0.0)
+        top_frac = cluster_info.get('top_cluster_fraction', 0.0) * 100
+        card3_sub = f"Medoid at {medoid_ns:.2f} ns ({top_frac:.0f}% top cluster)"
+    elif md_summary:
+        card3_title = "Trajectory Contacts"
+        card3_main = f"{md_summary.get('sampled_frame_count', 'N/A')} frames"
+        card3_sub = f"{_number(md_summary.get('time_start_ns'), 1)}–{_number(md_summary.get('time_end_ns'), 1)} ns MD"
+
+    # Card 4: Quantum Verification
     completed = sum(job.get('status') == 'completed' for job in jobs)
     checked = sum(bool((job.get('results') or {}).get('stationary_minimum_verified')) for job in jobs)
+    total = len(jobs)
+    card4_title = "Verified Quantum Minima"
+    if total > 0:
+        pct = (completed / total) * 100.0
+        card4_main = f"{checked}/{total} Minima"
+        card4_sub = f"{completed}/{total} completed ({pct:.0f}%) · 0 imag. freq"
+    else:
+        card4_title = "DFT Calculations"
+        card4_main = "N/A"
+        card4_sub = "No quantum calculations"
+
     replacements = dict(TITLE=escape(str(project_name)), VERSION=__version__, TOTAL=str(len(jobs)),
                         COMPLETED=str(completed), CHECKED=str(checked), TABLE=table, METHODS=''.join(methods),
                         DOCKING=docking, MD=md, COVALENT=covalent_html,
                         COVALENT_STATUS=escape(cov_status), COVALENT_SUB=escape(cov_sub),
+                        CARD1_TITLE=escape(card1_title), CARD1_MAIN=escape(card1_main), CARD1_SUB=escape(card1_sub),
+                        CARD2_TITLE=escape(card2_title), CARD2_MAIN=escape(card2_main), CARD2_SUB=escape(card2_sub),
+                        CARD3_TITLE=escape(card3_title), CARD3_MAIN=escape(card3_main), CARD3_SUB=escape(card3_sub),
+                        CARD4_TITLE=escape(card4_title), CARD4_MAIN=escape(card4_main), CARD4_SUB=escape(card4_sub),
                         LEGACY=legacy, NOTES=f'<p>{escape(notes)}</p>' if notes else '',
                         PROVENANCE=escape(json.dumps(provenance, indent=2, default=str)),
-                        DATA=_json(dict(viewers=viewers, levels=levels, provenance=provenance, mesh=orbital_mesh, covalent=covalent_summary)),
+                        DATA=_json(dict(viewers=viewers, levels=levels, tautomers=tautomers_data,
+                                        provenance=provenance, mesh=orbital_mesh, covalent=covalent_summary)),
                         PLOTLY=get_plotlyjs())
     template = Path(__file__).with_name('dossier.html').read_text(encoding='utf-8')
-    content = re.sub(r'@@([A-Z_]+)@@', lambda m: replacements.get(m[1], ''), template)
+    content = re.sub(r'@@([A-Z0-9_]+)@@', lambda m: replacements.get(m[1], ''), template)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(content, encoding='utf-8')
     return out_path

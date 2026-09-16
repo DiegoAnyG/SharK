@@ -150,3 +150,4 @@ def test_cli_simple_gold_standard_and_fast_analysis(tmp_path):
     assert "MD Representative Snapshot (GROMOS Medoid)" in gold_text
     assert "Top cluster population" in gold_text
     assert "THR309" in gold_text
+

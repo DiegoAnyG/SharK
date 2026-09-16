@@ -118,7 +118,7 @@ def test_load_dft_records_and_render_combined(tmp_path):
     out_file = tmp_path / "combined_dossier.html"
     res = generate_html_dossier("CombinedTest", [], out_file, qm_summary={"jobs": records})
     content = res.read_text(encoding="utf-8")
-    assert "Recorded calculations" in content
-    assert "<strong>2</strong>" in content
-    assert "tautomer_1_oxide" in content
+    assert "Dominant Tautomer" in content
     assert "tautomer_3_oxide" in content
+    assert "Verified Quantum Minima" in content
+    assert "2/2 Minima" in content

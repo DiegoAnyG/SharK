@@ -20,3 +20,4 @@ else
 fi
 
 exec "$PYTHON_BIN" -m shark.cli "$@"
+

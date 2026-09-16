@@ -524,6 +524,7 @@ def main(argv=None):
                 'nac_contacts': nac_contacts,
                 'pocket_nucleophiles': pocket_nucls,
                 'pocket_nucleophile_atoms': all_nucl_atoms,
+                'pocket_residue_atoms': getattr(rep, 'pocket_residue_atoms', []) if rep else [],
                 'ligand_atoms': all_lig_atoms,
                 'ligand_name': selected_poses[0].ligand_id if selected_poses else 'Ligand',
                 'clustering': clustering_info
@@ -565,7 +566,7 @@ def main(argv=None):
             print(f'[REPORT] {out_file}')
             return int(args.execute and any(r['status'] != 'completed' or
                        r.get('orbital_export', {}).get('status') == 'failed' for r in records))
-        poses = session.list_top_poses(args.top)
+        poses = _get_selected_poses()
         poses_data = [dict(ligand_id=p.ligand_id, pose_idx=p.pose_idx,
                            score=p.score if math.isfinite(p.score) else None) for p in poses]
         if args.html:
@@ -591,6 +592,24 @@ def main(argv=None):
                 if records:
                     qm_summary = {'jobs': records}
                     print(f"[DFT] Loaded {len(records)} existing quantum calculation(s) from {dft_path}")
+                    for p_dict in poses_data:
+                        cand_rec = records[0]
+                        for r in records:
+                            r_id = r.get('selection', {}).get('ligand_id', '')
+                            if r_id.casefold() in p_dict['ligand_id'].casefold() or p_dict['ligand_id'].casefold() in r_id.casefold():
+                                cand_rec = r
+                                break
+                        orb = cand_rec.get('results', {}).get('orbitals', {}).get('0', {})
+                        if orb:
+                            h = orb.get('homo', {}).get('energy_eV')
+                            l = orb.get('lumo', {}).get('energy_eV')
+                            g = orb.get('gap_ev')
+                            if h is not None:
+                                p_dict['homo_ev'] = h
+                            if l is not None:
+                                p_dict['lumo_ev'] = l
+                            if g is not None:
+                                p_dict['gap_ev'] = g
                     if covalent_summary and 'cdft' not in covalent_summary:
                         first_orb = records[0].get('results', {}).get('orbitals', {}).get('0', {})
                         h = first_orb.get('homo', {}).get('energy_eV')
