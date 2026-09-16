@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+# SharK: Unified CLI launcher for virtual screening, QM & MD workflows
+set -e
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+export PYTHONPATH="${SCRIPT_DIR}/src:${PYTHONPATH}"
+
+# Detect Python interpreter (priority: explicit SHARK_PYTHON > cribado env > active conda > system python)
+if [ -n "$SHARK_PYTHON" ] && [ -x "$SHARK_PYTHON" ]; then
+    PYTHON_BIN="$SHARK_PYTHON"
+elif [ -n "$HOME" ] && [ -x "$HOME/miniforge3/envs/cribado/bin/python" ]; then
+    PYTHON_BIN="$HOME/miniforge3/envs/cribado/bin/python"
+elif [ -n "$HOME" ] && [ -x "$HOME/miniconda3/envs/cribado/bin/python" ]; then
+    PYTHON_BIN="$HOME/miniconda3/envs/cribado/bin/python"
+elif [ -n "$CONDA_PREFIX" ] && [ -x "$CONDA_PREFIX/bin/python" ]; then
+    PYTHON_BIN="$CONDA_PREFIX/bin/python"
+elif command -v python3 &>/dev/null; then
+    PYTHON_BIN="$(command -v python3)"
+else
+    PYTHON_BIN="python"
+fi
+
+exec "$PYTHON_BIN" -m shark.cli "$@"

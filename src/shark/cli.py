@@ -27,21 +27,25 @@ def find_recent_poliscreen_sessions() -> list[Path]:
 
 def interactive_session_picker() -> Path | None:
     recent = find_recent_poliscreen_sessions()
-    print('Select a PoliScreen session:')
+    print('Select a PoliScreen session archive (.poliscreen):')
     for index, path in enumerate(recent, 1):
         print(f'  [{index}] {path.name}')
-    choice = input('Session number, file path, or Q to quit > ').strip()
-    if choice.upper() == 'Q':
+    if recent:
+        choice = input('Session number, file path, or Q to quit > ').strip()
+    else:
+        print('  (No recent .poliscreen files found in current directory)')
+        choice = input('Path to .poliscreen file, or Q to quit > ').strip()
+    if not choice or choice.upper() == 'Q':
         return None
     if choice.isdigit() and 1 <= int(choice) <= len(recent):
         return recent[int(choice) - 1]
-    if choice.upper() == 'M':
-        choice = input('Session file path > ').strip()
     return Path(choice).expanduser()
 
 
 def print_banner():
-    print('SharK: PoliScreen sessions and isolated-ligand ORCA DFT')
+    print('=' * 80)
+    print('SharK: Covalent Reactivity & Molecular Dynamics Analysis Suite')
+    print('=' * 80)
 
 
 def run_interactive():
@@ -49,35 +53,141 @@ def run_interactive():
     session = interactive_session_picker()
     if session is None:
         return 0
-    action = input('[1] Prepare ligand DFT  [2] Execute ligand DFT  [3] Session report  [4] Analyze existing MD contacts  [Q] Quit > ').strip().upper()
-    if action == 'Q':
+
+    print('\nAvailable Workflow Combos:')
+    print('  [1] Fast Analysis (Docking-Based)')
+    print('      Description: Evaluates Vina poses with advanced covalent criteria (Bürgi-Dunitz')
+    print('                   angle θ_BD, catalytic dyad pKa activation, Bruice sigmoid curve,')
+    print('                   and Conceptual DFT warhead reactivity).')
+    print('      Deliverables: Interactive HTML Dossier with 3D pocket, NAC detection, and CFI scores.')
+    print('      Estimated time: ~3-5 seconds.\n')
+    print('  [2] Simple Gold Standard (Pre-calculated MD Trajectory)')
+    print('      Description: Ingests external MD trajectory (.xtc + .gro), aligns backbone,')
+    print('                   performs Daura (GROMOS) RMSD clustering, extracts the dominant')
+    print('                   solvated medoid snapshot (eliminating vacuum docking bias), and')
+    print('                   evaluates multi-factorial covalent feasibility (θ_BD, dyad, CFI, P_NAC).')
+    print('      Deliverables: Representative snapshot PDBs (complex, receptor, ligand), clustering')
+    print('                   statistics, and comprehensive HTML Dossier with 3D solvated pocket.')
+    print('      Estimated time: ~15-45 seconds.\n')
+    print('  [3] Full Gold Standard (End-to-End Simulation & Analysis)')
+    print('      Description: Automates complete pipeline from raw receptor in PoliScreen session:')
+    print('                   GROMACS MD setup, energy minimization, NVT/NPT equilibration,')
+    print('                   production MD, followed by Daura RMSD clustering, solvated medoid')
+    print('                   extraction, and advanced covalent reactivity analysis.')
+    print('      Deliverables: Full GROMACS trajectory, trajectory dashboard, medoid PDBs, and')
+    print('                   interactive HTML Dossier with MD and covalent metrics.')
+    print('      Estimated time: ~15-60+ minutes (depending on simulation length & GPU).\n')
+    print('  [4] Trajectory Contact Analyzer')
+    print('      Description: Computes residue contact occupancy and persistence over time for an')
+    print('                   existing MD trajectory without quantum or clustering calculations.')
+    print('      Deliverables: Contact occupancy JSON and interactive HTML trajectory contact map.')
+    print('      Estimated time: ~10-20 seconds.\n')
+    print('  [5] Expert / Custom Mode')
+    print('      Description: Step-by-step custom configuration for isolated-ligand ORCA DFT,')
+    print('                   custom clustering cutoffs, specific residue targets, and solvent models.')
+    print('      Deliverables: Custom ORCA inputs/outputs, orbital visualizations, or tailored reports.')
+    print('      Estimated time: Variable (seconds to hours).\n')
+    print('  [Q] Quit\n')
+
+    choice = input('Select combo [1-5, or Q] > ').strip().upper()
+    if choice == 'Q':
         return 0
-    if action not in ('1', '2', '3', '4'):
-        print('Unknown action', file=sys.stderr)
+    if choice not in ('1', '2', '3', '4', '5'):
+        print('Unknown selection', file=sys.stderr)
         return 2
+
     argv = ['--session', str(session)]
-    if action == '4':
-        argv = ['--analyze-md', '--topology', input('Matching topology (GRO or supported TPR) > ').strip(),
-                '--trajectory', input('XTC trajectory > ').strip(),
-                '--ligand-selection', input('Exact ligand atom selection (for example: resname UNL and not name H*) > ').strip(),
-                '--contact-cutoff', input('Contact cutoff in angstrom [4.0] > ').strip() or '4.0']
-    if action in ('1', '2'):
-        argv += ['--dft', '--top', input('Number of unique ligands [1] > ').strip() or '1']
-        compound = input('Exact compound name [ranked selection] > ').strip()
+
+    if choice == '1':
+        argv += ['--fast-analysis']
+        compound = input('Exact compound name [leave blank for ranked top 1] > ').strip()
         if compound:
             argv += ['--compound', compound]
-        target = input('Target/pocket identifier [all] > ').strip()
-        if target:
-            argv += ['--target', target]
-        argv += ['--theory', input('ORCA method [r2SCAN-3c] > ').strip() or 'r2SCAN-3c']
-        argv += ['--solvent', input('CPCM solvent [Water; gas for no solvent] > ').strip() or 'Water']
-        argv += ['--multiplicity', input('Spin multiplicity [1] > ').strip() or '1']
-        argv += ['--geometry', input('Geometry source [input; smiles to regenerate] > ').strip() or 'input']
-        if input('Calculate frequencies to check the optimized minimum? [Y/n] > ').strip().lower() != 'n':
-            argv += ['--frequencies']
-        if action == '2':
+        target_res = input('Target nucleophile residue (e.g., THR309, CYS145) [all pocket nucleophiles] > ').strip()
+        if target_res:
+            argv += ['--target-residue', target_res]
+        dft_dir = input('Directory with existing ORCA DFT outputs (.out) [optional, press enter to skip] > ').strip()
+        if dft_dir:
+            argv += ['--dft-dir', dft_dir]
+
+    elif choice == '2':
+        argv += ['--simple-gold-standard']
+        gro = input('Path to MD topology (.gro or .pdb) > ').strip()
+        while not gro or not Path(gro).expanduser().is_file():
+            print(f'File not found: {gro}', file=sys.stderr)
+            gro = input('Path to MD topology (.gro or .pdb) > ').strip()
+        xtc = input('Path to MD trajectory (.xtc) > ').strip()
+        while not xtc or not Path(xtc).expanduser().is_file():
+            print(f'File not found: {xtc}', file=sys.stderr)
+            xtc = input('Path to MD trajectory (.xtc) > ').strip()
+        argv += ['--topology', str(Path(gro).expanduser()), '--trajectory', str(Path(xtc).expanduser())]
+
+        compound = input('Exact compound name [leave blank for ranked top 1] > ').strip()
+        if compound:
+            argv += ['--compound', compound]
+        target_res = input('Target nucleophile residue (e.g., THR309, CYS145) [all pocket nucleophiles] > ').strip()
+        if target_res:
+            argv += ['--target-residue', target_res]
+        cutoff = input('Daura RMSD clustering cutoff in Angstroms [1.5] > ').strip()
+        if cutoff:
+            argv += ['--cluster-cutoff', cutoff]
+        stride = input('Frame stride for clustering [5] > ').strip()
+        if stride:
+            argv += ['--cluster-stride', stride]
+        dft_dir = input('Directory with existing ORCA DFT outputs (.out) [optional, press enter to skip] > ').strip()
+        if dft_dir:
+            argv += ['--dft-dir', dft_dir]
+
+    elif choice == '3':
+        argv += ['--full-gold-standard']
+        sim_time = input('Simulation length in nanoseconds [10.0] > ').strip() or '10.0'
+        argv += ['--time-ns', sim_time]
+        compound = input('Exact compound name [leave blank for ranked top 1] > ').strip()
+        if compound:
+            argv += ['--compound', compound]
+        target_res = input('Target nucleophile residue (e.g., THR309, CYS145) [all pocket nucleophiles] > ').strip()
+        if target_res:
+            argv += ['--target-residue', target_res]
+        exec_now = input('Launch GROMACS simulation immediately? [Y/n] > ').strip().lower()
+        if exec_now != 'n':
             argv += ['--execute']
-    output = input('Output directory [temporary scratch] > ').strip()
+
+    elif choice == '4':
+        gro = input('Matching topology (GRO or supported TPR) > ').strip()
+        xtc = input('XTC trajectory > ').strip()
+        lig = input('Exact ligand atom selection (for example: resname UNL and not name H*) > ').strip()
+        cutoff = input('Contact cutoff in angstrom [4.0] > ').strip() or '4.0'
+        argv = ['--analyze-md', '--topology', gro, '--trajectory', xtc,
+                '--ligand-selection', lig, '--contact-cutoff', cutoff]
+
+    elif choice == '5':
+        action = input('[1] Prepare ligand DFT  [2] Execute ligand DFT  [3] Session report  [4] Custom Covalent Matcher > ').strip()
+        if action in ('1', '2'):
+            argv += ['--dft', '--top', input('Number of unique ligands [1] > ').strip() or '1']
+            compound = input('Exact compound name [ranked selection] > ').strip()
+            if compound:
+                argv += ['--compound', compound]
+            target = input('Target/pocket identifier [all] > ').strip()
+            if target:
+                argv += ['--target', target]
+            argv += ['--theory', input('ORCA method [r2SCAN-3c] > ').strip() or 'r2SCAN-3c']
+            argv += ['--solvent', input('CPCM solvent [Water; gas for no solvent] > ').strip() or 'Water']
+            argv += ['--multiplicity', input('Spin multiplicity [1] > ').strip() or '1']
+            argv += ['--geometry', input('Geometry source [input; smiles to regenerate] > ').strip() or 'input']
+            if input('Calculate frequencies to check the optimized minimum? [Y/n] > ').strip().lower() != 'n':
+                argv += ['--frequencies']
+            if action == '2':
+                argv += ['--execute']
+        elif action == '4':
+            argv += ['--covalent']
+            compound = input('Exact compound name [ranked selection] > ').strip()
+            if compound:
+                argv += ['--compound', compound]
+            target_res = input('Target nucleophile residue (e.g. THR309) > ').strip()
+            if target_res:
+                argv += ['--target-residue', target_res]
+
+    output = input('Output directory [leave blank for default reports/ directory] > ').strip()
     if output:
         argv += ['--work-dir', output]
     return main(argv)
@@ -145,8 +255,8 @@ def main(argv=None):
         arguments = ['--analyze-md'] + arguments[1:]
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--analyze-md', action='store_true', help='Analyze contacts in an existing trajectory; does not launch MD')
-    parser.add_argument('--topology', help='Matching GRO or supported topology')
-    parser.add_argument('--trajectory', help='Existing XTC trajectory')
+    parser.add_argument('--topology', '--md-topology', dest='topology', help='Matching GRO or supported topology')
+    parser.add_argument('--trajectory', '--md-trajectory', dest='trajectory', help='Existing XTC trajectory')
     parser.add_argument('--ligand-selection', help='Explicit MDAnalysis atom selection for one ligand residue')
     parser.add_argument('--protein-selection', default='protein and not name H*')
     parser.add_argument('--contact-cutoff', type=float, default=4.0, help='Geometric contact threshold in angstrom')
@@ -184,14 +294,27 @@ def main(argv=None):
     parser.add_argument('--covalent', action='store_true', help='Perform Conceptual DFT reactivity profiling and pocket Near-Attack Conformation matching')
     parser.add_argument('--target-residue', help='Target nucleophile residue to scan (e.g. CYS145, CYS, 145)')
     parser.add_argument('--dft-dir', help='Directory with existing ORCA calculation outputs (.out) to load into report')
+    parser.add_argument('--fast-analysis', action='store_true', help='Execute fast docking-based covalent analysis on Vina poses')
+    parser.add_argument('--simple-gold-standard', action='store_true', help='Execute Simple Gold Standard: trajectory clustering + medoid covalent analysis')
+    parser.add_argument('--full-gold-standard', action='store_true', help='Execute Full Gold Standard: GROMACS MD + clustering + medoid covalent analysis')
+    parser.add_argument('--cluster-cutoff', type=float, default=1.5, help='Daura RMSD clustering neighbor cutoff in angstrom (default: 1.5)')
+    parser.add_argument('--cluster-stride', type=int, default=5, help='Frame sampling stride for trajectory clustering (default: 5)')
+    parser.add_argument('--cluster-start-ns', type=float, default=0.0, help='Simulation time in ns to start clustering (default: 0.0)')
     args = parser.parse_args(arguments)
     if args.interactive or not arguments:
         try:
             return run_interactive()
         except (EOFError, KeyboardInterrupt):
             return 130
+    if args.fast_analysis:
+        args.covalent = True
+    if args.simple_gold_standard:
+        args.covalent = True
+    if args.full_gold_standard:
+        args.run_md = True
+        args.covalent = True
     if args.analyze_md:
-        if args.dft or args.execute or args.md:
+        if args.dft or args.execute or args.run_md:
             parser.error('--analyze-md cannot launch DFT or MD')
         if not all((args.topology, args.trajectory, args.ligand_selection)):
             parser.error('Contact analysis requires --topology, --trajectory and --ligand-selection')
@@ -265,7 +388,19 @@ def main(argv=None):
                 print(f"[MD] Status: {res.status} | Directory: {res.run_dir}")
                 if res.dashboard_path:
                     print(f"[MD] Dashboard: {res.dashboard_path}")
-            return 0
+                if args.full_gold_standard and res.status == 'completed':
+                    gro_cand = res.run_dir / '00_prep' / 'md_prod.gro'
+                    xtc_cand = res.run_dir / '00_prep' / 'md_noPBC.xtc'
+                    if not gro_cand.is_file():
+                        gro_cand = res.run_dir / 'md_prod.gro'
+                    if not xtc_cand.is_file():
+                        xtc_cand = res.run_dir / 'md_noPBC.xtc'
+                    if gro_cand.is_file() and xtc_cand.is_file():
+                        args.topology = str(gro_cand)
+                        args.trajectory = str(xtc_cand)
+                        print(f'[MD] Linking trajectory for clustering: {xtc_cand}')
+            if not (args.full_gold_standard and getattr(args, 'trajectory', None)):
+                return 0
 
         covalent_summary = None
         if args.covalent:
@@ -273,26 +408,76 @@ def main(argv=None):
             from .analysis.reactivity import build_reactivity_profile
 
             selected_poses = _get_selected_poses()
+            clustering_info = None
+            cluster_rep = None
+
+            if args.trajectory and args.topology:
+                from .analysis.trajectory_cluster import cluster_trajectory
+                print(f'[CLUSTERING] Performing Daura RMSD clustering on {args.trajectory}...')
+                if args.work_dir:
+                    snap_dir = Path(args.work_dir) / 'snapshots'
+                else:
+                    root = Path(os.environ.get('SHARK_SCRATCH', '/tmp')).expanduser()
+                    snap_dir = root / 'shark_snapshots'
+                snap_dir.mkdir(parents=True, exist_ok=True)
+
+                cluster_rep = cluster_trajectory(
+                    topology=args.topology,
+                    trajectory=args.trajectory,
+                    ligand_selection=args.ligand_selection,
+                    protein_selection=args.protein_selection,
+                    cutoff_angstrom=args.cluster_cutoff,
+                    start_ns=args.cluster_start_ns,
+                    stop_ns=args.stop_ns,
+                    stride=args.cluster_stride,
+                    output_dir=snap_dir,
+                    target_residue=args.target_residue
+                )
+                print(f'[CLUSTERING] {cluster_rep.summary}')
+                clustering_info = {
+                    'total_sampled_frames': cluster_rep.total_sampled_frames,
+                    'num_clusters': cluster_rep.num_clusters,
+                    'top_cluster_size': cluster_rep.top_cluster_size,
+                    'top_cluster_fraction': cluster_rep.top_cluster_fraction,
+                    'medoid_frame_index': cluster_rep.medoid_frame_index,
+                    'medoid_time_ps': cluster_rep.medoid_time_ps,
+                    'medoid_time_ns': cluster_rep.medoid_time_ns,
+                    'cutoff_angstrom': cluster_rep.cutoff_angstrom,
+                    'p_nac': cluster_rep.p_nac,
+                    'summary': cluster_rep.summary,
+                    'snapshot_complex_pdb': str(cluster_rep.snapshot_complex_pdb) if cluster_rep.snapshot_complex_pdb else None,
+                    'snapshot_receptor_pdb': str(cluster_rep.snapshot_receptor_pdb) if cluster_rep.snapshot_receptor_pdb else None,
+                    'snapshot_ligand_pdb': str(cluster_rep.snapshot_ligand_pdb) if cluster_rep.snapshot_ligand_pdb else None,
+                }
 
             all_contacts, nac_contacts, pocket_nucls, summaries = [], [], [], []
+            rep = None
             for p in selected_poses:
-                rec_path = session.receptor_for(p.receptor_id, raw=False)
+                if cluster_rep and cluster_rep.snapshot_receptor_pdb and cluster_rep.snapshot_ligand_pdb:
+                    rec_path = cluster_rep.snapshot_receptor_pdb
+                    lig_pose = cluster_rep.snapshot_ligand_pdb
+                    print(f'[COVALENT] Evaluating solvated medoid snapshot at {cluster_rep.medoid_time_ns:.2f} ns against {p.receptor_id}...')
+                else:
+                    rec_path = session.receptor_for(p.receptor_id, raw=False)
+                    lig_pose = p.pose_file
+                    print(f'[COVALENT] Evaluating docking pose for {p.ligand_id} against {p.receptor_id}...')
+
                 rep = match_covalent_pocket(
                     receptor_pdb=rec_path,
-                    ligand_pose=p.pose_file,
+                    ligand_pose=lig_pose,
                     pocket_cutoff=args.contact_cutoff,
                     nac_cutoff=3.5,
                     target_residue=args.target_residue,
                     receptor_name=p.receptor_id,
                     ligand_name=p.ligand_id
                 )
-                print(f"[COVALENT] {rep.summary}")
+                print(f'[COVALENT] {rep.summary}')
                 summaries.append(rep.summary)
                 for n in rep.pocket_nucleophiles:
                     if n.residue_label not in pocket_nucls:
                         pocket_nucls.append(n.residue_label)
                 for c in rep.contacts:
-                    all_contacts.append({
+                    c_dict = {
                         'residue': c.nucleophile.residue_label,
                         'nucleophile_atom': c.nucleophile.atom_name,
                         'ligand_atom_index': c.ligand_atom_index,
@@ -300,14 +485,20 @@ def main(argv=None):
                         'distance_angstrom': c.distance_angstrom,
                         'feasibility_score': c.feasibility_score,
                         'is_nac': c.is_nac,
-                        'warhead_rank': c.warhead_rank
-                    })
+                        'warhead_rank': c.warhead_rank,
+                        'burgi_dunitz_angle': c.burgi_dunitz_angle,
+                        'catalytic_dyad_present': c.catalytic_dyad_present,
+                        'catalytic_dyad_residue': c.catalytic_dyad_residue,
+                        'activation_factor': c.activation_factor,
+                        'composite_feasibility': c.composite_feasibility,
+                    }
+                    all_contacts.append(c_dict)
                     if c.is_nac:
-                        nac_contacts.append(c)
+                        nac_contacts.append(c_dict)
 
             all_nucl_atoms = []
             all_lig_atoms = []
-            if 'rep' in locals() and getattr(rep, 'pocket_nucleophiles', None):
+            if rep and getattr(rep, 'pocket_nucleophiles', None):
                 for n in rep.pocket_nucleophiles:
                     all_nucl_atoms.append({
                         'residue': n.residue_label,
@@ -316,7 +507,7 @@ def main(argv=None):
                         'y': n.coordinates[1],
                         'z': n.coordinates[2]
                     })
-            if 'rep' in locals() and getattr(rep, 'ligand_atoms', None):
+            if rep and getattr(rep, 'ligand_atoms', None):
                 for idx, elem, crd in rep.ligand_atoms:
                     all_lig_atoms.append({
                         'index': idx,
@@ -328,25 +519,14 @@ def main(argv=None):
 
             covalent_summary = {
                 'has_nac': len(nac_contacts) > 0,
-                'summary': " ".join(summaries),
+                'summary': ' '.join(summaries),
                 'contacts': all_contacts,
-                'nac_contacts': [
-                    {
-                        'residue': c.nucleophile.residue_label,
-                        'nucleophile_atom': c.nucleophile.atom_name,
-                        'ligand_atom_index': c.ligand_atom_index,
-                        'ligand_atom_element': c.ligand_atom_element,
-                        'distance_angstrom': c.distance_angstrom,
-                        'feasibility_score': c.feasibility_score,
-                        'is_nac': c.is_nac,
-                        'warhead_rank': c.warhead_rank
-                    }
-                    for c in nac_contacts
-                ],
+                'nac_contacts': nac_contacts,
                 'pocket_nucleophiles': pocket_nucls,
                 'pocket_nucleophile_atoms': all_nucl_atoms,
                 'ligand_atoms': all_lig_atoms,
-                'ligand_name': selected_poses[0].ligand_id if selected_poses else 'Ligand'
+                'ligand_name': selected_poses[0].ligand_id if selected_poses else 'Ligand',
+                'clustering': clustering_info
             }
 
         if args.dft:
@@ -367,6 +547,19 @@ def main(argv=None):
             for job, record in zip(jobs, records):
                 if record.get('orbital_export', {}).get('status') == 'completed':
                     record['viewer_link'] = Path(os.path.relpath(job / 'frontier_orbitals.html', out_file.parent)).as_posix()
+            if covalent_summary and 'cdft' not in covalent_summary and records:
+                first_orb = records[0].get('results', {}).get('orbitals', {}).get('0', {})
+                h = first_orb.get('homo', {}).get('energy_eV')
+                l = first_orb.get('lumo', {}).get('energy_eV')
+                if h is not None and l is not None:
+                    from .analysis.reactivity import calculate_cdft_descriptors
+                    desc = calculate_cdft_descriptors(homo_ev=h, lumo_ev=l)
+                    covalent_summary['cdft'] = {
+                        'hardness_ev': desc.hardness_ev,
+                        'chemical_potential_ev': desc.chemical_potential_ev,
+                        'electrophilicity_ev': desc.electrophilicity_ev,
+                        'softness_ev': desc.softness_ev,
+                    }
             generate_html_dossier(session.project_name, [], out_file, qm_summary={'jobs': records},
                                   covalent_summary=covalent_summary)
             print(f'[REPORT] {out_file}')
@@ -380,10 +573,15 @@ def main(argv=None):
         elif args.work_dir:
             out_file = Path(args.work_dir) / 'dossier.html'
         else:
-            import tempfile
-            root = Path(os.environ.get('SHARK_SCRATCH', tempfile.gettempdir())).expanduser()
-            root.mkdir(parents=True, exist_ok=True)
-            out_file = Path(tempfile.mkdtemp(prefix='shark-dft-report-', dir=root)) / 'dossier.html'
+            rep_dir = Path.cwd() / 'reports'
+            try:
+                rep_dir.mkdir(parents=True, exist_ok=True)
+                out_file = rep_dir / 'dossier.html'
+            except OSError:
+                import tempfile
+                root = Path(os.environ.get('SHARK_SCRATCH', tempfile.gettempdir())).expanduser()
+                root.mkdir(parents=True, exist_ok=True)
+                out_file = Path(tempfile.mkdtemp(prefix='shark-dft-report-', dir=root)) / 'dossier.html'
 
         qm_summary = None
         if args.dft_dir:

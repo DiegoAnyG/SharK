@@ -56,15 +56,23 @@ class CovalentContact:
     feasibility_score: float
     warhead_rank: Optional[int] = None
     local_electrophilicity: Optional[float] = None
+    burgi_dunitz_angle: Optional[float] = None
+    catalytic_dyad_present: bool = False
+    catalytic_dyad_residue: Optional[str] = None
+    activation_factor: float = 1.0
+    composite_feasibility: float = 0.0
 
     @property
     def summary(self) -> str:
         tag = "NAC" if self.is_nac else "PROXIMAL"
         rank_str = f" [Warhead Rank {self.warhead_rank}]" if self.warhead_rank else ""
+        angle_str = f", Angle: {self.burgi_dunitz_angle:.1f}°" if self.burgi_dunitz_angle is not None else ""
+        cfi_str = f", CFI: {self.composite_feasibility:.2f}" if self.composite_feasibility > 0 else ""
+        dyad_str = f" [Dyad: {self.catalytic_dyad_residue}]" if self.catalytic_dyad_present else ""
         return (
             f"{self.nucleophile.residue_label} ({self.nucleophile.atom_name}) <--> "
             f"Ligand Atom #{self.ligand_atom_index} ({self.ligand_atom_element}){rank_str}: "
-            f"{self.distance_angstrom:.2f} A ({tag}, Feasibility: {self.feasibility_score:.2f})"
+            f"{self.distance_angstrom:.2f} A ({tag}, Feasibility: {self.feasibility_score:.2f}{cfi_str}{angle_str}{dyad_str})"
         )
 
 
@@ -96,6 +104,111 @@ def _calculate_feasibility_score(distance: float, nac_cutoff: float = DEFAULT_NA
     return round(score, 4)
 
 
+def _find_adjacent_ligand_atom(
+    target_idx: int,
+    lig_atoms: List[Tuple[int, str, Tuple[float, float, float]]]
+) -> Optional[Tuple[float, float, float]]:
+    """Identifies a bonded neighbor atom in the ligand to determine the trajectory angle."""
+    target_crd = next((crd for idx, _, crd in lig_atoms if idx == target_idx), None)
+    if target_crd is None:
+        return None
+    candidates = []
+    for idx, elem, crd in lig_atoms:
+        if idx == target_idx:
+            continue
+        d = _euclidean_distance(target_crd, crd)
+        if 1.05 <= d <= 1.65:
+            # Prioritize O or N (e.g. carbonyl or furoxan system)
+            priority = 0 if elem in ("O", "N") else 1
+            candidates.append((priority, d, crd))
+    if candidates:
+        candidates.sort(key=lambda x: (x[0], x[1]))
+        return candidates[0][2]
+    return None
+
+
+def _calculate_burgi_dunitz_angle(
+    nucl_coord: Tuple[float, float, float],
+    lig_coord: Tuple[float, float, float],
+    adj_coord: Optional[Tuple[float, float, float]]
+) -> Optional[float]:
+    """Calculates the nucleophilic attack angle Nu ... C_target - C_adjacent."""
+    if adj_coord is None:
+        return None
+    v1 = (nucl_coord[0] - lig_coord[0], nucl_coord[1] - lig_coord[1], nucl_coord[2] - lig_coord[2])
+    v2 = (adj_coord[0] - lig_coord[0], adj_coord[1] - lig_coord[1], adj_coord[2] - lig_coord[2])
+    n1 = math.sqrt(v1[0]**2 + v1[1]**2 + v1[2]**2)
+    n2 = math.sqrt(v2[0]**2 + v2[1]**2 + v2[2]**2)
+    if n1 < 1e-6 or n2 < 1e-6:
+        return None
+    cos_theta = (v1[0]*v2[0] + v1[1]*v2[1] + v1[2]*v2[2]) / (n1 * n2)
+    cos_theta = max(-1.0, min(1.0, cos_theta))
+    return round(math.degrees(math.acos(cos_theta)), 2)
+
+
+def _scan_catalytic_dyad(
+    nucl_coord: Tuple[float, float, float],
+    receptor_atoms: List[dict],
+    nucl_res_seq: int,
+    nucl_chain: str,
+    max_distance: float = 3.8
+) -> Tuple[bool, Optional[str]]:
+    """Scans for nearby acidic/basic residues activating a nucleophile via proton abstraction."""
+    CATALYTIC_BASES = {
+        "HIS": ("ND1", "NE2"),
+        "ASP": ("OD1", "OD2"),
+        "GLU": ("OE1", "OE2"),
+        "LYS": ("NZ",),
+    }
+    for a in receptor_atoms:
+        if a["res_seq"] == nucl_res_seq and a["chain_id"] == nucl_chain:
+            continue
+        rname = a["res_name"].upper()
+        if rname in CATALYTIC_BASES and a["atom_name"].upper() in CATALYTIC_BASES[rname]:
+            d = _euclidean_distance(nucl_coord, a["coords"])
+            if d <= max_distance:
+                label = f"{rname}{a['res_seq']}:{a['chain_id']}"
+                return True, label
+    return False, None
+
+
+def _compute_composite_feasibility(
+    dist_feasibility: float,
+    angle_deg: Optional[float],
+    nucl_resname: str,
+    dyad_present: bool,
+    omega_k: Optional[float] = None
+) -> Tuple[float, float, float]:
+    """Computes angular factor, activation factor, and Composite Covalent Feasibility Index (CFI)."""
+    # 1. Bürgi-Dunitz angular factor (centered at 107 deg, width 14 deg)
+    if angle_deg is not None:
+        f_ang = math.exp(-((angle_deg - 107.0) ** 2) / (2.0 * (14.0 ** 2)))
+    else:
+        f_ang = 0.85
+
+    # 2. Catalytic activation / pKa factor
+    res = nucl_resname.upper()
+    if res == "CYS":
+        f_act = 1.0  # Thiolate readily accessible
+    elif res in ("SER", "THR"):
+        f_act = 0.90 if dyad_present else 0.35  # Neutral alcohol without base is poorly reactive
+    elif res in ("LYS", "TYR"):
+        f_act = 0.75 if dyad_present else 0.40
+    elif res == "HIS":
+        f_act = 0.85
+    else:
+        f_act = 0.50
+
+    # 3. Electrophilicity weighting
+    if omega_k is not None and omega_k > 0:
+        f_elec = min(1.0, max(0.5, omega_k / 1.5))
+    else:
+        f_elec = 1.0
+
+    cfi = dist_feasibility * f_ang * f_act * f_elec
+    return round(cfi, 4), round(f_ang, 3), round(f_act, 3)
+
+
 def parse_pdb_atoms(pdb_path: str | Path) -> List[dict]:
     """Parses atom records from a PDB file."""
     path = Path(pdb_path)
@@ -123,7 +236,18 @@ def parse_pdb_atoms(pdb_path: str | Path) -> List[dict]:
                 y = float(line[38:46])
                 z = float(line[46:54])
             except (ValueError, IndexError):
-                continue
+                parts = line.split()
+                dot_floats = []
+                for p in parts:
+                    if "." in p:
+                        try:
+                            dot_floats.append(float(p))
+                        except ValueError:
+                            pass
+                if len(dot_floats) >= 3:
+                    x, y, z = dot_floats[0], dot_floats[1], dot_floats[2]
+                else:
+                    continue
 
             elem = line[76:78].strip().upper() if len(line) >= 78 else ""
             if not elem:
@@ -313,8 +437,17 @@ def match_covalent_pocket(
         for idx, elem, crd in lig_atoms:
             eval_lig_atoms.append((idx, elem, crd, None))
 
+    rec_atoms = []
+    try:
+        rec_atoms = parse_pdb_atoms(receptor_pdb)
+    except Exception:
+        rec_atoms = []
+
     contacts: List[CovalentContact] = []
     for nucl in pocket_nucls:
+        dyad_present, dyad_lbl = _scan_catalytic_dyad(
+            nucl.coordinates, rec_atoms, nucl.residue_number, nucl.chain_id
+        )
         for idx, elem, crd, cand_obj in eval_lig_atoms:
             dist = _euclidean_distance(nucl.coordinates, crd)
             if dist <= pocket_cutoff:
@@ -322,6 +455,16 @@ def match_covalent_pocket(
                 feas = _calculate_feasibility_score(dist, nac_cutoff=nac_cutoff)
                 rank = getattr(cand_obj, "rank", None) if cand_obj else None
                 omega_k = getattr(cand_obj, "local_electrophilicity", None) if cand_obj else None
+
+                adj_crd = _find_adjacent_ligand_atom(idx, lig_atoms)
+                angle_bd = _calculate_burgi_dunitz_angle(nucl.coordinates, crd, adj_crd)
+                cfi, f_ang, f_act = _compute_composite_feasibility(
+                    dist_feasibility=feas,
+                    angle_deg=angle_bd,
+                    nucl_resname=nucl.residue_name,
+                    dyad_present=dyad_present,
+                    omega_k=omega_k
+                )
 
                 contacts.append(CovalentContact(
                     nucleophile=nucl,
@@ -331,11 +474,16 @@ def match_covalent_pocket(
                     is_nac=is_nac,
                     feasibility_score=feas,
                     warhead_rank=rank,
-                    local_electrophilicity=omega_k
+                    local_electrophilicity=omega_k,
+                    burgi_dunitz_angle=angle_bd,
+                    catalytic_dyad_present=dyad_present,
+                    catalytic_dyad_residue=dyad_lbl,
+                    activation_factor=f_act,
+                    composite_feasibility=cfi
                 ))
 
-    # Sort contacts by feasibility descending
-    contacts.sort(key=lambda c: (c.is_nac, c.feasibility_score, -(c.distance_angstrom)), reverse=True)
+    # Sort contacts by composite feasibility descending
+    contacts.sort(key=lambda c: (c.is_nac, c.composite_feasibility, c.feasibility_score, -(c.distance_angstrom)), reverse=True)
     nac_list = [c for c in contacts if c.is_nac]
     has_nac = len(nac_list) > 0
     best_match = contacts[0] if contacts else None

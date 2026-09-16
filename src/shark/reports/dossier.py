@@ -156,6 +156,24 @@ def generate_html_dossier(project_name: str, poses_data: list[dict], out_html: s
             cov_status = 'No Nucleophiles'
             cov_sub = 'Within pocket cutoff'
 
+        cluster_info = covalent_summary.get('clustering', {})
+        cluster_block = ''
+        if cluster_info:
+            c_items = [
+                ('Sampling frames', f"{cluster_info.get('total_sampled_frames', 'N/A')} frames"),
+                ('Top cluster population', f"{cluster_info.get('top_cluster_size', 'N/A')} frames ({cluster_info.get('top_cluster_fraction', 0)*100:.1f}%)"),
+                ('Medoid snapshot time', f"{cluster_info.get('medoid_time_ns', 0):.2f} ns (Frame #{cluster_info.get('medoid_frame_index', 'N/A')})"),
+                ('Trajectory P_NAC', f"{cluster_info.get('p_nac', 0)*100:.1f}%"),
+            ]
+            cluster_block = (
+                '<div class="insight" style="margin: 16px 0;">'
+                '<h3>MD Representative Snapshot (GROMOS Medoid)</h3>'
+                f'<p>{escape(str(cluster_info.get("summary", "")))}</p>'
+                '<dl style="margin-top:10px;">'
+                + ''.join(f'<div><dt>{k}</dt><dd>{v}</dd></div>' for k, v in c_items)
+                + '</dl></div>'
+            )
+
         cdft_block = ''
         if cdft:
             cdft_items = [
@@ -170,12 +188,18 @@ def generate_html_dossier(project_name: str, poses_data: list[dict], out_html: s
         for c in contacts[:20]:
             is_nac = c.get('is_nac', False)
             tag = '<strong style="color:#087b70">NAC</strong>' if is_nac else '<span>Proximal</span>'
+            angle_val = f"{c.get('burgi_dunitz_angle'):.1f}°" if c.get('burgi_dunitz_angle') is not None else 'N/A'
+            dyad_val = escape(str(c.get('catalytic_dyad_residue') or ('Dyad' if c.get('catalytic_dyad_present') else 'Isolated')))
+            cfi_val = _number(c.get('composite_feasibility'), 2) if c.get('composite_feasibility') is not None else 'N/A'
             row_vals = [
                 escape(str(c.get('residue', 'N/A'))),
                 escape(str(c.get('nucleophile_atom', 'N/A'))),
                 escape(f"#{c.get('ligand_atom_index', 'N/A')} ({c.get('ligand_atom_element', '')})"),
                 _number(c.get('distance_angstrom'), 2) + ' A',
+                angle_val,
+                dyad_val,
                 _number(c.get('feasibility_score'), 2),
+                cfi_val,
                 tag
             ]
             contact_rows.append('<tr>' + ''.join(f'<td>{v}</td>' for v in row_vals) + '</tr>')
@@ -183,7 +207,8 @@ def generate_html_dossier(project_name: str, poses_data: list[dict], out_html: s
         contact_table = (
             '<div class="table-wrap"><table><thead><tr>'
             '<th>Pocket residue</th><th>Nucleophile atom</th><th>Ligand atom</th>'
-            '<th>Distance</th><th>Feasibility</th><th>Status</th>'
+            '<th>Distance</th><th>Angle (θ_BD)</th><th>Catalytic dyad</th>'
+            '<th>Geom. Feasibility</th><th>Composite CFI</th><th>Status</th>'
             '</tr></thead><tbody>' + ''.join(contact_rows) + '</tbody></table></div>'
         ) if contact_rows else '<p>No nucleophiles within pocket cutoff distance.</p>'
 
@@ -211,6 +236,7 @@ def generate_html_dossier(project_name: str, poses_data: list[dict], out_html: s
             '<section id="covalent">'
             '<div class="section-heading"><span>03 / Warhead & Reactivity</span><h2>Covalent Near-Attack Conformations (NAC)</h2></div>'
             f'<p>{escape(str(covalent_summary.get("summary", "")))}</p>'
+            + cluster_block
             + cdft_block
             + contact_table
             + covalent_plots

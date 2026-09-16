@@ -44,7 +44,7 @@ def test_contacts_use_periodic_box_and_preserve_source_directory(tmp_path):
 
 def test_interactive_compound_and_frequency_selection(monkeypatch,tmp_path):
     monkeypatch.setattr(cli,'interactive_session_picker',lambda:Path('session.poliscreen'))
-    replies=iter(['2','1','sample','target','','','1','smiles','y',str(tmp_path/'new')])
+    replies=iter(['5','2','1','sample','target','','','1','smiles','y',str(tmp_path/'new')])
     monkeypatch.setattr('builtins.input',lambda _:next(replies))
     captured=[]
     monkeypatch.setattr(cli,'main',lambda args:captured.extend(args) or 0)
