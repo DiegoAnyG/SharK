@@ -165,14 +165,43 @@ def _parse_property_file(prop_path: Path, result: CalculationResult) -> None:
 
 
 def _parse_out_file(out_path: Path, result: CalculationResult) -> None:
-    """Extract IR intensities, dipole magnitude, and frontier orbitals from ORCA .out."""
+    """Extract IR intensities, dipole magnitude, frontier orbitals, and thermochemistry from ORCA .out."""
     content = out_path.read_text(encoding="utf-8", errors="ignore")
+
+    # Check termination status in .out
+    if "ORCA TERMINATED NORMALLY" in content or "NORMAL TERMINATION" in content:
+        result.converged = True
+
+    # Parse Electronic Energy fallback from .out
+    if result.el_energy == 0.0:
+        sp_m = re.findall(r"FINAL SINGLE POINT ENERGY\s+([-\d.]+)", content)
+        if sp_m:
+            result.el_energy = float(sp_m[-1])
+
+    # Parse Gibbs Free Energy fallback from .out
+    if result.gibbs_energy == 0.0:
+        gibbs_m = re.search(r"Final Gibbs free energy\s+\.\.\.\s+([-\d.]+)\s+Eh", content)
+        if gibbs_m:
+            result.gibbs_energy = float(gibbs_m.group(1))
+
+    # Parse VIBRATIONAL FREQUENCIES block
+    if not result.frequencies:
+        vf_match = re.search(r"VIBRATIONAL FREQUENCIES\s+-+\s+(.*?)(?=\n\n[A-Z]|\n---|\Z)", content, re.DOTALL)
+        if vf_match:
+            vf_freqs = []
+            for line in vf_match.group(1).strip().splitlines():
+                m = re.match(r"^\s*\d+:\s+([-\d.]+)\s+cm\*\*-1", line.strip())
+                if m:
+                    vf_freqs.append(float(m.group(1)))
+            if vf_freqs:
+                result.frequencies = vf_freqs
+                result.imaginary_frequencies = [f for f in vf_freqs if f < -1e-3]
 
     # Parse IR Spectrum table
     # Example format:
     #   Mode   freq       eps      Int      T**2         TX        TY        TZ
     #   6:     54.57   0.000760    3.84  ...
-    ir_match = re.search(r"IR SPECTRUM\s+-+\s+Mode\s+freq.*?km/mol.*?-+\s+(.*?)(?=\*|\n\n|\Z)", content, re.DOTALL)
+    ir_match = re.search(r"IR SPECTRUM\s+-+\s+Mode\s+freq.*?-+\s+(.*?)(?=\*|\n\n|\Z)", content, re.DOTALL)
     if ir_match:
         intensities = []
         parsed_freqs = []

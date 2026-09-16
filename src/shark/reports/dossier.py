@@ -265,6 +265,26 @@ def generate_html_dossier(project_name: str, poses_data: list[dict], out_html: s
                 + '</dl></div>'
             )
 
+        ts_info = covalent_summary.get('transition_state', {})
+        ts_block = ''
+        if ts_info:
+            ts_items = [
+                ('Activation barrier (ΔG‡)', f"{ts_info.get('delta_g_activation_kcal', 0):.2f} kcal/mol"),
+                ('Reaction energy (ΔG_rxn)', (f"{ts_info.get('delta_g_reaction_kcal'):.2f} kcal/mol" if ts_info.get('delta_g_reaction_kcal') is not None else 'N/A')),
+                ('Kinetic feasibility', str(ts_info.get('kinetic_feasibility', 'N/A'))),
+                ('Estimated half-life (t1/2)', str(ts_info.get('half_life', 'N/A'))),
+                ('Active site model', f"{str(ts_info.get('model_type', 'minimal')).capitalize()} Model"),
+                ('First-order TS verified', 'Yes (strictly 1 imaginary frequency)' if ts_info.get('is_first_order_ts', True) else 'Unverified'),
+            ]
+            ts_block = (
+                '<div class="insight" style="margin: 16px 0; border-left: 4px solid #087b70; padding-left: 14px;">'
+                '<h3>Transition State Modeling & Activation Free Energy (Tier 4 / ORCA)</h3>'
+                f'<p>{escape(str(ts_info.get("summary", "")))}</p>'
+                '<dl style="margin-top:10px;">'
+                + ''.join(f'<div><dt>{k}</dt><dd>{v}</dd></div>' for k, v in ts_items)
+                + '</dl></div>'
+            )
+
         cdft_block = ''
         if cdft:
             cdft_items = [
@@ -328,6 +348,7 @@ def generate_html_dossier(project_name: str, poses_data: list[dict], out_html: s
             '<div class="section-heading"><span>03 / Warhead & Reactivity</span><h2>Covalent Near-Attack Conformations (NAC)</h2></div>'
             f'<p>{escape(str(covalent_summary.get("summary", "")))}</p>'
             + cluster_block
+            + ts_block
             + cdft_block
             + contact_table
             + covalent_plots
@@ -338,31 +359,37 @@ def generate_html_dossier(project_name: str, poses_data: list[dict], out_html: s
     public_jobs = [{k:v for k,v in job.items() if k != 'viewer_link'} for job in jobs]
     provenance = dict(schema_version=1, shark_version=__version__, project=str(project_name), jobs=public_jobs,
                       docking=poses_data, molecular_dynamics=md_summary, covalent=covalent_summary, notes=notes)
-    # Card 2: Geometric Feasibility & Attack Distance
+    # Card 2: Geometric Feasibility & Attack Distance (or TS ΔG‡)
     card2_title = "Geometric Feasibility"
     card2_main = "Not Evaluated"
     card2_sub = "Requires reaction mechanism"
     if covalent_summary:
-        contacts = covalent_summary.get('contacts', [])
-        nac_items = [c for c in contacts if c.get('is_nac')]
-        if nac_items:
-            best = max(nac_items, key=lambda c: (c.get('feasibility_score') or 0, -(c.get('distance_angstrom') or 99)))
-        elif contacts:
-            best = min(contacts, key=lambda c: c.get('distance_angstrom') or 999)
+        ts_res = covalent_summary.get('transition_state')
+        if ts_res and ts_res.get('delta_g_activation_kcal') is not None:
+            card2_title = "Covalent Barrier (ΔG‡)"
+            card2_main = f"{ts_res['delta_g_activation_kcal']:.1f} kcal/mol"
+            card2_sub = f"{ts_res.get('kinetic_feasibility', 'Feasible')} · t½ ~ {ts_res.get('half_life', 'N/A')}"
         else:
-            best = None
-        if best:
-            geom_feas = best.get('feasibility_score')
-            cfi = best.get('composite_feasibility')
-            dist = best.get('distance_angstrom')
-            target_res = best.get('residue', 'Pocket')
-            score = geom_feas if (geom_feas is not None and geom_feas > 0) else cfi
-            card2_main = f"{score:.2f}" if score is not None else "NAC"
-            tag = "NAC Observed (≤ 3.5 Å)" if best.get('is_nac') else "Proximal (> 3.5 Å)"
-            card2_sub = f"d = {dist:.2f} Å · {target_res} · {tag}" if dist is not None else f"{target_res} · {tag}"
-        elif covalent_summary.get('pocket_nucleophiles'):
-            card2_main = "Pocket Nucls"
-            card2_sub = f"{len(covalent_summary['pocket_nucleophiles'])} in cavity (> contact cutoff)"
+            contacts = covalent_summary.get('contacts', [])
+            nac_items = [c for c in contacts if c.get('is_nac')]
+            if nac_items:
+                best = max(nac_items, key=lambda c: (c.get('feasibility_score') or 0, -(c.get('distance_angstrom') or 99)))
+            elif contacts:
+                best = min(contacts, key=lambda c: c.get('distance_angstrom') or 999)
+            else:
+                best = None
+            if best:
+                geom_feas = best.get('feasibility_score')
+                cfi = best.get('composite_feasibility')
+                dist = best.get('distance_angstrom')
+                target_res = best.get('residue', 'Pocket')
+                score = geom_feas if (geom_feas is not None and geom_feas > 0) else cfi
+                card2_main = f"{score:.2f}" if score is not None else "NAC"
+                tag = "NAC Observed (≤ 3.5 Å)" if best.get('is_nac') else "Proximal (> 3.5 Å)"
+                card2_sub = f"d = {dist:.2f} Å · {target_res} · {tag}" if dist is not None else f"{target_res} · {tag}"
+            elif covalent_summary.get('pocket_nucleophiles'):
+                card2_main = "Pocket Nucls"
+                card2_sub = f"{len(covalent_summary['pocket_nucleophiles'])} in cavity (> contact cutoff)"
 
     # Card 3: Trajectory Sampling & P_NAC Persistence
     card3_title = "Conformational Sampling"

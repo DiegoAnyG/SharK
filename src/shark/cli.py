@@ -77,22 +77,29 @@ def run_interactive():
     print('      Deliverables: Full GROMACS trajectory, trajectory dashboard, medoid PDBs, and')
     print('                   interactive HTML Dossier with MD and covalent metrics.')
     print('      Estimated time: ~15-60+ minutes (depending on simulation length & GPU).\n')
-    print('  [4] Trajectory Contact Analyzer')
+    print('  [4] Transition State & Activation Energy (Tier 4 / ORCA)')
+    print('      Description: Extracts active-site QM cluster (minimal capped residue or extended pocket),')
+    print('                   generates automated ORCA relaxed surface scan, optimizes the first-order saddle')
+    print('                   point (! OptTS Freq), verifies strictly 1 imaginary mode, and calculates Eyring')
+    print('                   activation free energy (ΔG‡) and reaction thermodynamics (ΔG_rxn).')
+    print('      Deliverables: QM cluster files, reaction coordinate profile, verified TS output, and ΔG‡.')
+    print('      Estimated time: ~1-10 minutes (minimal model) or ~30-60 minutes (extended cluster).\n')
+    print('  [5] Trajectory Contact Analyzer')
     print('      Description: Computes residue contact occupancy and persistence over time for an')
     print('                   existing MD trajectory without quantum or clustering calculations.')
     print('      Deliverables: Contact occupancy JSON and interactive HTML trajectory contact map.')
     print('      Estimated time: ~10-20 seconds.\n')
-    print('  [5] Expert / Custom Mode')
+    print('  [6] Expert / Custom Mode')
     print('      Description: Step-by-step custom configuration for isolated-ligand ORCA DFT,')
     print('                   custom clustering cutoffs, specific residue targets, and solvent models.')
     print('      Deliverables: Custom ORCA inputs/outputs, orbital visualizations, or tailored reports.')
     print('      Estimated time: Variable (seconds to hours).\n')
     print('  [Q] Quit\n')
 
-    choice = input('Select combo [1-5, or Q] > ').strip().upper()
+    choice = input('Select combo [1-6, or Q] > ').strip().upper()
     if choice == 'Q':
         return 0
-    if choice not in ('1', '2', '3', '4', '5'):
+    if choice not in ('1', '2', '3', '4', '5', '6'):
         print('Unknown selection', file=sys.stderr)
         return 2
 
@@ -153,39 +160,65 @@ def run_interactive():
             argv += ['--execute']
 
     elif choice == '4':
-        gro = input('Matching topology (GRO or supported TPR) > ').strip()
-        xtc = input('XTC trajectory > ').strip()
-        lig = input('Exact ligand atom selection (for example: resname UNL and not name H*) > ').strip()
-        cutoff = input('Contact cutoff in angstrom [4.0] > ').strip() or '4.0'
-        argv = ['--analyze-md', '--topology', gro, '--trajectory', xtc,
-                '--ligand-selection', lig, '--contact-cutoff', cutoff]
-
-    elif choice == '5':
-        action = input('[1] Prepare ligand DFT  [2] Execute ligand DFT  [3] Session report  [4] Custom Covalent Matcher > ').strip()
-        if action in ('1', '2'):
-            argv += ['--dft', '--top', input('Number of unique ligands [1] > ').strip() or '1']
-            compound = input('Exact compound name [ranked selection] > ').strip()
+        first_input = input('Active site QM model [1: Minimal Capped Residue (recommended/fast), 2: Extended Pocket Cluster] > ').strip()
+        if first_input.lower().endswith(('.gro', '.pdb', '.tpr', '.xtc')):
+            gro = first_input
+            xtc = input('XTC trajectory > ').strip()
+            lig = input('Exact ligand atom selection (for example: resname UNL and not name H*) > ').strip()
+            cutoff = input('Contact cutoff in angstrom [4.0] > ').strip() or '4.0'
+            argv = ['--analyze-md', '--topology', gro, '--trajectory', xtc,
+                    '--ligand-selection', lig, '--contact-cutoff', cutoff]
+        else:
+            argv += ['--tier-4-ts']
+            if first_input == '2' or first_input.lower().startswith('ext'):
+                argv += ['--qm-model', 'extended']
+            else:
+                argv += ['--qm-model', 'minimal']
+            compound = input('Exact compound name [leave blank for ranked top 1] > ').strip()
             if compound:
                 argv += ['--compound', compound]
-            target = input('Target/pocket identifier [all] > ').strip()
-            if target:
-                argv += ['--target', target]
-            argv += ['--theory', input('ORCA method [r2SCAN-3c] > ').strip() or 'r2SCAN-3c']
-            argv += ['--solvent', input('CPCM solvent [Water; gas for no solvent] > ').strip() or 'Water']
-            argv += ['--multiplicity', input('Spin multiplicity [1] > ').strip() or '1']
-            argv += ['--geometry', input('Geometry source [input; smiles to regenerate] > ').strip() or 'input']
-            if input('Calculate frequencies to check the optimized minimum? [Y/n] > ').strip().lower() != 'n':
-                argv += ['--frequencies']
-            if action == '2':
-                argv += ['--execute']
-        elif action == '4':
-            argv += ['--covalent']
-            compound = input('Exact compound name [ranked selection] > ').strip()
-            if compound:
-                argv += ['--compound', compound]
-            target_res = input('Target nucleophile residue (e.g. THR309) > ').strip()
+            target_res = input('Target nucleophile residue (e.g., THR309, CYS145) [default: THR309] > ').strip()
             if target_res:
                 argv += ['--target-residue', target_res]
+            exec_now = input('Launch ORCA TS workflow immediately? [Y/n] > ').strip().lower()
+            if exec_now != 'n':
+                argv += ['--execute']
+
+    elif choice in ('5', '6'):
+        action_or_gro = input('[1] Prepare ligand DFT  [2] Execute ligand DFT  [3] Session report  [4] Custom Covalent Matcher > ').strip()
+        if action_or_gro.lower().endswith(('.gro', '.pdb', '.tpr', '.xtc')):
+            gro = action_or_gro
+            xtc = input('XTC trajectory > ').strip()
+            lig = input('Exact ligand atom selection (for example: resname UNL and not name H*) > ').strip()
+            cutoff = input('Contact cutoff in angstrom [4.0] > ').strip() or '4.0'
+            argv = ['--analyze-md', '--topology', gro, '--trajectory', xtc,
+                    '--ligand-selection', lig, '--contact-cutoff', cutoff]
+        else:
+            action = action_or_gro
+            if action in ('1', '2'):
+                argv += ['--dft', '--top', input('Number of unique ligands [1] > ').strip() or '1']
+                compound = input('Exact compound name [ranked selection] > ').strip()
+                if compound:
+                    argv += ['--compound', compound]
+                target = input('Target/pocket identifier [all] > ').strip()
+                if target:
+                    argv += ['--target', target]
+                argv += ['--theory', input('ORCA method [r2SCAN-3c] > ').strip() or 'r2SCAN-3c']
+                argv += ['--solvent', input('CPCM solvent [Water; gas for no solvent] > ').strip() or 'Water']
+                argv += ['--multiplicity', input('Spin multiplicity [1] > ').strip() or '1']
+                argv += ['--geometry', input('Geometry source [input; smiles to regenerate] > ').strip() or 'input']
+                if input('Calculate frequencies to check the optimized minimum? [Y/n] > ').strip().lower() != 'n':
+                    argv += ['--frequencies']
+                if action == '2':
+                    argv += ['--execute']
+            elif action == '4':
+                argv += ['--covalent']
+                compound = input('Exact compound name [ranked selection] > ').strip()
+                if compound:
+                    argv += ['--compound', compound]
+                target_res = input('Target nucleophile residue (e.g. THR309) > ').strip()
+                if target_res:
+                    argv += ['--target-residue', target_res]
 
     output = input('Output directory [leave blank for default reports/ directory] > ').strip()
     if output:
@@ -300,6 +333,11 @@ def main(argv=None):
     parser.add_argument('--cluster-cutoff', type=float, default=1.5, help='Daura RMSD clustering neighbor cutoff in angstrom (default: 1.5)')
     parser.add_argument('--cluster-stride', type=int, default=5, help='Frame sampling stride for trajectory clustering (default: 5)')
     parser.add_argument('--cluster-start-ns', type=float, default=0.0, help='Simulation time in ns to start clustering (default: 0.0)')
+    parser.add_argument('--tier-4-ts', '--ts', dest='tier_4_ts', action='store_true', help='Execute Tier 4: Transition State modeling & Eyring activation free energy barrier')
+    parser.add_argument('--qm-model', choices=['minimal', 'extended'], default='minimal', help='Active site QM cluster model: minimal (capped residue, ~35 atoms) or extended (pocket, ~120 atoms)')
+    parser.add_argument('--scan-start', type=float, default=3.30, help='Starting distance in Angstroms for coordinate scan (default: 3.30)')
+    parser.add_argument('--scan-end', type=float, default=1.45, help='Ending distance in Angstroms for coordinate scan (default: 1.45)')
+    parser.add_argument('--scan-steps', type=int, default=18, help='Number of scan steps along reaction coordinate (default: 18)')
     args = parser.parse_args(arguments)
     if args.interactive or not arguments:
         try:
@@ -312,6 +350,8 @@ def main(argv=None):
         args.covalent = True
     if args.full_gold_standard:
         args.run_md = True
+        args.covalent = True
+    if args.tier_4_ts:
         args.covalent = True
     if args.analyze_md:
         if args.dft or args.execute or args.run_md:
@@ -346,8 +386,8 @@ def main(argv=None):
             return 1
     if not args.session:
         parser.error('--session is required')
-    if args.execute and not args.dft and not args.run_md:
-        parser.error('--execute requires --dft, run-qm or --run-md')
+    if args.execute and not args.dft and not args.run_md and not args.tier_4_ts:
+        parser.error('--execute requires --dft, run-qm, --run-md or --tier-4-ts')
     if args.top < 1:
         parser.error('--top must be positive')
     session = None
@@ -529,6 +569,141 @@ def main(argv=None):
                 'ligand_name': selected_poses[0].ligand_id if selected_poses else 'Ligand',
                 'clustering': clustering_info
             }
+
+        if args.tier_4_ts:
+            from .analysis.qm_cluster import extract_qm_cluster
+            from .analysis.transition_state import (
+                prepare_ts_workflow_directory,
+                parse_orca_scan_output,
+                parse_orca_ts_output,
+                compute_reaction_profile,
+            )
+
+            selected_poses = _get_selected_poses()
+            p = selected_poses[0] if selected_poses else session.poses[0]
+            if getattr(args, 'trajectory', None) and getattr(args, 'topology', None) and 'cluster_rep' in locals() and cluster_rep and cluster_rep.snapshot_receptor_pdb and cluster_rep.snapshot_ligand_pdb:
+                rec_path = cluster_rep.snapshot_receptor_pdb
+                lig_pose = cluster_rep.snapshot_ligand_pdb
+                print(f"[TIER 4] Using solvated medoid snapshot from MD at {cluster_rep.medoid_time_ns:.2f} ns...")
+            else:
+                rec_path = session.receptor_for(p.receptor_id, raw=False)
+                lig_pose = p.pose_file
+                print(f"[TIER 4] Using docking pose for {p.ligand_id} against {p.receptor_id}...")
+
+            lig_smiles = None
+            for meta in getattr(session, 'ligands_meta', []):
+                if meta.get('name', '').casefold() == p.ligand_id.casefold():
+                    lig_smiles = meta.get('smiles')
+                    break
+
+            target_residue = args.target_residue or 'THR309'
+            print(f"[TIER 4] Extracting {args.qm_model.upper()} QM cluster for {p.ligand_id} against {target_residue} in {p.receptor_id}...")
+            cluster = extract_qm_cluster(
+                receptor_pdb=rec_path,
+                ligand_pose=lig_pose,
+                model_type=args.qm_model,
+                target_residue=target_residue,
+                ligand_smiles=lig_smiles,
+            )
+            print(f"[TIER 4] Extracted cluster '{cluster.name}': {cluster.n_atoms} atoms")
+            if cluster.nucleophile_idx is not None and cluster.electrophile_idx is not None:
+                nucl_lbl = cluster.atoms[cluster.nucleophile_idx].label
+                el_lbl = cluster.atoms[cluster.electrophile_idx].label
+                print(f"[TIER 4] Reaction coordinate: Nucleophile {nucl_lbl} <--> Electrophile {el_lbl}")
+
+            if args.work_dir:
+                ts_work_dir = Path(args.work_dir)
+            else:
+                ts_work_dir = Path.cwd() / 'runs' / f"ts_{p.ligand_id}_{target_residue}_{args.qm_model}"
+            ts_work_dir.mkdir(parents=True, exist_ok=True)
+
+            wf = prepare_ts_workflow_directory(
+                cluster=cluster,
+                output_dir=ts_work_dir,
+                method=args.theory,
+                solvent=None if args.solvent.lower() == 'gas' else args.solvent,
+                scan_start=args.scan_start,
+                scan_end=args.scan_end,
+                scan_steps=args.scan_steps,
+                nprocs=args.nprocs or 4,
+            )
+            print(f"[TIER 4] Workflow prepared at: {ts_work_dir}")
+            print(f"[TIER 4] Scan input: {wf['scan_inp']}")
+            print(f"[TIER 4] Runner script: {wf['run_script']}")
+
+            if args.execute:
+                orca_bin = shutil.which('orca')
+                if not orca_bin and os.path.exists('/home/diego/bioinformatics/orca_6_1_1_linux_x86-64_shared_openmpi418_nodmrg/orca'):
+                    orca_bin = '/home/diego/bioinformatics/orca_6_1_1_linux_x86-64_shared_openmpi418_nodmrg/orca'
+                if not orca_bin:
+                    print("[ERROR] ORCA executable not found in PATH or standard location", file=sys.stderr)
+                    return 1
+
+                orca_real = os.path.realpath(orca_bin)
+                print(f"[TIER 4] [Step 1/3] Executing ORCA relaxed coordinate scan with {orca_real}...")
+                with open(ts_work_dir / '01_scan.out', 'w') as out_f:
+                    p_scan = subprocess.run([orca_real, '01_scan.inp'], cwd=ts_work_dir, stdout=out_f, stderr=subprocess.STDOUT)
+                if p_scan.returncode != 0:
+                    print(f"[ERROR] Coordinate scan failed with code {p_scan.returncode}", file=sys.stderr)
+                    return p_scan.returncode
+
+                print("[TIER 4] [Step 2/3] Analyzing scan trajectory and locating Transition State guess...")
+                scan_res = parse_orca_scan_output(ts_work_dir / '01_scan.out', work_dir=ts_work_dir)
+                print(f"[TIER 4] {scan_res.summary}")
+
+                if scan_res.ts_guess_xyz and scan_res.ts_guess_xyz.is_file():
+                    xyz_lines = scan_res.ts_guess_xyz.read_text(encoding='utf-8').splitlines()[2:]
+                    tmpl = (ts_work_dir / '02_optts_template.inp').read_text(encoding='utf-8')
+                    header = tmpl.split('* xyz')[0]
+                    coords_str = '\n'.join(['  ' + ln for ln in xyz_lines if ln.strip()])
+                    new_inp = f"{header}* xyz {cluster.charge} {cluster.multiplicity}\n{coords_str}\n*\n"
+                    (ts_work_dir / '02_optts.inp').write_text(new_inp, encoding='utf-8')
+                else:
+                    shutil.copyfile(ts_work_dir / '02_optts_template.inp', ts_work_dir / '02_optts.inp')
+
+                print(f"[TIER 4] [Step 3/3] Running Saddle Point Optimization & Frequency Verification (! OptTS Freq)...")
+                with open(ts_work_dir / '02_optts.out', 'w') as out_f:
+                    p_ts = subprocess.run([orca_real, '02_optts.inp'], cwd=ts_work_dir, stdout=out_f, stderr=subprocess.STDOUT)
+                if p_ts.returncode != 0:
+                    print(f"[ERROR] OptTS failed with code {p_ts.returncode}", file=sys.stderr)
+                    return p_ts.returncode
+
+                ts_verif = parse_orca_ts_output(ts_work_dir / '02_optts.out', property_file_path=ts_work_dir / '02_optts.property.txt')
+                print(f"[TIER 4] Verification: {ts_verif.transition_vector_summary}")
+
+                reactants_g = scan_res.points[0].energy_hartree if scan_res.points else ts_verif.electronic_energy_hartree
+                ts_g = ts_verif.gibbs_free_energy_hartree if ts_verif.gibbs_free_energy_hartree != 0.0 else ts_verif.electronic_energy_hartree
+                prod_g = scan_res.points[-1].energy_hartree if scan_res.points else None
+
+                profile = compute_reaction_profile(
+                    reactants_gibbs=reactants_g,
+                    ts_gibbs=ts_g,
+                    product_gibbs=prod_g,
+                    is_first_order_ts=ts_verif.is_valid_first_order_saddle_point
+                )
+                print("=" * 65)
+                print(f" [TIER 4] REACTION THERMOCHEMISTRY & KINETICS")
+                print(f"  Activation Free Energy (ΔG‡): {profile.delta_g_activation_kcal:.2f} kcal/mol")
+                if profile.delta_g_reaction_kcal is not None:
+                    print(f"  Reaction Free Energy (ΔG_rxn): {profile.delta_g_reaction_kcal:.2f} kcal/mol")
+                print(f"  Kinetic Feasibility:          {profile.kinetic_feasibility}")
+                print(f"  Estimated Half-Life (t1/2):    {profile.estimated_half_life_str}")
+                print(f"  Rate Constant (k):             {profile.rate_constant_s:.3e} s^-1")
+                print("=" * 65)
+
+                if covalent_summary is not None:
+                    covalent_summary['transition_state'] = {
+                        'delta_g_activation_kcal': profile.delta_g_activation_kcal,
+                        'delta_g_reaction_kcal': profile.delta_g_reaction_kcal,
+                        'kinetic_feasibility': profile.kinetic_feasibility,
+                        'half_life': profile.estimated_half_life_str,
+                        'model_type': cluster.model_type,
+                        'summary': profile.summary,
+                        'is_first_order_ts': ts_verif.is_valid_first_order_saddle_point,
+                    }
+            else:
+                print(f"[TIER 4] To execute the transition state search manually, run:")
+                print(f"         bash {wf['run_script']}")
 
         if args.dft:
             jobs = prepare_ligand_jobs(
