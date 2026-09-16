@@ -132,6 +132,19 @@ def read_poliscreen_session(session_path: str | Path, target_dir: str | Path | N
     Callers own the extracted directory and can delete it after use.
     """
     path = Path(session_path).expanduser().resolve()
+    if path.is_dir():
+        manifest = {}
+        if (path / 'manifest.json').is_file():
+            try:
+                manifest = json.loads((path / 'manifest.json').read_text(encoding='utf-8'))
+            except (ValueError, UnicodeError):
+                pass
+        elif (path / 'run.json').is_file():
+            try:
+                manifest = json.loads((path / 'run.json').read_text(encoding='utf-8'))
+            except (ValueError, UnicodeError):
+                pass
+        return _index_session(path, path, manifest, "")
     if not path.is_file():
         raise FileNotFoundError(f"Session file not found: {path.name}")
     if max_unpacked_bytes < 1:

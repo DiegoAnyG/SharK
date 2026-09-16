@@ -77,6 +77,24 @@ class TestSharKCore(unittest.TestCase):
         self.assertAlmostEqual(res.loewdin_charges[0], -0.20976, places=3)
         self.assertAlmostEqual(res.mulliken_charges[0], -0.24615, places=3)
 
+    def test_read_directory_session(self):
+        from shark.core.session import read_poliscreen_session
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            (tmp_dir / 'docking_results.csv').write_text(
+                'pose_name,compound_name,receptor,docking_score\n'
+                'docking_rec_compounds_a_lig1-model1,lig1,rec,-7.5\n'
+            )
+            (tmp_dir / 'poses').mkdir()
+            (tmp_dir / 'poses' / 'docking_rec_compounds_a_lig1-model1.pdb').write_text('ATOM      1  C   LIG     1       0.0   0.0   0.0\n')
+            (tmp_dir / 'receptors').mkdir()
+            (tmp_dir / 'receptors' / 'rec.pdb').write_text('ATOM      1  CA  CYS A   1       1.0   1.0   1.0\n')
+            session = read_poliscreen_session(tmp_dir)
+            self.assertEqual(len(session.poses), 1)
+            self.assertEqual(session.poses[0].ligand_id, 'lig1')
+            self.assertEqual(session.poses[0].score, -7.5)
+
 
 if __name__ == "__main__":
     unittest.main()
