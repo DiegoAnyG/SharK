@@ -154,21 +154,14 @@ def generate_html_dossier(project_name: str, poses_data: list[dict], out_html: s
             valid_energies.append((ligand, eh, job))
 
     tautomers_data = []
-    card1_title = "Dominant Tautomer"
+    card1_title = 'Dominant Tautomer <span class="help-bubble" tabindex="0" data-tooltip="Tautomer or conformer with lowest electronic energy from solvent-optimized DFT.">?</span>'
     card1_main = "N/A"
     card1_sub = "No DFT calculations"
     if valid_energies:
         min_eh = min(e[1] for e in valid_energies)
-        weights = []
         for ligand, eh, job in valid_energies:
             delta_e = (eh - min_eh) * 627.509474
-            w = math.exp(-max(0.0, delta_e) / 0.592484)
-            weights.append(w)
-        sum_w = sum(weights) if sum(weights) > 0 else 1.0
-
-        for (ligand, eh, job), w in zip(valid_energies, weights):
-            delta_e = (eh - min_eh) * 627.509474
-            pct = (w / sum_w) * 100.0
+            pct = None
             res = job.get('results') or {}
             orb = res.get('orbitals', {}).get('0', {})
             h = orb.get('homo', {}).get('energy_eV')
@@ -179,7 +172,7 @@ def generate_html_dossier(project_name: str, poses_data: list[dict], out_html: s
                 'label': ligand,
                 'energy_eh': eh,
                 'delta_e_kcal': round(delta_e, 3),
-                'boltzmann_pct': round(pct, 1),
+                'boltzmann_pct': None,
                 'homo_ev': h,
                 'lumo_ev': l,
                 'gap_ev': g if g is not None else ((l - h) if (h is not None and l is not None) else None),
@@ -191,9 +184,9 @@ def generate_html_dossier(project_name: str, poses_data: list[dict], out_html: s
         dom = tautomers_data[0]
         card1_main = dom['label']
         if len(tautomers_data) > 1:
-            card1_sub = f"Boltzmann: {dom['boltzmann_pct']:.1f}% (ΔE = 0.00 kcal/mol)"
+            card1_sub = "Relative electronic energy only; populations not established"
         else:
-            card1_sub = "Ground state minimum (ΔE = 0.00 kcal/mol)"
+            card1_sub = "Single supplied state; global minimum not established"
 
     table = ('<div class="table-wrap"><table><caption>Recorded electronic results; energies are not protein binding energies.</caption>'
              '<thead><tr>' + ''.join(f'<th scope="col">{h}</th>' for h in ['Calculation', 'State', 'Energy / Eh', 'Spin', 'HOMO / eV', 'LUMO / eV', 'Gap / eV', 'Geometry check'])
@@ -255,7 +248,7 @@ def generate_html_dossier(project_name: str, poses_data: list[dict], out_html: s
                 ('Sampling frames', f"{cluster_info.get('total_sampled_frames', 'N/A')} frames"),
                 ('Top cluster population', f"{cluster_info.get('top_cluster_size', 'N/A')} frames ({cluster_info.get('top_cluster_fraction', 0)*100:.1f}%)"),
                 ('Medoid snapshot time', f"{cluster_info.get('medoid_time_ns', 0):.2f} ns (Frame #{cluster_info.get('medoid_frame_index', 'N/A')})"),
-                ('Trajectory P_NAC', f"{cluster_info.get('p_nac', 0)*100:.1f}%"),
+                ('Legacy distance-contact fraction', f"{cluster_info.get('p_nac', 0)*100:.1f}%"),
             ]
             cluster_block = (
                 '<div class="insight" style="margin: 16px 0;">'
@@ -319,8 +312,8 @@ def generate_html_dossier(project_name: str, poses_data: list[dict], out_html: s
         contact_table = (
             '<div class="table-wrap"><table><thead><tr>'
             '<th>Pocket residue</th><th>Nucleophile atom</th><th>Ligand atom</th>'
-            '<th>Distance</th><th>Angle (θ_BD)</th><th>Catalytic dyad</th>'
-            '<th>Geom. Feasibility</th><th>Composite CFI</th><th>Status</th>'
+            '<th>Distance</th><th>Neighbor-based angle</th><th>Nearby base candidate</th>'
+            '<th>Distance score</th><th>Heuristic CFI</th><th>Status</th>'
             '</tr></thead><tbody>' + ''.join(contact_rows) + '</tbody></table></div>'
         ) if contact_rows else '<p>No nucleophiles within pocket cutoff distance.</p>'
 
@@ -332,12 +325,12 @@ def generate_html_dossier(project_name: str, poses_data: list[dict], out_html: s
             '<div class="two-column" style="margin-top:20px;">'
             '<div>'
             '<h3>Bruice Near-Attack Feasibility Curve</h3>'
-            '<p>Continuous sigmoidal probability model mapping nucleophile-electrophile distance to geometric reaction feasibility (Bruice criterion, threshold 3.5 Å).</p>'
+            '<p>Uncalibrated distance score. The sigmoid is a ranking heuristic, not a reaction probability or kinetic model.</p>'
             '<div id="covalent-curve-plot" style="height:360px;background:#fff;border:1px solid var(--line);border-radius:8px;" role="img" aria-label="Bruice NAC Feasibility Sigmoid Curve"></div>'
             '</div>'
             '<div>'
             '<h3>Conceptual DFT / Warhead Electrophilicity</h3>'
-            '<p>Reactivity index and frontier electronic descriptors governing warhead electrophilic power and chemical softness.</p>'
+            '<p>Frontier-energy descriptors; conventions and units are explicit below. These do not establish a reaction mechanism.</p>'
             '<div id="fukui-bar-plot" style="height:360px;background:#fff;border:1px solid var(--line);border-radius:8px;" role="img" aria-label="CDFT Electrophilicity Profile"></div>'
             '</div>'
             '</div>'
@@ -347,18 +340,22 @@ def generate_html_dossier(project_name: str, poses_data: list[dict], out_html: s
         tot_feas = covalent_summary.get('total_feasibility', {})
         tot_feas_block = ''
         if tot_feas:
+            cfi_val = tot_feas.get('cfi_total', 0.0)
+            cfi_pct = tot_feas.get('percentage', cfi_val * 100)
+            tier_val = tot_feas.get('tier', 'Evaluated')
+            w = tot_feas.get('weights', {'affinity': 0.25, 'nac': 0.40, 'ts': 0.35})
+            
             tf_items = [
-                ('Total Covalent Feasibility', f"<strong style=\"color:#059669;font-size:15px;\">{tot_feas.get('percentage', 0):.1f}%</strong> ({escape(str(tot_feas.get('tier', 'N/A')))})"),
-                ('Pillar 1: Docking Affinity', f"{tot_feas.get('affinity_score', 0):.2f} (Docking ΔG = {tot_feas.get('docking_score', 'N/A')} kcal/mol)"),
-                ('Pillar 2: Trajectory Sampling', (f"{tot_feas.get('nac_score', 0):.2f} (P_NAC = {tot_feas.get('p_nac', 0)*100:.1f}%)" if tot_feas.get('p_nac') is not None else f"{tot_feas.get('nac_score', 0):.2f}")),
-                ('Pillar 3: Eyring Activation', (f"{tot_feas.get('ts_score', 0):.2f} (ΔG‡ = {tot_feas.get('delta_g_ts', 'N/A')} kcal/mol)" if tot_feas.get('ts_score') is not None else "Pending TS calculation")),
+                ('Pillar 1: Reversible Affinity (S_aff)', f"{_number(tot_feas.get('docking_score'), 2)} kcal/mol (Score: {_number(tot_feas.get('affinity_score'), 2)}, w={w.get('affinity', 0.25)})"),
+                ('Pillar 2: MD Persistence (P_NAC)', f"{_number((tot_feas.get('p_nac') or 0)*100, 1)}% (w={w.get('nac', 0.40)})"),
+                ('Pillar 3: Chemical Kinetics (S_TS)', f"ΔG‡ = {_number(tot_feas.get('delta_g_ts'), 1)} kcal/mol (Score: {_number(tot_feas.get('ts_score'), 2)}, w={w.get('ts', 0.35)})"),
+                ('Unified Index (CFI_total)', f"<strong>{cfi_pct:.1f}%</strong> · <span class='badge' style='background:#ecfdf5;color:#065f46;'>{tier_val}</span>"),
             ]
             tot_feas_block = (
-                '<div class="insight" style="margin: 16px 0; border-left: 4px solid #10b981; padding: 14px 18px; background: #f0fdf4; border-radius: 6px;">'
-                '<h3 style="color:#065f46; margin: 0 0 6px 0;">Unified Total Covalent Feasibility (Pillars 1 + 2 + 3)</h3>'
-                f'<p style="color:#047857; margin: 0 0 10px 0;">{escape(str(tot_feas.get("summary", "")))}</p>'
-                '<dl style="margin:0;">'
-                + ''.join(f'<div><dt>{k}</dt><dd>{v}</dd></div>' for k, v in tf_items)
+                f'<div class="insight" style="margin:20px 0;background:#f8fafc;border-left:4px solid #087b70;padding:16px 20px;border-radius:0 10px 10px 0;">'
+                f'<h3 style="margin:0 0 8px;display:flex;align-items:center;">Unified Total Covalent Feasibility Index (CFI_total) <span class="help-bubble" tabindex="0" data-tooltip="Integrates all 3 pharmaceutical pillars: Initial Affinity (25%), Solvated MD NAC Sampling (40%), and Eyring Chemical Activation Barrier (35%).">?</span></h3>'
+                f'<dl style="margin:0;">'
+                + ''.join(f'<div style="display:grid;grid-template-columns:1.5fr 2fr;gap:12px;padding:6px 0;border-bottom:1px solid #e2e8f0;font-size:13px;"><dt style="color:#475569;font-weight:600;">{k}</dt><dd style="margin:0;color:#0f172a;">{v}</dd></div>' for k,v in tf_items)
                 + '</dl></div>'
             )
 
@@ -397,7 +394,7 @@ def generate_html_dossier(project_name: str, poses_data: list[dict], out_html: s
 
         covalent_html = (
             '<section id="covalent">'
-            '<div class="section-heading"><span>03 / Warhead & Reactivity</span><h2>Covalent Near-Attack Conformations (NAC)</h2></div>'
+            '<div class="section-heading"><span>03 / Covalent Feasibility</span><h2>Covalent Near-Attack Conformations (NAC) <span class="help-bubble" tabindex="0" data-tooltip="Pre-reactive near-attack conformation, Bürgi-Dunitz trajectory, and Eyring chemical kinetics governing covalent bond formation.">?</span></h2></div>'
             f'<p>{escape(str(covalent_summary.get("summary", "")))}</p>'
             + tot_feas_block
             + cluster_block
@@ -414,19 +411,22 @@ def generate_html_dossier(project_name: str, poses_data: list[dict], out_html: s
     provenance = dict(schema_version=1, shark_version=__version__, project=str(project_name), jobs=public_jobs,
                       docking=poses_data, molecular_dynamics=md_summary, covalent=covalent_summary, notes=notes)
     # Card 2: Total Covalent Feasibility (or TS ΔG‡ / Geometric Feasibility)
-    card2_title = "Total Covalent Feasibility"
+    card2_title = 'Total Feasibility (CFI_tot) <span class="help-bubble" tabindex="0" data-tooltip="Unified Covalent Feasibility Index combining initial docking affinity (Pillar 1), MD trajectory near-attack persistence P_NAC (Pillar 2), and Eyring transition state barrier (Pillar 3).">?</span>'
     card2_main = "Not Evaluated"
     card2_sub = "Requires reaction mechanism"
     if covalent_summary:
         tot_feas = covalent_summary.get('total_feasibility')
         if tot_feas and tot_feas.get('cfi_total') is not None:
-            card2_title = "Total Feasibility (CFI_tot)"
-            card2_main = f"{tot_feas['percentage']:.1f}%"
-            card2_sub = f"{tot_feas.get('tier', 'Feasible')} · 3 Pillars Integrated"
+            card2_title = 'Total Feasibility (CFI_tot) <span class="help-bubble" tabindex="0" data-tooltip="Unified Covalent Feasibility Index combining initial docking affinity (Pillar 1), MD trajectory near-attack persistence P_NAC (Pillar 2), and Eyring transition state barrier (Pillar 3).">?</span>'
+            cfi_val = tot_feas['cfi_total']
+            tier_val = tot_feas.get('tier', 'High Feasibility')
+            card2_main = f"{cfi_val * 100:.1f}%"
+            card2_sub = f"{tier_val} · 3 Pillars Integrated"
+
         else:
             ts_res = covalent_summary.get('transition_state')
             if ts_res and ts_res.get('delta_g_activation_kcal') is not None:
-                card2_title = "Covalent Barrier (ΔG‡)"
+                card2_title = 'Covalent Barrier (ΔG‡) <span class="help-bubble" tabindex="0" data-tooltip="Eyring activation free energy barrier.">?</span>'
                 card2_main = f"{ts_res['delta_g_activation_kcal']:.1f} kcal/mol"
                 card2_sub = f"{ts_res.get('kinetic_feasibility', 'Feasible')} · t½ ~ {ts_res.get('half_life', 'N/A')}"
             else:
@@ -452,19 +452,19 @@ def generate_html_dossier(project_name: str, poses_data: list[dict], out_html: s
                     card2_sub = f"{len(covalent_summary['pocket_nucleophiles'])} in cavity (> contact cutoff)"
 
     # Card 3: Trajectory Sampling & P_NAC Persistence
-    card3_title = "Conformational Sampling"
+    card3_title = 'Conformational Sampling <span class="help-bubble" tabindex="0" data-tooltip="MD trajectory sampling persistence.">?</span>'
     card3_main = "Static Pose"
     card3_sub = "Docking pose (no MD trajectory)"
     cluster_info = (covalent_summary.get('clustering') or {}) if covalent_summary else {}
     if cluster_info and cluster_info.get('p_nac') is not None:
         p_nac = cluster_info.get('p_nac', 0.0)
-        card3_title = "Trajectory P_NAC Persistence"
+        card3_title = 'Trajectory Sampling (P_NAC) <span class="help-bubble" tabindex="0" data-tooltip="Percentage of solvated MD frames maintaining near-attack conformation (d <= 3.5 Å, theta_BD in 90-135 deg).">?</span>'
         card3_main = f"{p_nac * 100:.1f}%"
         medoid_ns = cluster_info.get('medoid_time_ns', 0.0)
         top_frac = cluster_info.get('top_cluster_fraction', 0.0) * 100
         card3_sub = f"Medoid at {medoid_ns:.2f} ns ({top_frac:.0f}% top cluster)"
     elif md_summary:
-        card3_title = "Trajectory Contacts"
+        card3_title = 'Trajectory Contacts <span class="help-bubble" tabindex="0" data-tooltip="Sampled frames in classical MD.">?</span>'
         card3_main = f"{md_summary.get('sampled_frame_count', 'N/A')} frames"
         card3_sub = f"{_number(md_summary.get('time_start_ns'), 1)}–{_number(md_summary.get('time_end_ns'), 1)} ns MD"
 
@@ -472,13 +472,13 @@ def generate_html_dossier(project_name: str, poses_data: list[dict], out_html: s
     completed = sum(job.get('status') == 'completed' for job in jobs)
     checked = sum(bool((job.get('results') or {}).get('stationary_minimum_verified')) for job in jobs)
     total = len(jobs)
-    card4_title = "Verified Quantum Minima"
+    card4_title = 'Verified Quantum Minima <span class="help-bubble" tabindex="0" data-tooltip="Confirms stationary states have zero imaginary vibrational frequencies (true thermodynamic minima).">?</span>'
     if total > 0:
         pct = (completed / total) * 100.0
         card4_main = f"{checked}/{total} Minima"
-        card4_sub = f"{completed}/{total} completed ({pct:.0f}%) · 0 imag. freq"
+        card4_sub = f"{completed}/{total} completed; inspect each frequency check"
     else:
-        card4_title = "DFT Calculations"
+        card4_title = 'DFT Calculations'
         card4_main = "N/A"
         card4_sub = "No quantum calculations"
 
@@ -486,10 +486,10 @@ def generate_html_dossier(project_name: str, poses_data: list[dict], out_html: s
                         COMPLETED=str(completed), CHECKED=str(checked), TABLE=table, METHODS=''.join(methods),
                         DOCKING=docking, MD=md, COVALENT=covalent_html,
                         COVALENT_STATUS=escape(cov_status), COVALENT_SUB=escape(cov_sub),
-                        CARD1_TITLE=escape(card1_title), CARD1_MAIN=escape(card1_main), CARD1_SUB=escape(card1_sub),
-                        CARD2_TITLE=escape(card2_title), CARD2_MAIN=escape(card2_main), CARD2_SUB=escape(card2_sub),
-                        CARD3_TITLE=escape(card3_title), CARD3_MAIN=escape(card3_main), CARD3_SUB=escape(card3_sub),
-                        CARD4_TITLE=escape(card4_title), CARD4_MAIN=escape(card4_main), CARD4_SUB=escape(card4_sub),
+                        CARD1_TITLE=card1_title, CARD1_MAIN=escape(card1_main), CARD1_SUB=escape(card1_sub),
+                        CARD2_TITLE=card2_title, CARD2_MAIN=escape(card2_main), CARD2_SUB=escape(card2_sub),
+                        CARD3_TITLE=card3_title, CARD3_MAIN=escape(card3_main), CARD3_SUB=escape(card3_sub),
+                        CARD4_TITLE=card4_title, CARD4_MAIN=escape(card4_main), CARD4_SUB=escape(card4_sub),
                         LEGACY=legacy, NOTES=f'<p>{escape(notes)}</p>' if notes else '',
                         PROVENANCE=escape(json.dumps(provenance, indent=2, default=str)),
                         DATA=_json(dict(viewers=viewers, levels=levels, tautomers=tautomers_data,
@@ -498,6 +498,19 @@ def generate_html_dossier(project_name: str, poses_data: list[dict], out_html: s
                         THREEDMOL=_get_3dmol_js())
     template = Path(__file__).with_name('dossier.html').read_text(encoding='utf-8')
     content = re.sub(r'@@([A-Z0-9_]+)@@', lambda m: replacements.get(m[1], ''), template)
+    def contextual_help(match):
+        attrs, body = match.group(1), match.group(2)
+        if 'notice' in attrs or 'empty-orbitals' in attrs:
+            return match.group(0)
+        return ('<span class="context-help"><button type="button" class="help-button" '
+                'aria-label="Result interpretation" aria-expanded="false">?</button>'
+                '<span class="help-content" role="note">' + body + '</span></span>')
+    # Only transform markup, never embedded JavaScript or serialized source documents.
+    content = re.sub(r'(<script\b[^>]*>.*?</script>)', lambda m:m[0], content, flags=re.S)
+    pieces = re.split(r'(<script\b[^>]*>.*?</script>)', content, flags=re.S)
+    content = ''.join(part if part.startswith('<script') else
+                      re.sub(r'<p([^>]*)>(.*?)</p>', contextual_help, part, flags=re.S)
+                      for part in pieces)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(content, encoding='utf-8')
     return out_path

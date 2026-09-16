@@ -354,6 +354,10 @@ def main(argv=None):
         args.covalent = True
     if args.tier_4_ts:
         args.covalent = True
+    # One persistent root per invocation; explicit --work-dir remains supported.
+    from .core.output import create_job_directory
+    if not args.work_dir:
+        args.work_dir = str(create_job_directory())
     if args.analyze_md:
         if args.dft or args.execute or args.run_md:
             parser.error('--analyze-md cannot launch DFT or MD')
@@ -424,7 +428,7 @@ def main(argv=None):
                     sim_time_ns=args.time_ns,
                     run_now=args.execute,
                     pipeline_dir=args.pipeline_dir,
-                    work_dir=args.work_dir
+                    work_dir=Path(args.work_dir) / 'md' if (args.work_dir and not args.pipeline_dir) else None
                 )
                 print(f"[MD] Status: {res.status} | Directory: {res.run_dir}")
                 if res.dashboard_path:
@@ -613,7 +617,7 @@ def main(argv=None):
                 print(f"[TIER 4] Reaction coordinate: Nucleophile {nucl_lbl} <--> Electrophile {el_lbl}")
 
             if args.work_dir:
-                ts_work_dir = Path(args.work_dir)
+                ts_work_dir = Path(args.work_dir) / 'transition_state'
             else:
                 ts_work_dir = Path.cwd() / 'runs' / f"ts_{p.ligand_id}_{target_residue}_{args.qm_model}"
             ts_work_dir.mkdir(parents=True, exist_ok=True)
@@ -634,8 +638,9 @@ def main(argv=None):
 
             if args.execute:
                 orca_bin = shutil.which('orca')
-                if not orca_bin and os.path.exists('/home/diego/bioinformatics/orca_6_1_1_linux_x86-64_shared_openmpi418_nodmrg/orca'):
-                    orca_bin = '/home/diego/bioinformatics/orca_6_1_1_linux_x86-64_shared_openmpi418_nodmrg/orca'
+                orca_bin = os.environ.get('SHARK_ORCA') or orca_bin
+                if orca_bin and Path(orca_bin).is_dir():
+                    orca_bin = str(Path(orca_bin) / 'orca')
                 if not orca_bin:
                     print("[ERROR] ORCA executable not found in PATH or standard location", file=sys.stderr)
                     return 1
@@ -786,7 +791,7 @@ def main(argv=None):
 
         if args.dft:
             jobs = prepare_ligand_jobs(
-                session, args.work_dir, top=args.top, target=args.target, compounds=args.compound,
+                session, Path(args.work_dir) / 'quantum', top=args.top, target=args.target, compounds=args.compound,
                 pareto=args.pareto, include_controls=args.include_controls, method=args.theory,
                 solvent=None if args.solvent.lower() == 'gas' else args.solvent,
                 optimize=not args.single_point, frequencies=args.frequencies, charge=args.charge,
@@ -798,7 +803,7 @@ def main(argv=None):
                     (job / 'job.json').read_text(encoding='utf-8'))
                 records.append(record)
                 print(f"[DFT] {record['selection']['ligand_id']}: {record['status']} ({job})")
-            out_file = Path(args.html) if args.html else jobs[0].parent / 'dossier.html'
+            out_file = Path(args.html) if args.html else Path(args.work_dir) / 'dossier.html'
             for job, record in zip(jobs, records):
                 if record.get('orbital_export', {}).get('status') == 'completed':
                     record['viewer_link'] = Path(os.path.relpath(job / 'frontier_orbitals.html', out_file.parent)).as_posix()
@@ -880,6 +885,23 @@ def main(argv=None):
 
         generate_html_dossier(session.project_name, poses_data, out_file,
                               qm_summary=qm_summary, covalent_summary=covalent_summary)
+
+        # Consolidate structured machine-readable deliverables in job directory
+        try:
+            out_dir = out_file.parent
+            if covalent_summary:
+                (out_dir / 'covalent_feasibility.json').write_text(
+                    json.dumps(covalent_summary, indent=2, default=str) + '\n', encoding='utf-8')
+            if poses_data:
+                import csv
+                with open(out_dir / 'poses_summary.csv', 'w', newline='', encoding='utf-8') as f:
+                    writer = csv.DictWriter(f, fieldnames=['ligand_id', 'pose_idx', 'score', 'homo_ev', 'lumo_ev', 'gap_ev'])
+                    writer.writeheader()
+                    for p in poses_data:
+                        writer.writerow({k: p.get(k, '') for k in ['ligand_id', 'pose_idx', 'score', 'homo_ev', 'lumo_ev', 'gap_ev']})
+        except Exception:
+            pass
+
         print(f'[REPORT] {out_file}')
         return 0
     except KeyboardInterrupt:

@@ -49,10 +49,12 @@ table {border-collapse:collapse;width:100%;font-size:13px} td,th {text-align:lef
 'use strict';
 const figure=@@FIGURE@@, provenance=@@METADATA@@, surfaces=@@SURFACES@@;
 const settings=structuredClone(provenance.settings), initial=structuredClone(settings);
-const scenes=provenance.scene_names, plot=document.getElementById('plot');
+const originalScenes=provenance.scene_names;
+let scenes=[...originalScenes], renderedIndices=figure.data.map((_,i)=>i);
+const plot=document.getElementById('plot');
 const status=document.getElementById('status'), iso=document.getElementById('iso');
 const groupFilter=document.getElementById('group-filter'), groupFilterLabel=document.getElementById('group-filter-label');
-let syncing=false, isDragging=false, rafSyncId=null, lastCamEyeA=null, lastCamEyeB=null;
+let syncing=false, isDragging=false, rafSyncId=null, dragScene=null;
 let initialLayoutDomains={}, initialAnnotations=[], calcGroups=[], activePair=[scenes[0], scenes[1] || scenes[0]];
 
 const amplitudeText=()=>`Isosurface: +/- ${settings.isovalue} bohr^(-3/2) | Phase colors do not indicate charge`;
@@ -94,167 +96,88 @@ if(calcGroups.length>1){
  allOpt.textContent='All ('+calcGroups.length+' calculations, full grid)';
  groupFilter.append(allOpt);
 
- // Default to dominant or 3-oxide if available
- let defaultIdx=0;
- calcGroups.forEach((grp,idx)=>{
-  const l=grp.label.toLowerCase();
-  if(l.includes('3-oxide')||l.includes('3_oxide')||l.includes('dominant'))defaultIdx=idx;
- });
- groupFilter.value=String(defaultIdx);
+ groupFilter.value='0';
 }
-
-function getActivePairScenes(){
- return (activePair&&activePair.length>=2)?activePair:[scenes[0],scenes[1]||scenes[0]];
-}
-
-let resizeTimer;
-window.addEventListener('resize', ()=>{
- clearTimeout(resizeTimer);
- resizeTimer = setTimeout(async ()=>{
-  if(plot && plot.data){
-   await Plotly.relayout(plot, {width: Math.max(280, plot.clientWidth)});
-   if(parent && parent.postMessage){
-    parent.postMessage({type:'shark-viewer-size', height: Math.ceil(document.body.getBoundingClientRect().height)}, '*');
-   }
-  }
- }, 150);
-});
 
 async function applyGroupSelection(val){
- if(!plot||!plot.data)return;
- const updateLayout={};
- const activeTraces=[];
- const inactiveTraces=[];
-
- if(val==='all'){
-  activePair=[scenes[0],scenes[1]||scenes[0]];
-  for(let p=0;p<provenance.orbitals.length;p++){
-   const sc=scenes[p];
-   const dom=structuredClone(initialLayoutDomains[sc]||{x:[0,1],y:[0,1]});
-   updateLayout[`${sc}.domain.x`]=dom.x;
-   updateLayout[`${sc}.domain.y`]=dom.y;
+ window.sharkReady=false;
+ isDragging=false;cancelAnimationFrame(rafSyncId);
+ const selected=val==='all'?originalScenes.map((_,i)=>i):(calcGroups[Number(val)]||calcGroups[0]).indices;
+ const layout=structuredClone(figure.layout);
+ for(const key of Object.keys(layout))if(/^scene[0-9]*$/.test(key))delete layout[key];
+ const mobile=plot.clientWidth<650, columns=mobile?1:Math.min(2,selected.length), rows=Math.ceil(selected.length/columns);
+ const mapping=new Map();scenes=[];
+ selected.forEach((index,i)=>{
+  const name=i===0?'scene':`scene${i+1}`;scenes.push(name);mapping.set(originalScenes[index],name);
+  const col=i%columns,row=Math.floor(i/columns),gap=.04;
+  layout[name]=structuredClone(figure.layout[originalScenes[index]]);
+  layout[name].domain={x:[col/columns+gap/2,(col+1)/columns-gap/2],y:[1-(row+1)/rows+.04/rows,1-row/rows-.1/rows]};
+  layout[name].camera=structuredClone(settings.camera);
+ });
+ layout.annotations=selected.map((index,i)=>{
+  const ann=structuredClone(figure.layout.annotations[index]);
+  ann.x=((i%columns)+.5)/columns;ann.y=1-Math.floor(i/columns)/rows;
+  ann.visible=true;return ann;
+ });
+ // Preserve source/method annotations after the orbital panel titles.
+ layout.annotations.push(...structuredClone(figure.layout.annotations.slice(originalScenes.length)));
+ layout.width=Math.max(280,plot.clientWidth);layout.height=rows*400+140;
+ renderedIndices=figure.data.flatMap((trace,i)=>mapping.has(trace.scene||'scene')?[i]:[]);
+ const traces=renderedIndices.map(i=>{
+  const tr=structuredClone(figure.data[i]);
+  tr.scene=mapping.get(figure.data[i].scene||'scene');
+  tr.visible=true;
+  const surf=surfaces.find(s=>s.trace===i);
+  if(surf && surf.variants[String(settings.isovalue)]){
+   Object.assign(tr, surf.variants[String(settings.isovalue)]);
+   tr.opacity=settings.opacity;
   }
-  for(let t=0;t<figure.data.length;t++)activeTraces.push(t);
-  updateLayout.annotations=structuredClone(initialAnnotations);
-  updateLayout.height=initial.height||figure.layout.height||960;
- }else{
-  const g=Number(val);
-  const grp=calcGroups[g]||calcGroups[0];
-  const activeIndices=grp.indices;
-  activePair=activeIndices.map(idx=>scenes[idx]);
-
-  for(let p=0;p<provenance.orbitals.length;p++){
-   const sc=scenes[p];
-   if(activeIndices.includes(p)){
-    const col=activeIndices.indexOf(p);
-    const dx=col===0?[0.0,0.485]:[0.515,1.0];
-    const dy=[0.05,0.95];
-    updateLayout[`${sc}.domain.x`]=dx;
-    updateLayout[`${sc}.domain.y`]=dy;
-   }else{
-    const off=[2.0,2.5];
-    updateLayout[`${sc}.domain.x`]=off;
-    updateLayout[`${sc}.domain.y`]=off;
-   }
-  }
-
-  for(let t=0;t<figure.data.length;t++){
-   const tr=figure.data[t];
-   const scName=tr.scene||'scene';
-   if(activePair.includes(scName)){
-    activeTraces.push(t);
-   }else{
-    inactiveTraces.push(t);
-   }
-  }
-
-  const newAnns=structuredClone(initialAnnotations);
-  newAnns.forEach((ann,idx)=>{
-   if(idx<provenance.orbitals.length){
-    if(activeIndices.includes(idx)){
-     const col=activeIndices.indexOf(idx);
-     ann.x=col===0?0.24:0.76;
-     ann.y=1.03;
-     ann.visible=true;
-    }else{
-     ann.visible=false;
-    }
-   }
-  });
-  updateLayout.annotations=newAnns;
-  updateLayout.height=540;
- }
-
- await Plotly.relayout(plot,updateLayout);
- if(activeTraces.length>0)await Plotly.restyle(plot,{visible:true},activeTraces);
- if(inactiveTraces.length>0)await Plotly.restyle(plot,{visible:false},inactiveTraces);
- await cameraAll(settings.camera);
-
- if(parent&&parent.postMessage){
-  parent.postMessage({type:'shark-viewer-size',height:Math.ceil(document.body.getBoundingClientRect().height)},'*');
- }
+  return tr;
+ });
+ await Plotly.react(plot,traces,layout,{responsive:true,displaylogo:false,displayModeBar:false});
+ const absent=surfaces.filter(s=>renderedIndices.includes(s.trace)&&s.variants[String(settings.isovalue)].x.length===0).length;
+ setStatus(absent?`${absent} phase surface(s) absent at this isovalue. No amplitudes were rescaled.`:`Isosurface: +/- ${settings.isovalue} bohr^(-3/2) · Phase colors indicate sign of wavefunction amplitude (blue = positive, red = negative)`);
+ window.sharkReady=true;window.sharkEmbeddedReady=true;
+ parent.postMessage({type:'shark-viewer-size',height:Math.ceil(document.body.getBoundingClientRect().height)},'*');
 }
-
-groupFilter.addEventListener('change',()=>applyGroupSelection(groupFilter.value));
+let selectionQueue=Promise.resolve();
+function selectGroup(){selectionQueue=selectionQueue.then(()=>applyGroupSelection(groupFilter.value||'0'));return selectionQueue;}
+groupFilter.addEventListener('change',selectGroup);
+let resizeTimer;
+window.addEventListener('resize',()=>{clearTimeout(resizeTimer);resizeTimer=setTimeout(selectGroup,150);});
 
 function tickCameraSync(){
- if(!isDragging)return;
- const pair=getActivePairScenes();
- if(pair&&pair.length>=2){
-  const sA=plot._fullLayout?.[pair[0]]?._scene;
-  const sB=plot._fullLayout?.[pair[1]]?._scene;
-  if(sA&&sB&&sA.getCamera&&sB.getCamera){
-   const camA=sA.getCamera();
-   const camB=sB.getCamera();
-   if(camA&&camA.eye&&camB&&camB.eye){
-    if(!lastCamEyeA){
-     lastCamEyeA={...camA.eye};
-     lastCamEyeB={...camB.eye};
-    }
-    const dA=Math.abs(camA.eye.x-lastCamEyeA.x)+Math.abs(camA.eye.y-lastCamEyeA.y)+Math.abs(camA.eye.z-lastCamEyeA.z);
-    const dB=Math.abs(camB.eye.x-lastCamEyeB.x)+Math.abs(camB.eye.y-lastCamEyeB.y)+Math.abs(camB.eye.z-lastCamEyeB.z);
-    if(dA>0.0005){
-     lastCamEyeA={...camA.eye};
-     lastCamEyeB={...camA.eye};
-     if(sB.glplot && sB.glplot.getAspectratio){
-      sB.setViewport({camera:camA,aspectratio:sB.glplot.getAspectratio()});
-      sB.glplot.redraw();
-     }
-    }else if(dB>0.0005){
-     lastCamEyeB={...camB.eye};
-     lastCamEyeA={...camB.eye};
-     if(sA.glplot && sA.glplot.getAspectratio){
-      sA.setViewport({camera:camB,aspectratio:sA.glplot.getAspectratio()});
-      sA.glplot.redraw();
-     }
-    }
+ if(!isDragging||!dragScene)return;
+ const source=plot._fullLayout?.[dragScene]?._scene;
+ const camera=source?.getCamera();
+ if(camera){
+  settings.camera=structuredClone(camera);
+  for(const name of scenes){
+   if(name===dragScene)continue;
+   const target=plot._fullLayout?.[name]?._scene;
+   // Plotly's public relayout is used at release; the bundled gl3d viewport
+   // path avoids rebuilding meshes on every animation frame during a drag.
+   if(target?.setViewport&&target.glplot?.getAspectratio){
+    target.setViewport({camera,aspectratio:target.glplot.getAspectratio()});target.glplot.redraw();
    }
   }
  }
  rafSyncId=requestAnimationFrame(tickCameraSync);
 }
-
-plot.addEventListener('pointerdown',()=>{
- isDragging=true;
- lastCamEyeA=null;
- lastCamEyeB=null;
- cancelAnimationFrame(rafSyncId);
- rafSyncId=requestAnimationFrame(tickCameraSync);
+plot.addEventListener('pointerdown',event=>{
+ const rect=plot.getBoundingClientRect(),size=plot._fullLayout?._size;
+ if(!size)return;
+ const x=(event.clientX-rect.left-size.l)/size.w,y=1-(event.clientY-rect.top-size.t)/size.h;
+ dragScene=scenes.find(name=>{const d=plot.layout[name]?.domain;return d && x>=d.x[0]&&x<=d.x[1]&&y>=d.y[0]&&y<=d.y[1];});
+ isDragging=Boolean(dragScene);cancelAnimationFrame(rafSyncId);
+ if(isDragging)rafSyncId=requestAnimationFrame(tickCameraSync);
 });
-
-window.addEventListener('pointerup',()=>{
- if(isDragging){
-  isDragging=false;
-  cancelAnimationFrame(rafSyncId);
-  const pair=getActivePairScenes();
-  if(pair&&pair.length>=2){
-   const sA=plot._fullLayout?.[pair[0]]?._scene;
-   if(sA&&sA.getCamera){
-    settings.camera=structuredClone(sA.getCamera());
-   }
-  }
- }
-});
+function stopDrag(){
+ if(!isDragging)return;
+ tickCameraSync();isDragging=false;cancelAnimationFrame(rafSyncId);
+ cameraAll(settings.camera);
+}
+window.addEventListener('pointerup',stopDrag);window.addEventListener('pointercancel',stopDrag);
 
 async function cameraAll(camera){
  syncing=true;
@@ -262,8 +185,9 @@ async function cameraAll(camera){
  finally{syncing=false;}
 }
 async function updateSurfaces(){
- const indices=surfaces.map(s=>s.trace),update={};
- for(const coord of ['x','y','z','i','j','k'])update[coord]=surfaces.map(s=>s.variants[String(settings.isovalue)][coord]);
+ const visibleSurfaces=surfaces.filter(s=>renderedIndices.includes(s.trace));
+ const indices=visibleSurfaces.map(s=>renderedIndices.indexOf(s.trace)),update={};
+ for(const coord of ['x','y','z','i','j','k'])update[coord]=visibleSurfaces.map(s=>s.variants[String(settings.isovalue)][coord]);
  update.opacity=indices.map(()=>settings.opacity);
  update.color=indices.map((_,i)=>i%2===0?settings.positive_color:settings.negative_color);
  await Plotly.restyle(plot,update,indices);
@@ -304,11 +228,11 @@ document.getElementById('load').onchange=async e=>{
 document.getElementById('png').onclick=async()=>{
  const button=document.getElementById('png');button.disabled=true;setStatus('Rendering PNG...');
  try{
-  const data=await Plotly.toImage(plot,{format:'png',width:initial.width,height:figure.layout.height,scale:settings.export_scale});
+  const data=await Plotly.toImage(plot,{format:'png',width:initial.width,height:plot.layout.height,scale:settings.export_scale});
   const a=document.createElement('a');a.href=data;a.download='frontier-orbitals.png';a.click();setStatus('PNG exported. Save settings to reproduce this view.');
  }catch(error){setStatus(`Export failed: ${error.message}`);}finally{button.disabled=false;}
 };
-Plotly.newPlot(plot,figure.data,figure.layout,{responsive:true,displaylogo:false,displayModeBar:false}).then(async()=>{
+Plotly.newPlot(plot,structuredClone(figure.data),structuredClone(figure.layout),{responsive:true,displaylogo:false,displayModeBar:false}).then(async()=>{
  scenes.forEach(sc=>{initialLayoutDomains[sc]=structuredClone(plot.layout[sc]?.domain||{x:[0,1],y:[0,1]});});
  initialAnnotations=structuredClone(plot.layout.annotations||[]);
  plot.on('plotly_relayout',async event=>{
@@ -316,10 +240,7 @@ Plotly.newPlot(plot,figure.data,figure.layout,{responsive:true,displaylogo:false
   for(const name of scenes){if(event[`${name}.camera`]){await cameraAll(event[`${name}.camera`]);break;}}
  });
  for(const id of ['reset','png','save','load'])document.getElementById(id).disabled=false;
- await updateSurfaces();
- if(calcGroups.length>1){
-  await applyGroupSelection(groupFilter.value);
- }
+ await applyGroupSelection(groupFilter.value||'0');
  window.sharkReady=true;
 }).catch(error=>setStatus(`Unable to render 3D: ${error.message}`));
 </script>

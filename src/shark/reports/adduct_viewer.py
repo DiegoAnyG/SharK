@@ -29,8 +29,8 @@ def _get_3dmol_js() -> str:
 def build_adduct_pdb(
     ligand_pdb_or_xyz: str | Path,
     receptor_pdb: Optional[str | Path] = None,
-    target_residue: str = "THR309",
-    dyad_residue: Optional[str] = "ASP199",
+    target_residue: str = "",
+    dyad_residue: Optional[str] = None,
     radius: float = 8.0,
 ) -> str:
     """Builds a compact PDB snippet containing the ligand and active-site residues."""
@@ -81,15 +81,15 @@ def build_adduct_pdb(
 
 def generate_adduct_viewer_html(
     pdb_data: str,
-    target_residue: str = "THR309",
+    target_residue: str = "",
     nucl_atom_coords: Optional[Tuple[float, float, float]] = None,
     el_atom_coords: Optional[Tuple[float, float, float]] = None,
     attack_distance: Optional[float] = None,
     burgi_dunitz_angle: Optional[float] = None,
-    dyad_residue: Optional[str] = "ASP199",
+    dyad_residue: Optional[str] = None,
     cube_data: Optional[str] = None,
     isovalue: float = 0.03,
-    title: str = "Covalent Adduct & Reaction Geometry",
+    title: str = "Candidate contact geometry",
     standalone: bool = False,
 ) -> str:
     """Generates an interactive 3D WebGL adduct viewer component.
@@ -121,7 +121,7 @@ def generate_adduct_viewer_html(
     """
     import re
     res_num_m = re.search(r"(\d+)", target_residue)
-    target_resi = int(res_num_m.group(1)) if res_num_m else 309
+    target_resi = int(res_num_m.group(1)) if res_num_m else None
 
     dyad_resi = None
     if dyad_residue:
@@ -134,16 +134,18 @@ def generate_adduct_viewer_html(
     angle_suffix = f" (θ={angle_str})" if burgi_dunitz_angle is not None else ""
     full_dist_label = f"d = {dist_str}{angle_suffix}"
     full_dist_json = json.dumps(full_dist_label)
-    dyad_display = html.escape(dyad_residue) if dyad_residue else "None (Isolated Nucleophile)"
+    dyad_display = html.escape(dyad_residue) if dyad_residue else "Not identified"
 
-    safe_pdb = json.dumps(pdb_data)
-    safe_cube = json.dumps(cube_data) if cube_data else "null"
+    safe_pdb = json.dumps(pdb_data).replace("<", "\\u003c")
+    safe_cube = json.dumps(cube_data).replace("<", "\\u003c") if cube_data else "null"
 
     nucl_json = json.dumps(nucl_atom_coords) if nucl_atom_coords else "null"
     el_json = json.dumps(el_atom_coords) if el_atom_coords else "null"
 
     viewer_js = _get_3dmol_js()
-    script_source = f"<script>{viewer_js}</script>" if viewer_js else '<script src="https://cdnjs.cloudflare.com/ajax/libs/3Dmol/2.0.4/3Dmol-min.js"></script>'
+    if not viewer_js:
+        raise RuntimeError('Bundled 3Dmol.js is required for offline reports')
+    script_source = f"<script>{viewer_js}</script>"
 
     widget_id = "adduct_viewer_3dmol"
 
@@ -155,11 +157,12 @@ def generate_adduct_viewer_html(
         <span style="display:inline-block;width:10px;height:10px;background:#087b70;border-radius:50%;"></span>
         {html.escape(title)}
       </h3>
-      <div style="font-size:12px;color:#64748b;margin-top:3px;">
-        Nucleophile: <strong style="color:#059669;">{html.escape(target_residue)}</strong> |
-        Dyad Partner: <strong style="color:#2563eb;">{dyad_display}</strong> |
-        Reaction Distance: <strong style="color:#dc2626;">{dist_str}</strong> |
-        Bürgi-Dunitz Angle (θ_BD): <strong style="color:#d97706;">{angle_str}</strong>
+      <div style="font-size:12px;color:#64748b;margin-top:5px;display:flex;gap:12px;flex-wrap:wrap;align-items:center;">
+        <span>Nucleophile: <strong style="color:#059669;">{html.escape(target_residue)}</strong></span>
+        <span>Nearby base: <strong style="color:#2563eb;">{dyad_display}</strong></span>
+        <span>Contact distance: <strong style="color:#dc2626;">{dist_str}</strong></span>
+        <span>Bürgi-Dunitz angle (θ_BD): <strong style="color:#d97706;">{angle_str}</strong></span>
+        <span style="display:inline-flex;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:600;background:{'#ecfdf5' if cube_data else '#fef3c7'};color:{'#065f46' if cube_data else '#92400e'};border:1px solid {'#a7f3d0' if cube_data else '#fde68a'};">{'QM Orbital Field: Active' if cube_data else 'Pre-reactive NAC Geometry (QM CUBE Pending)'}</span>
       </div>
     </div>
     <div class="viewer-controls" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
@@ -172,13 +175,9 @@ def generate_adduct_viewer_html(
 
   <div id="{widget_id}" style="width:100%;height:520px;position:relative;background:#0f172a;" role="img" aria-label="3D Active Site and Attack Geometry"></div>
 
+  <div id="{widget_id}_fields" role="status" style="padding:8px 20px;font-size:13px;background:#f8fafc;border-top:1px solid #e2e8f0;color:#475569;">{'Static supplied orbital field; no reaction path is available.' if cube_data else 'Frontier orbital overlap unavailable: no quantum field (.cube) for this active site pocket geometry was supplied. Displaying verified Pre-reactive Near-Attack Conformation (NAC).'}</div>
   <div class="viewer-legend" style="background:#f8fafc;border-top:1px solid #e2e8f0;padding:10px 20px;font-size:12px;color:#475569;display:flex;justify-content:space-between;flex-wrap:wrap;gap:14px;">
-    <div style="display:flex;gap:16px;align-items:center;">
-      <span style="display:flex;align-items:center;gap:5px;"><span style="display:inline-block;width:12px;height:12px;background:#10b981;border-radius:2px;"></span> Thr309 (Green Sticks)</span>
-      <span style="display:flex;align-items:center;gap:5px;"><span style="display:inline-block;width:12px;height:12px;background:#3b82f6;border-radius:2px;"></span> Asp199 Dyad (Blue Sticks)</span>
-      <span style="display:flex;align-items:center;gap:5px;"><span style="display:inline-block;width:12px;height:12px;background:#f59e0b;border-radius:2px;"></span> Ligand Warhead (Orange Sticks)</span>
-      <span style="display:flex;align-items:center;gap:5px;"><span style="display:inline-block;width:12px;height:3px;background:#ef4444;border-top:2px dashed #ef4444;"></span> Near-Attack Vector</span>
-    </div>
+    <div>Elemental CPK: <span style="color:#dc2626;font-weight:600;">O red</span> · <span style="color:#2563eb;font-weight:600;">N blue</span> · <span style="color:#64748b;font-weight:600;">H white</span> · <span style="color:#d97706;font-weight:600;">S yellow</span> | Carbons: <span style="color:#059669;font-weight:600;">Thr309 green</span> · <span style="color:#d97706;font-weight:600;">Ligand amber</span>. Dashed line: Pre-reactive Near-Attack Vector.</div>
     <div style="color:#64748b;">Rotate: Left click + Drag | Zoom: Scroll wheel | Pan: Right click + Drag</div>
   </div>
 </div>
@@ -187,7 +186,7 @@ def generate_adduct_viewer_html(
 (function() {{
   function init3DmolViewer() {{
     if (typeof $3Dmol === 'undefined') {{
-      setTimeout(init3DmolViewer, 100);
+      document.getElementById('{widget_id}').textContent='3D library unavailable.';
       return;
     }}
     const container = document.getElementById('{widget_id}');
@@ -201,25 +200,28 @@ def generate_adduct_viewer_html(
       viewer.addModel(pdbStr, 'pdb');
     }}
 
-    // 1. Base style for all atoms in active site
+    // 1. Base style: Elemental Jmol CPK colors for all pocket atoms
     viewer.setStyle({{}}, {{
-      stick: {{ radius: 0.18, colorscheme: 'Jmol' }}
+      stick: {{radius: 0.18, colorscheme: 'Jmol'}},
+      sphere: {{scale: 0.25, colorscheme: 'Jmol'}}
     }});
 
-    // 2. Nucleophile (e.g. Thr309): green carbons
+    // 2. Nucleophile: Green carbons (heteroatoms O, N, S preserve true elemental colors)
     viewer.addStyle({{ resi: ['{target_resi}', '{target_residue}', {target_resi}] }}, {{
-      stick: {{ radius: 0.26, colorscheme: 'greenCarbon' }},
-      sphere: {{ radius: 0.42, color: '#10b981' }}
+      stick: {{ radius: 0.22, colorscheme: 'greenCarbon' }},
+      sphere: {{ scale: 0.28, colorscheme: 'greenCarbon' }}
     }});
 
-    // 3. Catalytic Dyad partner (e.g. Asp199): blue carbons if present
-    {f"viewer.addStyle({{ resi: ['{dyad_resi}', {dyad_resi}] }}, {{ stick: {{ radius: 0.22, colorscheme: 'blueCarbon' }} }});" if dyad_resi else ""}
+    // 3. Catalytic Dyad partner: Cyan carbons if present
+    {f"viewer.addStyle({{ resi: ['{dyad_resi}', {dyad_resi}] }}, {{ stick: {{ radius: 0.20, colorscheme: 'cyanCarbon' }}, sphere: {{ scale: 0.26, colorscheme: 'cyanCarbon' }} }});" if dyad_resi else ""}
 
-    // 4. Ligand: orange carbons
+    // 4. Ligand: Amber/Yellow carbons (heteroatoms O, N, S preserve true elemental colors)
     viewer.addStyle({{ resn: ['LIG', 'UNL', 'MOL'] }}, {{
-      stick: {{ radius: 0.26, colorscheme: 'yellowCarbon' }},
-      sphere: {{ radius: 0.40, color: '#f59e0b' }}
+      stick: {{ radius: 0.24, colorscheme: 'yellowCarbon' }},
+      sphere: {{ scale: 0.28, colorscheme: 'yellowCarbon' }}
     }});
+
+    window.sharkAdductViewer=viewer;
 
     const nuclCrd = {nucl_json};
     const elCrd = {el_json};
@@ -250,7 +252,7 @@ def generate_adduct_viewer_html(
       }});
       labels.push(dLabel);
 
-      const nuclLabel = viewer.addLabel('{html.escape(target_residue)} (OG1)', {{
+      const nuclLabel = viewer.addLabel({json.dumps(target_residue).replace('<', chr(92)+'u003c')}, {{
         position: {{ x: nuclCrd[0], y: nuclCrd[1], z: nuclCrd[2] + 0.45 }},
         backgroundColor: 'rgba(16, 185, 129, 0.88)',
         fontColor: '#ffffff',
@@ -258,7 +260,7 @@ def generate_adduct_viewer_html(
       }});
       labels.push(nuclLabel);
 
-      const elLabel = viewer.addLabel('Electrophile (Ligand)', {{
+      const elLabel = viewer.addLabel('Ligand candidate atom', {{
         position: {{ x: elCrd[0], y: elCrd[1], z: elCrd[2] - 0.45 }},
         backgroundColor: 'rgba(245, 158, 11, 0.88)',
         fontColor: '#ffffff',
@@ -278,6 +280,8 @@ def generate_adduct_viewer_html(
       viewer.render();
     }});
 
+    const fieldStatus=document.getElementById('{widget_id}_fields');
+    // A supplied field is static; never animate a fabricated reaction pathway.
     // Overlay ORCA CUBE isosurface if provided
     const cubeData = {safe_cube};
     if (cubeData) {{
@@ -296,12 +300,14 @@ def generate_adduct_viewer_html(
           smoothness: 2
         }});
       }} catch (e) {{
-        console.warn('Could not load volumetric CUBE in 3Dmol viewer:', e);
+        fieldStatus.textContent='Orbital field could not be rendered: '+e.message;
       }}
     }}
 
     viewer.zoomTo();
     viewer.render();
+    const initialView=viewer.getView();
+    window.sharkAdductReady=true;
 
     // UI Controls
     let spinning = false;
@@ -318,7 +324,7 @@ def generate_adduct_viewer_html(
     const resetBtn = document.getElementById('{widget_id}_reset_btn');
     if (resetBtn) {{
       resetBtn.addEventListener('click', function() {{
-        viewer.zoomTo();
+        viewer.setView(initialView);
         viewer.render();
       }});
     }}
@@ -328,7 +334,7 @@ def generate_adduct_viewer_html(
     if (labelsBtn) {{
       labelsBtn.addEventListener('click', function() {{
         showLabels = !showLabels;
-        labels.forEach(l => l.show = showLabels);
+        labels.forEach(l => viewer.setLabelStyle(l, {{...l.stylespec, hidden: !showLabels}}));
         viewer.render();
         labelsBtn.style.background = showLabels ? '#fff' : '#e2e8f0';
       }});

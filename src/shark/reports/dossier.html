@@ -10,6 +10,8 @@
 @media(max-width:768px){.bar{padding:12px 16px;align-items:flex-start}.brand small{display:none}nav{gap:12px}main{padding:24px 14px}.hero{display:block}.metrics{grid-template-columns:1fr 1fr;gap:10px}.metric{padding:14px}section{padding:20px 14px}.two-column,.evidence{grid-template-columns:1fr}.orbital-toolbar label{width:100%}.orbital-toolbar select{width:100%}iframe{height:1150px}}
 @media(prefers-reduced-motion:reduce){html{scroll-behavior:auto}*{animation:none!important;transition:none!important}}
 @media print{.topbar,button,.orbital-toolbar{display:none}main{padding:0}section,.metric{break-inside:avoid}iframe{height:800px}body{background:white}}
+.context-help{position:relative;display:inline-block;margin:4px 0 12px}.help-button{min-height:28px;width:28px;height:28px;padding:0;border-radius:50%;font-weight:700;color:var(--blue)}.help-content{display:none;position:absolute;top:100%;left:0;width:min(440px,75vw);z-index:10;background:white;border:1px solid var(--line);border-radius:10px;padding:16px;box-shadow:0 8px 24px #16283f26;font-size:14px;color:var(--muted)}.context-help:hover .help-content,.context-help:focus-within .help-content,.context-help[data-open] .help-content{display:block}@media print{.help-content{display:block;position:static;width:auto;box-shadow:none}.help-button{display:none}}
+.help-bubble{display:inline-flex;align-items:center;justify-content:center;width:17px;height:17px;border-radius:50%;background:#e2e8f0;color:#334155;font-size:11px;font-weight:700;cursor:help;position:relative;vertical-align:middle;margin-left:6px;line-height:1;transition:all .15s ease;user-select:none;text-decoration:none}.help-bubble:hover,.help-bubble:focus{background:#1e40af;color:#fff;outline:none}.help-bubble[data-tooltip]::after{content:attr(data-tooltip);position:absolute;bottom:calc(100% + 8px);left:50%;transform:translateX(-50%);background:#0f172a;color:#f8fafc;padding:8px 12px;border-radius:6px;font-size:12px;font-weight:400;line-height:1.4;white-space:normal;width:max-content;max-width:320px;box-shadow:0 4px 14px rgba(0,0,0,0.18);pointer-events:none;opacity:0;visibility:hidden;transition:opacity .15s ease,visibility .15s ease;z-index:100}.help-bubble[data-tooltip]::before{content:'';position:absolute;bottom:calc(100% + 2px);left:50%;transform:translateX(-50%);border-width:6px 6px 0 6px;border-style:solid;border-color:#0f172a transparent transparent transparent;opacity:0;visibility:hidden;transition:opacity .15s ease,visibility .15s ease;z-index:100}.help-bubble:hover::after,.help-bubble:hover::before,.help-bubble:focus::after,.help-bubble:focus::before,.help-bubble.active::after,.help-bubble.active::before{opacity:1;visibility:visible}
 </style>
 <script>@@PLOTLY@@</script>
 <script>@@THREEDMOL@@</script>
@@ -20,14 +22,14 @@
 <main id="main">
 <header class="hero"><div><span class="eyebrow">Quantum chemistry · Molecular simulation</span><h1>@@TITLE@@</h1><p>Recorded calculations, inspectable orbitals and scientific context in one portable report.</p><span class="badge">Self-contained HTML · SharK @@VERSION@@</span></div><button id="download-data">Download evidence JSON</button></header>
 <div class="metrics" aria-label="Calculation overview"><div class="metric"><small>@@CARD1_TITLE@@</small><strong>@@CARD1_MAIN@@</strong><small>@@CARD1_SUB@@</small></div><div class="metric"><small>@@CARD2_TITLE@@</small><strong>@@CARD2_MAIN@@</strong><small>@@CARD2_SUB@@</small></div><div class="metric"><small>@@CARD3_TITLE@@</small><strong>@@CARD3_MAIN@@</strong><small>@@CARD3_SUB@@</small></div><div class="metric"><small>@@CARD4_TITLE@@</small><strong>@@CARD4_MAIN@@</strong><small>@@CARD4_SUB@@</small></div></div>
-<section id="results"><div class="section-heading"><span>01 / Electronic structure</span><h2>Calculation results</h2></div>@@TABLE@@<div id="tautomer-structures" class="tautomer-structures"></div><div id="level-plot" role="img" aria-label="Tautomer equilibrium: relative free energy and Boltzmann population distribution"></div></section>
-<section id="orbitals"><div class="section-heading"><span>02 / Spatial inspection</span><h2>Frontier orbitals</h2><p>Inspect HOMO and LUMO together. Geometry, phase surfaces, controls and image export are embedded in this file.</p></div><iframe id="orbital-frame" title="Interactive HOMO and LUMO viewer" sandbox="allow-scripts allow-downloads" referrerpolicy="no-referrer" hidden></iframe><p id="empty-orbitals" hidden>No orbital fields supplied. Energy values alone do not provide spatial orbital information.</p><div class="two-column"><div class="insight"><h3>HOMO · occupied frontier</h3><p>Shows the spatial amplitude of the highest occupied molecular orbital. It can guide qualitative electron-donation hypotheses within the chosen electronic model.</p></div><div class="insight"><h3>LUMO · unoccupied frontier</h3><p>Shows the lowest unoccupied orbital in this model. It is not an electron-density map or a measured electron affinity. Phase colors indicate the sign of amplitude, not electric charge.</p></div></div></section>
+<section id="results"><div class="section-heading"><span>01 / Electronic structure</span><h2>Calculation results <span class="help-bubble" tabindex="0" data-tooltip="Ground-state DFT optimizations in water (CPCM), HOMO/LUMO eigenvalues, and relative electronic stability between tautomers.">?</span></h2></div>@@TABLE@@<div id="tautomer-structures" class="tautomer-structures"></div><div id="level-plot" role="img" aria-label="Relative electronic energies; populations not inferred"></div></section>
+<section id="orbitals"><div class="section-heading"><span>02 / Spatial inspection</span><h2>Frontier orbitals <span class="help-bubble" tabindex="0" data-tooltip="3D interactive isosurfaces of HOMO (nucleophilic / electron donation) and LUMO (electrophilic / electron acceptance). Synchronized camera rotation in real time.">?</span></h2><p>Interactive 3D HOMO and LUMO frontier orbitals. Synchronized orientation and phase isosurfaces.</p></div><iframe id="orbital-frame" title="Interactive HOMO and LUMO viewer" sandbox="allow-scripts allow-downloads" referrerpolicy="no-referrer" hidden></iframe><p id="empty-orbitals" hidden>No orbital fields supplied. Energy values alone do not provide spatial orbital information.</p><div class="two-column" style="margin-top:16px;"><div class="insight" style="padding:10px 16px;"><h3 style="margin:0 0 4px;font-size:15px;display:flex;align-items:center;">HOMO · Occupied Frontier <span class="help-bubble" tabindex="0" data-tooltip="Spatial amplitude of the highest occupied molecular orbital. Guides nucleophilic / electron-donation hypotheses.">?</span></h3><small style="color:var(--muted);">Electron-donation propensity and reactive spatial localization.</small></div><div class="insight" style="padding:10px 16px;"><h3 style="margin:0 0 4px;font-size:15px;display:flex;align-items:center;">LUMO · Unoccupied Frontier <span class="help-bubble" tabindex="0" data-tooltip="Lowest unoccupied molecular orbital where nucleophilic electrons are accepted. Phase colors indicate wavefunction sign (+/-), not electric charge.">?</span></h3><small style="color:var(--muted);">Electrophilic attack locus and acceptance orbital amplitude.</small></div></div></section>
 @@DOCKING@@
 @@MD@@
 @@COVALENT@@
 @@LEGACY@@
-<section id="evidence"><div class="section-heading"><span>03 / Meaning and limits</span><h2>From descriptors to a reaction hypothesis</h2></div><div class="evidence"><article><h3>What is recorded</h3><p>Method, charge, spin, geometry source, execution state and available frequency checks. Orbital fields retain their source export; inspect provenance before comparing calculations.</p></article><article><h3>What remains model dependent</h3><p>Orbital energies and gaps depend on the functional, basis, solvent and molecular state. A HOMO–LUMO gap is not an activation barrier, optical gap or covalent-binding score. A single CUBE grid does not establish spatial convergence.</p></article><article><h3>What would test covalency</h3><p>A specific reactive atom pair, chemically complete QM region and environment, reactant/product structures, a reaction path and transition-state checks. Multiple conformations and competing mechanisms are needed to assess robustness.</p></article></div><p class="notice">Classical trajectory contacts can nominate geometries for QM/MM. Neither contact persistence nor isolated-ligand frontier orbitals establish that a covalent bond forms.</p><details><summary>Scientific references and further validation</summary><p><a href="https://www.faccts.de/docs/orca/6.1/manual/contents/multiscalesimulations/qmmm-general.html">ORCA multiscale methods</a> describe QM/MM boundaries and reaction-path tools. <a href="https://manual.gromacs.org/current/reference-manual/special/qmmm.html">GROMACS QM/MM documentation</a> distinguishes fixed-connectivity classical models from quantum treatment. Quantitative electron-addition/removal hypotheses need separately validated energy differences, not automatic substitution of orbital eigenvalues.</p></details></section>
-<section id="methods"><div class="section-heading"><span>04 / Reproducibility</span><h2>Methods and evidence</h2></div><div class="method-grid">@@METHODS@@</div>@@NOTES@@<details><summary>Inspect recorded provenance</summary><pre>@@PROVENANCE@@</pre></details></section>
+<section id="evidence"><div class="section-heading"><span>04 / Theoretical Limits</span><h2>Methodological limits and validation <span class="help-bubble" tabindex="0" data-tooltip="Summary of quantum chemical approximations, model dependencies, and verification criteria for covalent binding hypotheses.">?</span></h2></div><details style="background:#fff;border:1px solid var(--line);border-radius:10px;padding:14px 18px;margin-top:12px;"><summary style="font-weight:600;color:var(--ink);cursor:pointer;display:flex;align-items:center;gap:8px;"><span>Inspect detailed methodological limits, references and caveats</span><span class="badge" style="margin-left:auto;">Click to expand</span></summary><div class="evidence" style="margin-top:18px;"><article><h3>What is recorded</h3><p>Method, charge, spin, geometry source, execution state and available frequency checks. Orbital fields retain their source export; inspect provenance before comparing calculations.</p></article><article><h3>What remains model dependent</h3><p>Orbital energies and gaps depend on the functional, basis, solvent and molecular state. A HOMO–LUMO gap is not an activation barrier, optical gap or covalent-binding score. A single CUBE grid does not establish spatial convergence.</p></article><article><h3>What would test covalency</h3><p>A specific reactive atom pair, chemically complete QM region and environment, reactant/product structures, a reaction path and transition-state checks. Multiple conformations and competing mechanisms are needed to assess robustness.</p></article></div><p class="notice" style="margin-top:18px;">Classical trajectory contacts can nominate geometries for QM/MM. Neither contact persistence nor isolated-ligand frontier orbitals establish that a covalent bond forms.</p><div style="margin-top:16px;font-size:13px;color:var(--muted);"><p><a href="https://www.faccts.de/docs/orca/6.1/manual/contents/multiscalesimulations/qmmm-general.html">ORCA multiscale methods</a> describe QM/MM boundaries and reaction-path tools. <a href="https://manual.gromacs.org/current/reference-manual/special/qmmm.html">GROMACS QM/MM documentation</a> distinguishes fixed-connectivity classical models from quantum treatment.</p></div></details></section>
+<section id="methods"><div class="section-heading"><span>05 / Reproducibility</span><h2>Methods and provenance <span class="help-bubble" tabindex="0" data-tooltip="Exact computational parameters, software versions, and verifiable audit records.">?</span></h2></div><div class="method-grid">@@METHODS@@</div>@@NOTES@@<details style="margin-top:18px;"><summary style="font-weight:600;">Inspect recorded provenance JSON</summary><pre>@@PROVENANCE@@</pre></details></section>
 <footer>SharK Quantum & MD Dossier · All required visualization assets are embedded. Reference links are optional reading.</footer>
 </main>
 <script>
@@ -48,7 +50,7 @@ if(structContainer && data.tautomers && data.tautomers.length>1){
  structContainer.innerHTML=data.tautomers.map((item,idx)=>{
   const isDom=idx===0;
   const pillClass=isDom?'dominant':'minor';
-  const pillText=isDom?`Dominant (${item.boltzmann_pct}% · ΔG = 0.00 kcal/mol)`:`Minor (${item.boltzmann_pct}% · ΔG = +${item.delta_e_kcal.toFixed(2)} kcal/mol)`;
+  const pillText=`ΔE = ${item.delta_e_kcal.toFixed(2)} kcal/mol · populations not inferred`;
   const svg=item.svg||'';
   return `<div class="tautomer-card"><div style="height:100px;display:flex;align-items:center;justify-content:center;">${svg}</div><h4>${item.label}</h4><span class="status-pill ${pillClass}">${pillText}</span></div>`;
  }).join('');
@@ -67,41 +69,16 @@ if(levelPlotEl && data.tautomers && data.tautomers.length>1){
   marker:{color:t.map((_,i)=>colors[i%colors.length]),line:{color:'#16283f',width:1}},
   xaxis:'x',
   yaxis:'y',
-  name:'Relative Free Energy (ΔG)',
-  hovertemplate:'%{x}<br>ΔG: %{y:.3f} kcal/mol<extra></extra>'
+  name:'Relative electronic energy (ΔE)',
+  hovertemplate:'%{x}<br>ΔE: %{y:.3f} kcal/mol<extra></extra>'
  };
 
- const tracePop={
-  type:'bar',
-  x:t.map(x=>x.label),
-  y:t.map(x=>x.boltzmann_pct),
-  text:t.map(x=>`${x.boltzmann_pct.toFixed(1)}%`),
-  textposition:'outside',
-  marker:{color:t.map((_,i)=>colors[i%colors.length]),line:{color:'#16283f',width:1}},
-  xaxis:'x2',
-  yaxis:'y2',
-  name:'Boltzmann Population (P_i)',
-  hovertemplate:'%{x}<br>Population: %{y:.1f}%<extra></extra>'
- };
+ Plotly.newPlot('level-plot',[traceEnergy],{
+  title:{text:'Relative electronic energies of supplied states'},
+  margin:{l:65,r:30,t:70,b:65},yaxis:{title:{text:'ΔE / kcal mol⁻¹'}},
+  paper_bgcolor:'#fff',plot_bgcolor:'#fff',showlegend:false
+ },{responsive:true,displayModeBar:false});
 
-  const maxDelta=Math.max(...t.map(x=>x.delta_e_kcal));
-  const layout={
-   title:{text:'<b>Tautomer Thermodynamic Equilibrium (CPCM Water)</b>',x:0.5,font:{size:16,color:'#16283f'},y:0.98},
-   grid:{rows:1,columns:2,pattern:'independent'},
-   xaxis:{domain:[0,0.45],title:{text:'Tautomer / State',font:{size:12}},tickfont:{size:11}},
-   yaxis:{domain:[0,0.82],title:{text:'Relative Free Energy (ΔG) / kcal mol⁻¹',font:{size:12}},range:[0,Math.max(1.0,maxDelta*1.45)],zeroline:true,gridcolor:'#e2e8f0'},
-   xaxis2:{domain:[0.55,1.0],title:{text:'Tautomer / State',font:{size:12}},tickfont:{size:11}},
-   yaxis2:{domain:[0,0.82],title:{text:'Boltzmann Population (P_i) / %',font:{size:12}},range:[0,105],zeroline:true,gridcolor:'#e2e8f0'},
-   annotations:[
-    {text:'<b>Relative Free Energy (ΔG)</b>',xref:'paper',yref:'paper',x:0.225,y:0.91,showarrow:false,font:{size:13,color:'#16283f'}},
-    {text:'<b>Boltzmann Population (P_i)</b>',xref:'paper',yref:'paper',x:0.775,y:0.91,showarrow:false,font:{size:13,color:'#16283f'}}
-   ],
-   margin:{l:60,r:30,t:90,b:65},
-   showlegend:false,
-   paper_bgcolor:'#fff',
-   plot_bgcolor:'#fff'
-  };
-  Plotly.newPlot('level-plot',[traceEnergy,tracePop],layout,{responsive:true,displayModeBar:false});
  }else if(levelPlotEl && data.levels && data.levels.length){
   const traces=[];
   for(const [i,item] of data.levels.entries()){
@@ -112,6 +89,12 @@ if(levelPlotEl && data.tautomers && data.tautomers.length>1){
   levelPlotEl.hidden=true;
  }
  document.getElementById('download-data').onclick=()=>{const url=URL.createObjectURL(new Blob([JSON.stringify(data.provenance,null,2)],{type:'application/json'}));const a=document.createElement('a');a.href=url;a.download='shark-evidence.json';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);};
+ document.querySelectorAll('.help-bubble').forEach(el=>{
+  el.addEventListener('click',e=>{e.stopPropagation();el.classList.toggle('active');});
+ });
+ document.addEventListener('click',()=>{
+  document.querySelectorAll('.help-bubble.active').forEach(el=>el.classList.remove('active'));
+ });
  if(data.mesh){const traces=[];for(const [key,color] of [['pos','#2878B5'],['neg','#D64B40']])if(data.mesh[key])traces.push({type:'mesh3d',...data.mesh[key],color,name:key});if(data.mesh.atoms)traces.push({type:'scatter3d',mode:'markers',...data.mesh.atoms,marker:{size:data.mesh.atoms.size||5,color:data.mesh.atoms.color||'#526277'}});Plotly.newPlot('legacy-mesh',traces,{height:480,scene:{aspectmode:'data'}},{responsive:true});}
  if(data.covalent){
   const cov=data.covalent;
@@ -180,7 +163,7 @@ if(levelPlotEl && data.tautomers && data.tautomers.length>1){
       y:[targetLig.y,targetNucl.y],
       z:[targetLig.z,targetNucl.z],
       line:{color:best.is_nac?'#dc2626':'#d97706',width:6,dash:'dash'},
-      hovertemplate:'Attack Vector: '+best.distance_angstrom.toFixed(2)+' Å<br>Feasibility: '+best.feasibility_score.toFixed(2)+'<extra></extra>',
+      hovertemplate:'Attack Vector: '+best.distance_angstrom.toFixed(2)+' Å<br>Distance score: '+best.feasibility_score.toFixed(2)+'<extra></extra>',
       name:'Near-Attack Vector ('+best.distance_angstrom.toFixed(2)+' Å)'
      });
      const midX=(targetLig.x+targetNucl.x)/2;
@@ -208,11 +191,11 @@ if(levelPlotEl && data.tautomers && data.tautomers.length>1){
   if(curveEl){
    const curveX=[],curveY=[];
    for(let d=1.5;d<=6.0;d+=0.05){curveX.push(d);curveY.push(1.0/(1.0+Math.exp((d-3.5)/0.4)));}
-   const curveTraces=[{type:'scatter',mode:'lines',x:curveX,y:curveY,line:{color:'#087b70',width:3},name:'Bruice Sigmoid',hovertemplate:'Distance: %{x:.2f} Å<br>Feasibility: %{y:.3f}<extra></extra>'}];
+   const curveTraces=[{type:'scatter',mode:'lines',x:curveX,y:curveY,line:{color:'#087b70',width:3},name:'Distance heuristic',hovertemplate:'Distance: %{x:.2f} Å<br>Distance score: %{y:.3f}<extra></extra>'}];
    const contacts=cov.contacts||[];
    const curveAnnotations=[
-    {x:2.35,y:0.92,text:'NAC Zone (≤ 3.5 Å)',showarrow:false,font:{color:'#087b70',size:11,weight:'bold'}},
-    {x:4.75,y:0.92,text:'Diffusive (> 3.5 Å)',showarrow:false,font:{color:'#64748b',size:11}}
+    {x:2.35,y:0.92,text:'Distance cutoff (≤ 3.5 Å)',showarrow:false,font:{color:'#087b70',size:11,weight:'bold'}},
+    {x:4.75,y:0.92,text:'Outside cutoff (> 3.5 Å)',showarrow:false,font:{color:'#64748b',size:11}}
    ];
    if(contacts.length>0){
     curveTraces.push({
@@ -222,7 +205,7 @@ if(levelPlotEl && data.tautomers && data.tautomers.length>1){
      y:contacts.map(c=>c.feasibility_score),
      marker:{size:contacts.map(c=>c.is_nac?12:8),color:contacts.map(c=>c.is_nac?'#dc2626':'#64748b'),symbol:contacts.map(c=>c.is_nac?'star':'circle'),line:{color:'#16283f',width:1}},
      name:'Pocket Residues',
-     hovertemplate:contacts.map(c=>`<b>${c.residue} (${c.nucleophile_atom})</b><br>Distance: ${c.distance_angstrom.toFixed(2)} Å<br>Feasibility: ${c.feasibility_score.toFixed(3)}<extra></extra>`)
+     hovertemplate:contacts.map(c=>`<b>${c.residue} (${c.nucleophile_atom})</b><br>Distance: ${c.distance_angstrom.toFixed(2)} Å<br>Distance score: ${c.feasibility_score.toFixed(3)}<extra></extra>`)
     });
     const best=contacts[0];
     curveAnnotations.push({
@@ -246,7 +229,7 @@ if(levelPlotEl && data.tautomers && data.tautomers.length>1){
    Plotly.newPlot('covalent-curve-plot',curveTraces,{
     margin:{l:55,r:20,t:30,b:45},
     xaxis:{title:{text:'Distance / Å'},range:[1.5,6.0],zeroline:false},
-    yaxis:{title:{text:'Feasibility score'},range:[-0.05,1.05]},
+    yaxis:{title:{text:'Distance score'},range:[-0.05,1.05]},
     shapes:[
      {type:'line',x0:3.5,x1:3.5,y0:0,y1:1,line:{color:'#dc2626',width:2,dash:'dash'}},
      {type:'rect',x0:1.5,x1:3.5,y0:0,y1:1,fillcolor:'rgba(8, 123, 112, 0.08)',line:{width:0}}
@@ -260,12 +243,16 @@ if(levelPlotEl && data.tautomers && data.tautomers.length>1){
  const fukuiEl=document.getElementById('fukui-bar-plot');
  if(fukuiEl){
   const cdft=cov.cdft||{};
-  const cdftLabels=['Hardness (η)','Electroneg. (χ)','Electrophilicity (ω)','Softness (10×S)'];
-  const cdftVals=[cdft.hardness_ev||0,Math.abs(cdft.chemical_potential_ev||0),cdft.electrophilicity_ev||0,(cdft.softness_ev||0)*10];
+  const cdftLabels=['Frontier gap','−μ','μ² / (2 gap)'];
+  const cdftVals=[cdft.hardness_ev||0,Math.abs(cdft.chemical_potential_ev||0),cdft.electrophilicity_ev||0];
   const fukuiTraces=[{type:'bar',x:cdftLabels,y:cdftVals,marker:{color:['#3b82f6','#8b5cf6','#dc2626','#087b70']},hovertemplate:'%{x}: %{y:.3f} eV<extra></extra>'}];
   Plotly.newPlot('fukui-bar-plot',fukuiTraces,{margin:{l:55,r:20,t:25,b:45},yaxis:{title:{text:'Value / eV'},zeroline:false},paper_bgcolor:'#fff',plot_bgcolor:'#fff'},{responsive:true});
  }
 }
+document.querySelectorAll('.help-button').forEach(button=>{
+ button.onclick=()=>{const box=button.parentElement;const open=box.toggleAttribute('data-open');button.setAttribute('aria-expanded',String(open));};
+ button.onkeydown=e=>{if(e.key==='Escape'){button.parentElement.removeAttribute('data-open');button.setAttribute('aria-expanded','false');button.blur();}};
+});
 window.sharkDossierReady=true;
 </script>
 </body></html>
