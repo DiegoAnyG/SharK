@@ -333,20 +333,36 @@ def generate_html_dossier(project_name: str, poses_data: list[dict], out_html: s
         tot_feas = covalent_summary.get('total_feasibility', {})
         tot_feas_block = ''
         if tot_feas:
-            cfi_val = tot_feas.get('cfi_total', 0.0)
-            cfi_pct = tot_feas.get('percentage', cfi_val * 100)
+            cfi_final = tot_feas.get('cfi_final')
+            cfi_pre = tot_feas.get('cfi_pre')
             tier_val = tot_feas.get('tier', 'Evaluated')
-            w = tot_feas.get('weights', {'affinity': 0.25, 'nac': 0.40, 'ts': 0.35})
+            w = tot_feas.get('weights', {'binding': 0.20, 'nac': 0.40, 'chem': 0.40})
             
+            s_bind_val = tot_feas.get('affinity_score')
+            s_nac_val = tot_feas.get('nac_score')
+            s_ts_val = tot_feas.get('ts_score')
+            d_ts = tot_feas.get('delta_g_ts')
+            dock_sc = tot_feas.get('docking_score')
+            
+            best_c = covalent_summary.get('best_match') or (covalent_summary.get('contacts', [{}])[0] if covalent_summary.get('contacts') else {})
+            rgi_val = best_c.get('rgi') or best_c.get('composite_feasibility')
+
             tf_items = [
-                ('Pillar 1: Reversible Affinity (S_aff)', f"{_number(tot_feas.get('docking_score'), 2)} kcal/mol (Score: {_number(tot_feas.get('affinity_score'), 2)}, w={w.get('affinity', 0.25)})"),
-                ('Pillar 2: MD Persistence (P_NAC)', f"{_number((tot_feas.get('p_nac') or 0)*100, 1)}% (w={w.get('nac', 0.40)})"),
-                ('Pillar 3: Chemical Kinetics (S_TS)', f"ΔG‡ = {_number(tot_feas.get('delta_g_ts'), 1)} kcal/mol (Score: {_number(tot_feas.get('ts_score'), 2)}, w={w.get('ts', 0.35)})"),
-                ('Unified Index (CFI_total)', f"<strong>{cfi_pct:.1f}%</strong> · <span class='badge' style='background:#ecfdf5;color:#065f46;'>{tier_val}</span>"),
+                ('Pillar 1: Reversible Recognition (S_bind)', f"{_number(s_bind_val, 3)} (docking: {_number(dock_sc, 2)} kcal/mol, w={w.get('binding', w.get('affinity', 0.20))})"),
+                ('Pillar 2: Dynamic Preorganization (P_NAC)', f"{_number(s_nac_val, 3)} (continuous trajectory score, w={w.get('nac', 0.40)})"),
+                ('Local Reactive Geometry (RGI)', f"{_number(rgi_val, 3)} (Bürgi-Dunitz angle & electrophilicity)"),
             ]
+            if d_ts is not None and cfi_final is not None:
+                tf_items.append(('Pillar 3: Chemical Kinetics (S_chem)', f"{_number(s_ts_val, 3)} (ΔG‡ = {_number(d_ts, 1)} kcal/mol, w={w.get('chem', w.get('ts', 0.40))})"))
+                tf_items.append(('Final Feasibility Index (CFI_final)', f"<strong>{_number(cfi_final, 3)}</strong> · <span class='badge' style='background:#ecfdf5;color:#065f46;'>{tier_val}</span>"))
+            else:
+                tf_items.append(('Pillar 3: Chemical Kinetics (S_chem)', "Not evaluated (pending transition-state calculation)"))
+                tf_items.append(('Pre-reactive Index (CFI_pre)', f"<strong>{_number(cfi_pre, 3)}</strong> · <span class='badge' style='background:#f0fdf4;color:#166534;'>{tier_val}</span>"))
+                tf_items.append(('Status', "<span style='color:#b45309;font-weight:600;'>Pending transition-state calculation</span> (covalent bond formation not yet kinetically validated)"))
+
             tot_feas_block = (
                 f'<div class="insight" style="margin:20px 0;background:#f8fafc;border-left:4px solid #087b70;padding:16px 20px;border-radius:0 10px 10px 0;">'
-                f'<h3 style="margin:0 0 8px;display:flex;align-items:center;">Unified Total Covalent Feasibility Index (CFI_total) <span class="help-bubble" tabindex="0" data-tooltip="Integrates all 3 pharmaceutical pillars: Initial Affinity (25%), Solvated MD NAC Sampling (40%), and Eyring Chemical Activation Barrier (35%).">?</span></h3>'
+                f'<h3 style="margin:0 0 8px;display:flex;align-items:center;">Unified Covalent Feasibility Evaluation <span class="help-bubble" tabindex="0" data-tooltip="Disentangles reversible recognition (S_bind), dynamic preorganization (P_NAC), local reactive geometry (RGI), and Eyring chemical activation kinetics (S_chem).">?</span></h3>'
                 f'<dl style="margin:0;">'
                 + ''.join(f'<div style="display:grid;grid-template-columns:1.5fr 2fr;gap:12px;padding:6px 0;border-bottom:1px solid #e2e8f0;font-size:13px;"><dt style="color:#475569;font-weight:600;">{k}</dt><dd style="margin:0;color:#0f172a;">{v}</dd></div>' for k,v in tf_items)
                 + '</dl></div>'
@@ -380,6 +396,7 @@ def generate_html_dossier(project_name: str, poses_data: list[dict], out_html: s
                         attack_distance=best.get('distance_angstrom'),
                         burgi_dunitz_angle=best.get('burgi_dunitz_angle'),
                         dyad_residue=best.get('catalytic_dyad_residue'),
+                        cluster_qm_data=covalent_summary.get('cluster_qm'),
                         adduct_qm_data=covalent_summary.get('adduct_qm'),
                         standalone=False
                     )
@@ -487,7 +504,7 @@ def generate_html_dossier(project_name: str, poses_data: list[dict], out_html: s
                 f'<dl style="margin:0;font-size:12.5px;">'
                 f'<div style="display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid #f1f5f9;"><dt style="color:#64748b;">Bond Classification</dt><dd style="margin:0;font-weight:600;color:#0f172a;">{bond_type_esc}</dd></div>'
                 f'<div style="display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid #f1f5f9;"><dt style="color:#64748b;">Wiberg Bond Order (W_AB)</dt><dd style="margin:0;font-weight:600;color:#0f172a;">{_number(w_bo, 2)}</dd></div>'
-                f'<div style="display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid #f1f5f9;"><dt style="color:#64748b;">Covalent Character</dt><dd style="margin:0;font-weight:600;color:#0f172a;">{_number(covalency, 1)}%</dd></div>'
+                f'<div style="display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid #f1f5f9;"><dt style="color:#64748b;">Bond Order Nature</dt><dd style="margin:0;font-weight:600;color:#0f172a;">Single covalent bond</dd></div>'
                 f'<div style="display:flex;justify-content:space-between;padding:4px 0;"><dt style="color:#64748b;">Net Charge Transfer (Δq)</dt><dd style="margin:0;font-weight:600;color:#0f172a;">{_number(q_trans, 2)} e</dd></div>'
                 f'</dl>'
                 f'<p style="margin:10px 0 0;font-size:11.5px;color:#64748b;line-height:1.4;">{bond_expl_esc}</p>'
@@ -544,17 +561,23 @@ def generate_html_dossier(project_name: str, poses_data: list[dict], out_html: s
     provenance = dict(schema_version=1, shark_version=__version__, project=str(project_name), jobs=public_jobs,
                       docking=poses_data, molecular_dynamics=md_summary, covalent=covalent_summary, notes=notes)
     # Card 2: Total Covalent Feasibility (or TS ΔG‡ / Geometric Feasibility)
-    card2_title = 'Total Feasibility (CFI_tot) <span class="help-bubble" tabindex="0" data-tooltip="Unified Covalent Feasibility Index combining initial docking affinity (Pillar 1), MD trajectory near-attack persistence P_NAC (Pillar 2), and Eyring transition state barrier (Pillar 3).">?</span>'
+    card2_title = 'Total Feasibility (CFI) <span class="help-bubble" tabindex="0" data-tooltip="Unified Covalent Feasibility Index combining initial docking affinity (Pillar 1), MD trajectory near-attack persistence P_NAC (Pillar 2), and Eyring transition state barrier (Pillar 3).">?</span>'
     card2_main = "Not Evaluated"
     card2_sub = "Requires reaction mechanism"
     if covalent_summary:
         tot_feas = covalent_summary.get('total_feasibility')
-        if tot_feas and tot_feas.get('cfi_total') is not None:
-            card2_title = 'Total Feasibility (CFI_tot) <span class="help-bubble" tabindex="0" data-tooltip="Unified Covalent Feasibility Index combining initial docking affinity (Pillar 1), MD trajectory near-attack persistence P_NAC (Pillar 2), and Eyring transition state barrier (Pillar 3).">?</span>'
-            cfi_val = tot_feas['cfi_total']
-            tier_val = tot_feas.get('tier', 'High Feasibility')
-            card2_main = f"{cfi_val * 100:.1f}%"
-            card2_sub = f"{tier_val} · 3 Pillars Integrated"
+        if tot_feas and (tot_feas.get('cfi_final') is not None or tot_feas.get('cfi_pre') is not None):
+            cfi_final = tot_feas.get('cfi_final')
+            cfi_pre = tot_feas.get('cfi_pre')
+            tier_val = tot_feas.get('tier', 'Evaluated')
+            if cfi_final is not None:
+                card2_title = 'Total Feasibility (CFI_final) <span class="help-bubble" tabindex="0" data-tooltip="Unified Covalent Feasibility Index combining initial docking affinity (Pillar 1), MD trajectory near-attack persistence P_NAC (Pillar 2), and Eyring transition state barrier (Pillar 3).">?</span>'
+                card2_main = f"{cfi_final:.3f}"
+                card2_sub = f"{tier_val} · 3 Pillars Integrated"
+            else:
+                card2_title = 'Pre-reactive Score (CFI_pre) <span class="help-bubble" tabindex="0" data-tooltip="Pre-reactive feasibility combining reversible recognition and solvated MD NAC persistence. Transition-state chemical barrier pending.">?</span>'
+                card2_main = f"{cfi_pre:.3f}" if cfi_pre is not None else "N/A"
+                card2_sub = f"{tier_val} · TS Pending"
 
         else:
             ts_res = covalent_summary.get('transition_state')

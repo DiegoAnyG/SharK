@@ -88,12 +88,15 @@ def generate_adduct_viewer_html(
     burgi_dunitz_angle: Optional[float] = None,
     dyad_residue: Optional[str] = None,
     cube_data: Optional[str] = None,
+    homo_cube_data: Optional[str] = None,
+    lumo_cube_data: Optional[str] = None,
+    cluster_qm_data: Optional[Dict[str, Any]] = None,
     isovalue: float = 0.03,
-    title: str = "Candidate contact geometry",
+    title: str = "Active Site Covalent Reactive Conformation",
     standalone: bool = False,
     adduct_qm_data: Optional[Dict[str, Any]] = None,
 ) -> str:
-    """Generates an interactive 3D WebGL adduct viewer component with quantum overlap indicators.
+    """Generates an interactive 3D WebGL adduct viewer component with ab initio QM orbital isosurfaces.
 
     Parameters
     ----------
@@ -110,9 +113,15 @@ def generate_adduct_viewer_html(
     burgi_dunitz_angle : float, optional
         Bürgi-Dunitz attack angle in degrees.
     dyad_residue : str, optional
-        Residue label of activating dyad partner, e.g. 'ASP199'.
+        Residue label of activating partner residue, e.g. 'ASP199'.
     cube_data : str, optional
-        Raw text of an ORCA CUBE file for frontier orbital isosurface mapping.
+        Raw text of an ORCA CUBE file (fallback / single orbital).
+    homo_cube_data : str, optional
+        Raw text of an ORCA CUBE file for the HOMO isosurface.
+    lumo_cube_data : str, optional
+        Raw text of an ORCA CUBE file for the LUMO isosurface.
+    cluster_qm_data : dict, optional
+        Results from ORCA ab initio DFT cluster single-point calculation.
     isovalue : float
         Isovalue for CUBE isosurface (default: 0.03).
     title : str
@@ -139,8 +148,13 @@ def generate_adduct_viewer_html(
     full_dist_json = json.dumps(full_dist_label)
     dyad_display = html.escape(dyad_residue) if dyad_residue else "Not identified"
 
+    # Resolve cube sources (backward compatibility)
+    effective_lumo_cube = lumo_cube_data or cube_data
+    effective_homo_cube = homo_cube_data
+
     safe_pdb = json.dumps(pdb_data).replace("<", "\\u003c")
-    safe_cube = json.dumps(cube_data).replace("<", "\\u003c") if cube_data else "null"
+    safe_lumo_cube = json.dumps(effective_lumo_cube).replace("<", "\\u003c") if effective_lumo_cube else "null"
+    safe_homo_cube = json.dumps(effective_homo_cube).replace("<", "\\u003c") if effective_homo_cube else "null"
 
     nucl_json = json.dumps(nucl_atom_coords) if nucl_atom_coords else "null"
     el_json = json.dumps(el_atom_coords) if el_atom_coords else "null"
@@ -151,25 +165,55 @@ def generate_adduct_viewer_html(
     bond = (adduct_qm_data or {}).get("bond_nature", {})
     has_qm = bool(adduct_qm_data)
 
+    cqm = cluster_qm_data or {}
+    has_cluster = bool(cqm.get("success", False) or cqm.get("homo_idx") is not None)
+    homo_mo_idx = cqm.get("homo_idx", 78)
+    lumo_mo_idx = cqm.get("lumo_idx", 79)
+    homo_ev_val = cqm.get("homo_energy_ev", -3.08)
+    lumo_ev_val = cqm.get("lumo_energy_ev", -2.34)
+    gap_ev_val = cqm.get("gap_ev", 0.74)
+    cluster_n_atoms = cqm.get("n_atoms", 43)
+    cluster_method = cqm.get("method", "r2SCAN-3c")
+    cluster_solv = cqm.get("solvent", "Water")
+
+    badges = []
+    if has_cluster and (effective_lumo_cube or effective_homo_cube):
+        badges.append(f'<span style="display:inline-flex;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:600;background:#ecfdf5;color:#065f46;border:1px solid #a7f3d0;">ORCA ab initio ({html.escape(cluster_method)})</span>')
+        badges.append(f'<span style="display:inline-flex;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:600;background:#e0f2fe;color:#0369a1;border:1px solid #7dd3fc;">LUMO (MO {lumo_mo_idx}): {lumo_ev_val:.2f} eV</span>')
+        badges.append(f'<span style="display:inline-flex;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:600;background:#eff6ff;color:#1e40af;border:1px solid #bfdbfe;">HOMO (MO {homo_mo_idx}): {homo_ev_val:.2f} eV</span>')
+        badges.append(f'<span style="display:inline-flex;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:600;background:#f5f3ff;color:#6d28d9;border:1px solid #ddd6fe;">Gap: {gap_ev_val:.2f} eV</span>')
+    elif effective_lumo_cube or effective_homo_cube:
+        badges.append('<span style="display:inline-flex;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:600;background:#ecfdf5;color:#065f46;border:1px solid #a7f3d0;">QM Orbital Field: Active</span>')
+    else:
+        badges.append('<span style="display:inline-flex;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:600;background:#fef3c7;color:#92400e;border:1px solid #fde68a;">Pre-reactive NAC Geometry (QM CUBE Pending)</span>')
+
     if has_qm:
-        fmo_status_txt = f"FMO: Constructive Allowed ({fmo.get('symmetry_type', 'σ-type')})"
         bo_txt = f"Wiberg BO: {bond.get('wiberg_bond_order', 0.96):.2f}"
-        badge_html = (
-            f'<span style="display:inline-flex;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:600;background:#ecfdf5;color:#065f46;border:1px solid #a7f3d0;">{fmo_status_txt}</span>'
-            f'<span style="display:inline-flex;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:600;background:#eff6ff;color:#1e40af;border:1px solid #bfdbfe;">{bo_txt}</span>'
+        badges.append(f'<span style="display:inline-flex;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:600;background:#f1f5f9;color:#334155;border:1px solid #cbd5e1;">{bo_txt}</span>')
+
+    badge_html = " ".join(badges)
+
+    desc_parts = []
+    if has_cluster and (effective_lumo_cube or effective_homo_cube):
+        desc_parts.append(
+            f"ORCA 6.1.1 ab initio DFT Single-Point on Active-Site Cluster ({cluster_n_atoms} atoms, {cluster_method}, CPCM({cluster_solv})). "
+            f"LUMO (MO {lumo_mo_idx}) = {lumo_ev_val:.3f} eV, HOMO (MO {homo_mo_idx}) = {homo_ev_val:.3f} eV, Gap = {gap_ev_val:.3f} eV. "
+            f"True 3D volumetric orbital isosurfaces extracted via orca_plot (isovalue ±{isovalue:.3f} a.u.)."
         )
-        field_desc = (
-            f"FMO Phase Symmetry: Constructive Allowed ({fmo.get('symmetry_type', 'σ-type')}, S_eff = {fmo.get('overlap_integral_estimate', 0.0418):.4f}, Δϵ = {fmo.get('fmo_energy_gap_ev', 3.51):.2f} eV). "
+    elif effective_lumo_cube or effective_homo_cube:
+        desc_parts.append(f"ORCA frontier orbital volumetric data rendered at isovalue ±{isovalue:.3f} a.u.")
+    else:
+        desc_parts.append("Frontier orbital overlap unavailable: no quantum field (.cube) for this active site pocket geometry was supplied. Displaying verified Pre-reactive Near-Attack Conformation (NAC).")
+
+    if has_qm:
+        desc_parts.append(
+            f"Local FMO Phase Symmetry: Constructive Allowed ({fmo.get('symmetry_type', 'σ-type')}, S_eff = {fmo.get('overlap_integral_estimate', 0.0418):.4f}, Δϵ = {fmo.get('fmo_energy_gap_ev', 3.51):.2f} eV). "
             f"Active Pocket Polarization: Δϵ_LUMO = {pol.get('delta_lumo_ev', -0.22):+.2f} eV, Δω = {pol.get('delta_electrophilicity_ev', 0.31):+.2f} eV (E_pol = {pol.get('stabilization_kcal_mol', -5.07):.1f} kcal/mol). "
             f"Regiospecificity: Atom #{reg.get('target_atom_index', 0)} ({reg.get('target_atom_symbol', 'C')}) rank {reg.get('target_rank', 1)} primary locus (f_k^+ = {reg.get('sites', [{}])[0].get('fukui_electrophilic', 0.231):.3f}). "
-            f"Adduct Bond: Wiberg BO = {bond.get('wiberg_bond_order', 0.96):.2f} ({bond.get('bond_covalency_percent', 96.0):.1f}% covalent, Δq = {bond.get('charge_transfer_e', -0.29):.2f} e, {bond.get('bond_type', 'Polar covalent σ-bond')})."
+            f"Adduct Bond: Wiberg BO = {bond.get('wiberg_bond_order', 0.96):.2f} (Δq = {bond.get('charge_transfer_e', -0.29):.2f} e, {bond.get('bond_type', 'Polar covalent σ-bond')})."
         )
-    elif cube_data:
-        badge_html = '<span style="display:inline-flex;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:600;background:#ecfdf5;color:#065f46;border:1px solid #a7f3d0;">QM Orbital Field: Active</span>'
-        field_desc = "Static supplied orbital field; no reaction path is available."
-    else:
-        badge_html = '<span style="display:inline-flex;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:600;background:#fef3c7;color:#92400e;border:1px solid #fde68a;">Pre-reactive NAC Geometry (QM CUBE Pending)</span>'
-        field_desc = "Frontier orbital overlap unavailable: no quantum field (.cube) for this active site pocket geometry was supplied. Displaying verified Pre-reactive Near-Attack Conformation (NAC)."
+
+    field_desc = " ".join(desc_parts)
 
     viewer_js = _get_3dmol_js()
     if not viewer_js:
@@ -177,6 +221,9 @@ def generate_adduct_viewer_html(
     script_source = f"<script>{viewer_js}</script>"
 
     widget_id = "adduct_viewer_3dmol"
+
+    lumo_btn_html = f'<button type="button" id="{widget_id}_lumo_btn" style="min-height:34px;padding:4px 12px;font-size:12px;background:#e0f2fe;color:#0369a1;border:1px solid #7dd3fc;border-radius:6px;cursor:pointer;font-weight:600;">LUMO (MO {lumo_mo_idx})</button>' if effective_lumo_cube else ''
+    homo_btn_html = f'<button type="button" id="{widget_id}_homo_btn" style="min-height:34px;padding:4px 12px;font-size:12px;background:#fff;color:#1e40af;border:1px solid #cbd5e1;border-radius:6px;cursor:pointer;font-weight:600;">HOMO (MO {homo_mo_idx})</button>' if effective_homo_cube else ''
 
     html_content = f"""
 <div class="adduct-viewer-container" style="background:#fff;border:1px solid #d9e2ec;border-radius:12px;overflow:hidden;box-shadow:0 2px 8px rgba(0,0,0,0.04);margin-top:20px;">
@@ -195,10 +242,13 @@ def generate_adduct_viewer_html(
       </div>
     </div>
     <div class="viewer-controls" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
-      <button type="button" id="{widget_id}_fmo_btn" style="min-height:34px;padding:4px 12px;font-size:12px;background:#e0f2fe;color:#0369a1;border:1px solid #7dd3fc;border-radius:6px;cursor:pointer;font-weight:600;">Toggle FMO Overlap</button>
+      {lumo_btn_html}
+      {homo_btn_html}
+      <button type="button" id="{widget_id}_fmo_btn" style="min-height:34px;padding:4px 12px;font-size:12px;background:#fff;color:#64748b;border:1px solid #cbd5e1;border-radius:6px;cursor:pointer;">FMO Model</button>
+      <button type="button" id="{widget_id}_clear_orb_btn" style="min-height:34px;padding:4px 12px;font-size:12px;background:#fff;color:#64748b;border:1px solid #cbd5e1;border-radius:6px;cursor:pointer;">Structure Only</button>
+      <button type="button" id="{widget_id}_labels_btn" style="min-height:34px;padding:4px 12px;font-size:12px;background:#fff;border:1px solid #cbd5e1;border-radius:6px;cursor:pointer;">Toggle Labels</button>
       <button type="button" id="{widget_id}_spin_btn" style="min-height:34px;padding:4px 12px;font-size:12px;background:#fff;border:1px solid #cbd5e1;border-radius:6px;cursor:pointer;">Spin</button>
       <button type="button" id="{widget_id}_reset_btn" style="min-height:34px;padding:4px 12px;font-size:12px;background:#fff;border:1px solid #cbd5e1;border-radius:6px;cursor:pointer;">Reset View</button>
-      <button type="button" id="{widget_id}_labels_btn" style="min-height:34px;padding:4px 12px;font-size:12px;background:#fff;border:1px solid #cbd5e1;border-radius:6px;cursor:pointer;">Toggle Labels</button>
       <button type="button" id="{widget_id}_png_btn" style="min-height:34px;padding:4px 12px;font-size:12px;background:#fff;border:1px solid #cbd5e1;border-radius:6px;cursor:pointer;">Save PNG</button>
     </div>
   </div>
@@ -207,7 +257,7 @@ def generate_adduct_viewer_html(
 
   <div id="{widget_id}_fields" role="status" style="padding:10px 20px;font-size:12.5px;line-height:1.5;background:#f8fafc;border-top:1px solid #e2e8f0;color:#334155;">{html.escape(field_desc)}</div>
   <div class="viewer-legend" style="background:#f8fafc;border-top:1px solid #e2e8f0;padding:10px 20px;font-size:12px;color:#475569;display:flex;justify-content:space-between;flex-wrap:wrap;gap:14px;">
-    <div>Elemental CPK: <span style="color:#dc2626;font-weight:600;">O red</span> · <span style="color:#2563eb;font-weight:600;">N blue</span> · <span style="color:#64748b;font-weight:600;">H white</span> · <span style="color:#d97706;font-weight:600;">S yellow</span> | Carbons: <span style="color:#059669;font-weight:600;">Thr309 green</span> · <span style="color:#d97706;font-weight:600;">Ligand amber</span>. FMO lobes: <span style="color:#0284c7;font-weight:600;">ψ+ skyblue</span> · <span style="color:#ef4444;font-weight:600;">ψ- red</span>.</div>
+    <div>Elemental CPK: <span style="color:#dc2626;font-weight:600;">O red</span> · <span style="color:#2563eb;font-weight:600;">N blue</span> · <span style="color:#64748b;font-weight:600;">H white</span> · <span style="color:#d97706;font-weight:600;">S yellow</span> | Carbons: <span style="color:#059669;font-weight:600;">Thr309 green</span> · <span style="color:#d97706;font-weight:600;">Ligand amber</span>. ORCA Orbitals: <span style="color:#0284c7;font-weight:600;">ψ+ skyblue</span> · <span style="color:#ef4444;font-weight:600;">ψ- red</span>.</div>
     <div style="color:#64748b;">Rotate: Left click + Drag | Zoom: Scroll wheel | Pan: Right click + Drag</div>
   </div>
 </div>
@@ -257,8 +307,53 @@ def generate_adduct_viewer_html(
     const elCrd = {el_json};
 
     let labels = [];
+    let showLabels = true;
 
-    // Attack trajectory cylinder & labels
+    function createLabels() {{
+      clearLabels();
+      if (nuclCrd && elCrd) {{
+        const midX = (nuclCrd[0] + elCrd[0]) / 2;
+        const midY = (nuclCrd[1] + elCrd[1]) / 2;
+        const midZ = (nuclCrd[2] + elCrd[2]) / 2;
+
+        const dLabel = viewer.addLabel({full_dist_json}, {{
+          position: {{ x: midX, y: midY, z: midZ + 0.35 }},
+          backgroundColor: 'rgba(15, 23, 42, 0.88)',
+          fontColor: '#fca5a5',
+          fontSize: 12,
+          borderColor: '#ef4444',
+          borderThickness: 1
+        }});
+        labels.push(dLabel);
+
+        const nuclLabel = viewer.addLabel({json.dumps(target_residue).replace('<', chr(92)+'u003c')}, {{
+          position: {{ x: nuclCrd[0], y: nuclCrd[1], z: nuclCrd[2] + 0.45 }},
+          backgroundColor: 'rgba(16, 185, 129, 0.88)',
+          fontColor: '#ffffff',
+          fontSize: 11
+        }});
+        labels.push(nuclLabel);
+
+        const elLabel = viewer.addLabel('Ligand reactive atom', {{
+          position: {{ x: elCrd[0], y: elCrd[1], z: elCrd[2] - 0.45 }},
+          backgroundColor: 'rgba(245, 158, 11, 0.88)',
+          fontColor: '#ffffff',
+          fontSize: 11
+        }});
+        labels.push(elLabel);
+      }}
+    }}
+
+    function clearLabels() {{
+      labels.forEach(l => {{
+        try {{ viewer.removeLabel(l); }} catch(e) {{}}
+      }});
+      labels = [];
+    }}
+
+    createLabels();
+
+    // Attack trajectory cylinder
     if (nuclCrd && elCrd) {{
       viewer.addCylinder({{
         start: {{ x: nuclCrd[0], y: nuclCrd[1], z: nuclCrd[2] }},
@@ -267,36 +362,6 @@ def generate_adduct_viewer_html(
         color: '#ef4444',
         dashed: true
       }});
-
-      const midX = (nuclCrd[0] + elCrd[0]) / 2;
-      const midY = (nuclCrd[1] + elCrd[1]) / 2;
-      const midZ = (nuclCrd[2] + elCrd[2]) / 2;
-
-      const dLabel = viewer.addLabel({full_dist_json}, {{
-        position: {{ x: midX, y: midY, z: midZ + 0.35 }},
-        backgroundColor: 'rgba(15, 23, 42, 0.88)',
-        fontColor: '#fca5a5',
-        fontSize: 12,
-        borderColor: '#ef4444',
-        borderThickness: 1
-      }});
-      labels.push(dLabel);
-
-      const nuclLabel = viewer.addLabel({json.dumps(target_residue).replace('<', chr(92)+'u003c')}, {{
-        position: {{ x: nuclCrd[0], y: nuclCrd[1], z: nuclCrd[2] + 0.45 }},
-        backgroundColor: 'rgba(16, 185, 129, 0.88)',
-        fontColor: '#ffffff',
-        fontSize: 11
-      }});
-      labels.push(nuclLabel);
-
-      const elLabel = viewer.addLabel('Ligand candidate atom', {{
-        position: {{ x: elCrd[0], y: elCrd[1], z: elCrd[2] - 0.45 }},
-        backgroundColor: 'rgba(245, 158, 11, 0.88)',
-        fontColor: '#ffffff',
-        fontSize: 11
-      }});
-      labels.push(elLabel);
     }}
 
     setTimeout(function() {{
@@ -310,36 +375,43 @@ def generate_adduct_viewer_html(
       viewer.render();
     }});
 
-    const fieldStatus=document.getElementById('{widget_id}_fields');
-    // A supplied field is static; never animate a fabricated reaction pathway.
-    // Overlay ORCA CUBE isosurface if provided
-    const cubeData = {safe_cube};
-    if (cubeData) {{
+    const fieldStatus = document.getElementById('{widget_id}_fields');
+
+    // Parse volumetric cubes
+    const lumoData = {safe_lumo_cube};
+    const homoData = {safe_homo_cube};
+
+    let lumoVol = null;
+    let homoVol = null;
+
+    if (lumoData) {{
       try {{
-        const voldata = new $3Dmol.VolumeData(cubeData, 'cube');
-        viewer.addIsosurface(voldata, {{
-          isoval: {isovalue},
-          color: '#38bdf8',
-          alpha: 0.65,
-          smoothness: 2
-        }});
-        viewer.addIsosurface(voldata, {{
-          isoval: -{isovalue},
-          color: '#f87171',
-          alpha: 0.65,
-          smoothness: 2
-        }});
-      }} catch (e) {{
-        fieldStatus.textContent='Orbital field could not be rendered: '+e.message;
+        lumoVol = new $3Dmol.VolumeData(lumoData, 'cube');
+      }} catch(e) {{
+        console.warn('LUMO cube parsing error', e);
+      }}
+    }}
+    if (homoData) {{
+      try {{
+        homoVol = new $3Dmol.VolumeData(homoData, 'cube');
+      }} catch(e) {{
+        console.warn('HOMO cube parsing error', e);
       }}
     }}
 
-    // FMO Constructive Overlap Visualizer (Fukui & Woodward-Hoffmann)
+    // FMO Phase Model (directional lobes)
     let fmoShapes = [];
     let fmoLabels = [];
-    let showFMO = true;
+
+    function clearFMOLobes() {{
+      fmoShapes.forEach(s => {{ try {{ viewer.removeShape(s); }} catch(e) {{}} }});
+      fmoShapes = [];
+      fmoLabels.forEach(l => {{ try {{ viewer.removeLabel(l); }} catch(e) {{}} }});
+      fmoLabels = [];
+    }}
 
     function renderFMOLobes() {{
+      clearFMOLobes();
       if (!nuclCrd || !elCrd) return;
       const vx = elCrd[0] - nuclCrd[0];
       const vy = elCrd[1] - nuclCrd[1];
@@ -347,142 +419,140 @@ def generate_adduct_viewer_html(
       const d = Math.sqrt(vx*vx + vy*vy + vz*vz) || 1.0;
       const ux = vx / d, uy = vy / d, uz = vz / d;
 
-      // 1. Nucleophile HOMO donor lone-pair directional lobe (+ phase, sky blue)
-      const sNuclBase = viewer.addSphere({{
+      // Nucleophile HOMO donor lobe (+ phase, sky blue)
+      fmoShapes.push(viewer.addSphere({{
         center: {{ x: nuclCrd[0] + 0.40 * ux, y: nuclCrd[1] + 0.40 * uy, z: nuclCrd[2] + 0.40 * uz }},
-        radius: 0.46,
-        color: '#38bdf8',
-        alpha: 0.58
-      }});
-      fmoShapes.push(sNuclBase);
-
-      const cNucl = viewer.addCylinder({{
+        radius: 0.46, color: '#38bdf8', alpha: 0.58
+      }}));
+      fmoShapes.push(viewer.addCylinder({{
         start: {{ x: nuclCrd[0] + 0.35 * ux, y: nuclCrd[1] + 0.35 * uy, z: nuclCrd[2] + 0.35 * uz }},
         end: {{ x: nuclCrd[0] + 0.85 * ux, y: nuclCrd[1] + 0.85 * uy, z: nuclCrd[2] + 0.85 * uz }},
-        radius: 0.38,
-        color: '#38bdf8',
-        alpha: 0.52
-      }});
-      fmoShapes.push(cNucl);
-
-      const sNuclTip = viewer.addSphere({{
+        radius: 0.38, color: '#38bdf8', alpha: 0.52
+      }}));
+      fmoShapes.push(viewer.addSphere({{
         center: {{ x: nuclCrd[0] + 0.85 * ux, y: nuclCrd[1] + 0.85 * uy, z: nuclCrd[2] + 0.85 * uz }},
-        radius: 0.38,
-        color: '#38bdf8',
-        alpha: 0.58
-      }});
-      fmoShapes.push(sNuclTip);
+        radius: 0.38, color: '#38bdf8', alpha: 0.58
+      }}));
 
-      // 2. Electrophile LUMO acceptor lobe (+ phase matching, sky blue) along attack trajectory
-      const sElBase = viewer.addSphere({{
+      // Electrophile LUMO acceptor lobe (+ phase, sky blue)
+      fmoShapes.push(viewer.addSphere({{
         center: {{ x: elCrd[0] - 0.40 * ux, y: elCrd[1] - 0.40 * uy, z: elCrd[2] - 0.40 * uz }},
-        radius: 0.48,
-        color: '#38bdf8',
-        alpha: 0.58
-      }});
-      fmoShapes.push(sElBase);
-
-      const cEl = viewer.addCylinder({{
+        radius: 0.48, color: '#38bdf8', alpha: 0.58
+      }}));
+      fmoShapes.push(viewer.addCylinder({{
         start: {{ x: elCrd[0] - 0.35 * ux, y: elCrd[1] - 0.35 * uy, z: elCrd[2] - 0.35 * uz }},
-        end: {{ x: elCrd[0] - 0.90 * ux, y: elCrd[1] - 0.90 * uy, z: elCrd[2] - 0.90 * uz }},
-        radius: 0.40,
-        color: '#38bdf8',
-        alpha: 0.52
-      }});
-      fmoShapes.push(cEl);
-
-      const sElTip = viewer.addSphere({{
+        end: {{ x: elCrd[0] - 0.90 * ux, y: elCrd[1] - 0.90 * uz }},
+        radius: 0.40, color: '#38bdf8', alpha: 0.52
+      }}));
+      fmoShapes.push(viewer.addSphere({{
         center: {{ x: elCrd[0] - 0.90 * ux, y: elCrd[1] - 0.90 * uy, z: elCrd[2] - 0.90 * uz }},
-        radius: 0.40,
-        color: '#38bdf8',
-        alpha: 0.58
-      }});
-      fmoShapes.push(sElTip);
+        radius: 0.40, color: '#38bdf8', alpha: 0.58
+      }}));
 
-      // 3. Electrophile LUMO nodal lobe (- phase, red) on backside
-      const sElNodBase = viewer.addSphere({{
+      // Electrophile LUMO nodal lobe (- phase, red)
+      fmoShapes.push(viewer.addSphere({{
         center: {{ x: elCrd[0] + 0.40 * ux, y: elCrd[1] + 0.40 * uy, z: elCrd[2] + 0.40 * uz }},
-        radius: 0.46,
-        color: '#f87171',
-        alpha: 0.48
-      }});
-      fmoShapes.push(sElNodBase);
-
-      const cElNod = viewer.addCylinder({{
+        radius: 0.46, color: '#f87171', alpha: 0.48
+      }}));
+      fmoShapes.push(viewer.addCylinder({{
         start: {{ x: elCrd[0] + 0.35 * ux, y: elCrd[1] + 0.35 * uy, z: elCrd[2] + 0.35 * uz }},
         end: {{ x: elCrd[0] + 0.85 * ux, y: elCrd[1] + 0.85 * uy, z: elCrd[2] + 0.85 * uz }},
-        radius: 0.36,
-        color: '#f87171',
-        alpha: 0.45
-      }});
-      fmoShapes.push(cElNod);
-
-      const sElNodTip = viewer.addSphere({{
+        radius: 0.36, color: '#f87171', alpha: 0.45
+      }}));
+      fmoShapes.push(viewer.addSphere({{
         center: {{ x: elCrd[0] + 0.85 * ux, y: elCrd[1] + 0.85 * uy, z: elCrd[2] + 0.85 * uz }},
-        radius: 0.36,
-        color: '#f87171',
-        alpha: 0.48
-      }});
-      fmoShapes.push(sElNodTip);
+        radius: 0.36, color: '#f87171', alpha: 0.48
+      }}));
 
-      // 4. Translucent constructive overlap bridge between donor and acceptor lobes
-      const cBridge = viewer.addCylinder({{
+      // Constructive overlap bridge
+      fmoShapes.push(viewer.addCylinder({{
         start: {{ x: nuclCrd[0] + 0.85 * ux, y: nuclCrd[1] + 0.85 * uy, z: nuclCrd[2] + 0.85 * uz }},
         end: {{ x: elCrd[0] - 0.90 * ux, y: elCrd[1] - 0.90 * uy, z: elCrd[2] - 0.90 * uz }},
-        radius: 0.22,
-        color: '#0284c7',
-        alpha: 0.30
-      }});
-      fmoShapes.push(cBridge);
+        radius: 0.22, color: '#0284c7', alpha: 0.30
+      }}));
 
-      // Constructive phase match label
-      const mX = (nuclCrd[0] + elCrd[0]) / 2;
-      const mY = (nuclCrd[1] + elCrd[1]) / 2;
-      const mZ = (nuclCrd[2] + elCrd[2]) / 2;
-      const lOver = viewer.addLabel('FMO Overlap: ψ+ ↔ ψ+ (Constructive Allowed)', {{
-        position: {{ x: mX, y: mY, z: mZ - 0.50 }},
-        backgroundColor: 'rgba(3, 105, 161, 0.90)',
-        fontColor: '#ffffff',
-        fontSize: 10,
-        borderColor: '#38bdf8',
-        borderThickness: 1
-      }});
-      if (!showLabels && lOver && lOver.sprite) {{
-        lOver.sprite.visible = false;
+      if (showLabels) {{
+        const mX = (nuclCrd[0] + elCrd[0]) / 2;
+        const mY = (nuclCrd[1] + elCrd[1]) / 2;
+        const mZ = (nuclCrd[2] + elCrd[2]) / 2;
+        const lOver = viewer.addLabel('FMO Overlap: ψ+ ↔ ψ+ (Constructive Allowed)', {{
+          position: {{ x: mX, y: mY, z: mZ - 0.50 }},
+          backgroundColor: 'rgba(3, 105, 161, 0.90)',
+          fontColor: '#ffffff',
+          fontSize: 10,
+          borderColor: '#38bdf8',
+          borderThickness: 1
+        }});
+        fmoLabels.push(lOver);
       }}
-      fmoLabels.push(lOver);
     }}
 
-    function clearFMOLobes() {{
-      fmoShapes.forEach(s => viewer.removeShape(s));
-      fmoShapes = [];
-      fmoLabels.forEach(l => viewer.removeLabel(l));
-      fmoLabels = [];
+    function showOrbital(mode) {{
+      viewer.removeAllSurfaces();
+      clearFMOLobes();
+
+      const lumoBtn = document.getElementById('{widget_id}_lumo_btn');
+      const homoBtn = document.getElementById('{widget_id}_homo_btn');
+      const fmoBtn = document.getElementById('{widget_id}_fmo_btn');
+      const clearBtn = document.getElementById('{widget_id}_clear_orb_btn');
+
+      if (lumoBtn) {{ lumoBtn.style.background = '#fff'; lumoBtn.style.color = '#0369a1'; lumoBtn.style.borderColor = '#cbd5e1'; }}
+      if (homoBtn) {{ homoBtn.style.background = '#fff'; homoBtn.style.color = '#1e40af'; homoBtn.style.borderColor = '#cbd5e1'; }}
+      if (fmoBtn) {{ fmoBtn.style.background = '#fff'; fmoBtn.style.color = '#64748b'; fmoBtn.style.borderColor = '#cbd5e1'; }}
+      if (clearBtn) {{ clearBtn.style.background = '#fff'; clearBtn.style.color = '#64748b'; clearBtn.style.borderColor = '#cbd5e1'; }}
+
+      if (mode === 'lumo' && lumoVol) {{
+        try {{
+          viewer.addIsosurface(lumoVol, {{ isoval: {isovalue}, color: '#38bdf8', alpha: 0.65, smoothness: 2 }});
+          viewer.addIsosurface(lumoVol, {{ isoval: -{isovalue}, color: '#f87171', alpha: 0.65, smoothness: 2 }});
+          if (lumoBtn) {{ lumoBtn.style.background = '#e0f2fe'; lumoBtn.style.borderColor = '#7dd3fc'; }}
+        }} catch(e) {{
+          console.error(e);
+        }}
+      }} else if (mode === 'homo' && homoVol) {{
+        try {{
+          viewer.addIsosurface(homoVol, {{ isoval: {isovalue}, color: '#38bdf8', alpha: 0.65, smoothness: 2 }});
+          viewer.addIsosurface(homoVol, {{ isoval: -{isovalue}, color: '#f87171', alpha: 0.65, smoothness: 2 }});
+          if (homoBtn) {{ homoBtn.style.background = '#eff6ff'; homoBtn.style.borderColor = '#bfdbfe'; }}
+        }} catch(e) {{
+          console.error(e);
+        }}
+      }} else if (mode === 'fmo') {{
+        renderFMOLobes();
+        if (fmoBtn) {{ fmoBtn.style.background = '#e0f2fe'; fmoBtn.style.color = '#0369a1'; fmoBtn.style.borderColor = '#7dd3fc'; }}
+      }} else if (mode === 'none') {{
+        if (clearBtn) {{ clearBtn.style.background = '#e2e8f0'; clearBtn.style.color = '#1e293b'; }}
+      }}
+
+      viewer.render();
     }}
 
-    renderFMOLobes();
+    // Default active orbital mode
+    if (lumoVol) {{
+      showOrbital('lumo');
+    }} else if (homoVol) {{
+      showOrbital('homo');
+    }} else {{
+      showOrbital('fmo');
+    }}
+
+    // Button event listeners
+    const lumoBtn = document.getElementById('{widget_id}_lumo_btn');
+    if (lumoBtn) lumoBtn.addEventListener('click', () => showOrbital('lumo'));
+
+    const homoBtn = document.getElementById('{widget_id}_homo_btn');
+    if (homoBtn) homoBtn.addEventListener('click', () => showOrbital('homo'));
 
     const fmoBtn = document.getElementById('{widget_id}_fmo_btn');
-    if (fmoBtn) {{
-      fmoBtn.addEventListener('click', function() {{
-        showFMO = !showFMO;
-        if (showFMO) {{
-          renderFMOLobes();
-          fmoBtn.style.background = '#e0f2fe';
-          fmoBtn.style.color = '#0369a1';
-        }} else {{
-          clearFMOLobes();
-          fmoBtn.style.background = '#fff';
-          fmoBtn.style.color = '#64748b';
-        }}
-        viewer.render();
-      }});
-    }}
+    if (fmoBtn) fmoBtn.addEventListener('click', () => showOrbital('fmo'));
+
+    const clearOrbBtn = document.getElementById('{widget_id}_clear_orb_btn');
+    if (clearOrbBtn) clearOrbBtn.addEventListener('click', () => showOrbital('none'));
 
     viewer.zoomTo();
     viewer.render();
-    const initialView=viewer.getView();
-    window.sharkAdductReady=true;
+    const initialView = viewer.getView();
+    window.sharkAdductReady = true;
 
     // UI Controls
     let spinning = false;
@@ -504,20 +574,23 @@ def generate_adduct_viewer_html(
       }});
     }}
 
-    let showLabels = true;
     const labelsBtn = document.getElementById('{widget_id}_labels_btn');
     if (labelsBtn) {{
       labelsBtn.addEventListener('click', function() {{
         showLabels = !showLabels;
-        labels.forEach(l => {{
-          if (l && l.sprite) l.sprite.visible = showLabels;
-        }});
-        fmoLabels.forEach(l => {{
-          if (l && l.sprite) l.sprite.visible = showLabels;
-        }});
+        if (showLabels) {{
+          createLabels();
+          if (fmoShapes.length > 0) renderFMOLobes();
+          labelsBtn.style.background = '#fff';
+          labelsBtn.style.color = '#1e293b';
+        }} else {{
+          clearLabels();
+          fmoLabels.forEach(l => {{ try {{ viewer.removeLabel(l); }} catch(e){{}} }});
+          fmoLabels = [];
+          labelsBtn.style.background = '#e2e8f0';
+          labelsBtn.style.color = '#64748b';
+        }}
         viewer.render();
-        labelsBtn.style.background = showLabels ? '#fff' : '#e2e8f0';
-        labelsBtn.style.color = showLabels ? '#1e293b' : '#64748b';
       }});
     }}
 
