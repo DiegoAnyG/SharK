@@ -46,6 +46,19 @@ class PocketNucleophile:
 
 
 @dataclass
+class ReactiveGeometryResult:
+    """Detailed evaluation of local reactive trajectory geometry."""
+    distance_score: float
+    angle_score: Optional[float]
+    activation_score: float
+    electrophilicity_score: Optional[float]
+    rgi: Optional[float]
+    rgi_partial: float
+    is_complete: bool
+    warnings: List[str] = field(default_factory=list)
+
+
+@dataclass
 class CovalentContact:
     """Pairwise geometric contact between a pocket nucleophile and a ligand atom."""
     nucleophile: PocketNucleophile
@@ -61,18 +74,28 @@ class CovalentContact:
     catalytic_dyad_residue: Optional[str] = None
     activation_factor: float = 1.0
     composite_feasibility: float = 0.0
+    # Refactored Reactive Geometry Index (RGI) attributes
+    rgi: Optional[float] = None
+    rgi_partial: float = 0.0
+    is_geometry_complete: bool = True
+    candidate_catalytic_base_present: bool = False
+    candidate_activation_partner: Optional[str] = None
+    warnings: List[str] = field(default_factory=list)
 
     @property
     def summary(self) -> str:
         tag = "NAC" if self.is_nac else "PROXIMAL"
         rank_str = f" [Warhead Rank {self.warhead_rank}]" if self.warhead_rank else ""
         angle_str = f", Angle: {self.burgi_dunitz_angle:.1f}°" if self.burgi_dunitz_angle is not None else ""
-        cfi_str = f", CFI: {self.composite_feasibility:.2f}" if self.composite_feasibility > 0 else ""
-        dyad_str = f" [Dyad: {self.catalytic_dyad_residue}]" if self.catalytic_dyad_present else ""
+        rgi_val = self.rgi if self.rgi is not None else self.composite_feasibility
+        rgi_label = "RGI" if self.is_geometry_complete else "RGI (partial)"
+        rgi_str = f", {rgi_label}: {rgi_val:.2f}" if rgi_val > 0 else ""
+        base_lbl = self.candidate_activation_partner or self.catalytic_dyad_residue
+        dyad_str = f" [Candidate Base: {base_lbl}]" if (self.candidate_catalytic_base_present or self.catalytic_dyad_present) else ""
         return (
             f"{self.nucleophile.residue_label} ({self.nucleophile.atom_name}) <--> "
             f"Ligand Atom #{self.ligand_atom_index} ({self.ligand_atom_element}){rank_str}: "
-            f"{self.distance_angstrom:.2f} A ({tag}, Feasibility: {self.feasibility_score:.2f}{cfi_str}{angle_str}{dyad_str})"
+            f"{self.distance_angstrom:.2f} A ({tag}, Feasibility: {self.feasibility_score:.2f}{rgi_str}{angle_str}{dyad_str})"
         )
 
 
@@ -107,25 +130,47 @@ def _calculate_feasibility_score(distance: float, nac_cutoff: float = DEFAULT_NA
 
 def _find_adjacent_ligand_atom(
     target_idx: int,
-    lig_atoms: List[Tuple[int, str, Tuple[float, float, float]]]
-) -> Optional[Tuple[float, float, float]]:
-    """Identifies a bonded neighbor atom in the ligand to determine the trajectory angle."""
+    lig_atoms: List[Tuple[int, str, Tuple[float, float, float]]],
+    rdkit_mol: Optional[object] = None
+) -> Tuple[Optional[Tuple[float, float, float]], bool]:
+    """Identifies a bonded neighbor atom in the ligand to determine the trajectory angle.
+
+    Returns
+    -------
+    coords : tuple of float or None
+    is_from_bond_graph : bool
+        True if derived from real molecular bond connectivity; False if geometric fallback.
+    """
+    if rdkit_mol is not None:
+        try:
+            atom = rdkit_mol.GetAtomWithIdx(target_idx)
+            neighbors = atom.GetNeighbors()
+            if neighbors:
+                # Prioritize heavy heteroatoms (O, N, S) over carbon
+                sorted_neighs = sorted(neighbors, key=lambda n: (0 if n.GetSymbol() in ("O", "N", "S") else 1, n.GetIdx()))
+                chosen_idx = sorted_neighs[0].GetIdx()
+                conf = rdkit_mol.GetConformer()
+                pos = conf.GetAtomPosition(chosen_idx)
+                return (pos.x, pos.y, pos.z), True
+        except Exception:
+            pass
+
     target_crd = next((crd for idx, _, crd in lig_atoms if idx == target_idx), None)
     if target_crd is None:
-        return None
+        return None, False
     candidates = []
     for idx, elem, crd in lig_atoms:
         if idx == target_idx:
             continue
         d = _euclidean_distance(target_crd, crd)
-        if 1.05 <= d <= 1.65:
+        if 0.90 <= d <= 1.95:
             # Prioritize O or N (e.g. carbonyl or furoxan system)
             priority = 0 if elem in ("O", "N") else 1
             candidates.append((priority, d, crd))
     if candidates:
         candidates.sort(key=lambda x: (x[0], x[1]))
-        return candidates[0][2]
-    return None
+        return candidates[0][2], False
+    return None, False
 
 
 def _calculate_burgi_dunitz_angle(
@@ -134,7 +179,9 @@ def _calculate_burgi_dunitz_angle(
     adj_coord: Optional[Tuple[float, float, float]]
 ) -> Optional[float]:
     """Calculates the nucleophilic attack angle Nu ... C_target - C_adjacent."""
-    if adj_coord is None:
+    if adj_coord is None or not isinstance(adj_coord, (list, tuple)) or len(adj_coord) < 3:
+        return None
+    if adj_coord[0] is None or adj_coord[1] is None or adj_coord[2] is None:
         return None
     v1 = (nucl_coord[0] - lig_coord[0], nucl_coord[1] - lig_coord[1], nucl_coord[2] - lig_coord[2])
     v2 = (adj_coord[0] - lig_coord[0], adj_coord[1] - lig_coord[1], adj_coord[2] - lig_coord[2])
@@ -147,14 +194,14 @@ def _calculate_burgi_dunitz_angle(
     return round(math.degrees(math.acos(cos_theta)), 2)
 
 
-def _scan_catalytic_dyad(
+def _scan_candidate_catalytic_base(
     nucl_coord: Tuple[float, float, float],
     receptor_atoms: List[dict],
     nucl_res_seq: int,
     nucl_chain: str,
     max_distance: float = 3.8
 ) -> Tuple[bool, Optional[str]]:
-    """Scans for nearby acidic/basic residues activating a nucleophile via proton abstraction."""
+    """Scans for nearby acidic/basic residues that may serve as candidate activation partners."""
     CATALYTIC_BASES = {
         "HIS": ("ND1", "NE2"),
         "ASP": ("OD1", "OD2"),
@@ -173,41 +220,101 @@ def _scan_catalytic_dyad(
     return False, None
 
 
-def _compute_composite_feasibility(
+# Backward-compatible alias
+_scan_catalytic_dyad = _scan_candidate_catalytic_base
+
+
+def compute_reactive_geometry_index(
     dist_feasibility: float,
     angle_deg: Optional[float],
     nucl_resname: str,
-    dyad_present: bool,
-    omega_k: Optional[float] = None
-) -> Tuple[float, float, float]:
-    """Computes angular factor, activation factor, and Composite Covalent Feasibility Index (CFI)."""
-    # 1. Bürgi-Dunitz angular factor (centered at 107 deg, width 14 deg)
-    if angle_deg is not None:
-        f_ang = math.exp(-((angle_deg - 107.0) ** 2) / (2.0 * (14.0 ** 2)))
-    else:
-        f_ang = 0.85
+    candidate_base_present: bool = False,
+    omega_k: Optional[float] = None,
+    theta0: float = 107.0,
+    sigma_theta: float = 14.0,
+) -> ReactiveGeometryResult:
+    """Computes the Reactive Geometry Index (RGI = f_d * f_theta * f_act * f_elec).
 
-    # 2. Catalytic activation / pKa factor
+    Strictly sets missing metrics to None without assuming favorable defaults.
+    """
+    warnings = []
+
+    # 1. Bürgi-Dunitz angular factor
+    if angle_deg is not None:
+        f_ang = math.exp(-((angle_deg - theta0) ** 2) / (2.0 * (sigma_theta ** 2)))
+        f_ang = round(f_ang, 4)
+    else:
+        f_ang = None
+        warnings.append("Attack angle is missing or undefined; angle factor not evaluated.")
+
+    # 2. Catalytic activation / microenvironment factor
     res = nucl_resname.upper()
     if res == "CYS":
-        f_act = 1.0  # Thiolate readily accessible
+        # Neutral thiol in unverified microenvironment is not 1.0
+        f_act = 0.85 if candidate_base_present else 0.70
     elif res in ("SER", "THR"):
-        f_act = 0.90 if dyad_present else 0.35  # Neutral alcohol without base is poorly reactive
+        f_act = 0.90 if candidate_base_present else 0.35
     elif res in ("LYS", "TYR"):
-        f_act = 0.75 if dyad_present else 0.40
+        f_act = 0.75 if candidate_base_present else 0.40
     elif res == "HIS":
         f_act = 0.85
     else:
         f_act = 0.50
 
     # 3. Electrophilicity weighting
-    if omega_k is not None and omega_k > 0:
-        f_elec = min(1.0, max(0.5, omega_k / 1.5))
+    if omega_k is not None:
+        if omega_k > 0:
+            f_elec = round(min(1.0, max(0.5, omega_k / 1.5)), 4)
+        else:
+            f_elec = 0.50
     else:
-        f_elec = 1.0
+        f_elec = None
+        warnings.append("Electrophilicity index is missing; electrophilicity factor not evaluated.")
 
-    cfi = dist_feasibility * f_ang * f_act * f_elec
-    return round(cfi, 4), round(f_ang, 3), round(f_act, 3)
+    is_complete = (f_ang is not None and f_elec is not None)
+    if is_complete:
+        rgi = round(dist_feasibility * f_ang * f_act * f_elec, 4)
+    else:
+        rgi = None
+
+    # Partial heuristic index using available factors
+    rgi_partial = round(
+        dist_feasibility
+        * (f_ang if f_ang is not None else 1.0)
+        * f_act
+        * (f_elec if f_elec is not None else 1.0),
+        4
+    )
+
+    return ReactiveGeometryResult(
+        distance_score=round(dist_feasibility, 4),
+        angle_score=f_ang,
+        activation_score=round(f_act, 4),
+        electrophilicity_score=f_elec,
+        rgi=rgi,
+        rgi_partial=rgi_partial,
+        is_complete=is_complete,
+        warnings=warnings
+    )
+
+
+def _compute_composite_feasibility(
+    dist_feasibility: float,
+    angle_deg: Optional[float],
+    nucl_resname: str,
+    dyad_present: bool,
+    omega_k: Optional[float] = None
+) -> Tuple[float, Optional[float], float]:
+    """Backward-compatible adapter for older callers."""
+    res = compute_reactive_geometry_index(
+        dist_feasibility=dist_feasibility,
+        angle_deg=angle_deg,
+        nucl_resname=nucl_resname,
+        candidate_base_present=dyad_present,
+        omega_k=omega_k
+    )
+    reported_cfi = res.rgi if res.rgi is not None else res.rgi_partial
+    return reported_cfi, res.angle_score, res.activation_score
 
 
 def parse_pdb_atoms(pdb_path: str | Path) -> List[dict]:
@@ -402,7 +509,8 @@ def match_covalent_pocket(
     nac_cutoff: float = DEFAULT_NAC_CUTOFF,
     target_residue: Optional[str] = None,
     receptor_name: str = "",
-    ligand_name: str = ""
+    ligand_name: str = "",
+    rdkit_mol: Optional[object] = None
 ) -> CovalentMatchReport:
     """Performs full Near-Attack Conformation (NAC) matching between pocket nucleophiles and warhead."""
     lig_atoms = parse_ligand_pose_coordinates(ligand_pose)
@@ -412,6 +520,21 @@ def match_covalent_pocket(
             ligand_name=ligand_name or "Unknown",
             summary="No heavy atoms found in ligand pose."
         )
+
+    # Attempt to load RDKit Mol for exact bond connectivity if not provided
+    if rdkit_mol is None and isinstance(ligand_pose, (str, Path)):
+        try:
+            from rdkit import Chem
+            p_str = str(ligand_pose)
+            if p_str.endswith(".pdb"):
+                rdkit_mol = Chem.MolFromPDBFile(p_str, removeHs=False)
+            elif p_str.endswith(".mol2"):
+                rdkit_mol = Chem.MolFromMol2File(p_str, removeHs=False)
+            elif p_str.endswith(".sdf"):
+                suppl = Chem.SDMolSupplier(p_str, removeHs=False)
+                rdkit_mol = next(suppl, None)
+        except Exception:
+            rdkit_mol = None
 
     all_lig_coords = [crd for _, _, crd in lig_atoms]
     pocket_nucls = extract_pocket_nucleophiles(
@@ -446,7 +569,7 @@ def match_covalent_pocket(
 
     contacts: List[CovalentContact] = []
     for nucl in pocket_nucls:
-        dyad_present, dyad_lbl = _scan_catalytic_dyad(
+        dyad_present, dyad_lbl = _scan_candidate_catalytic_base(
             nucl.coordinates, rec_atoms, nucl.residue_number, nucl.chain_id
         )
         for idx, elem, crd, cand_obj in eval_lig_atoms:
@@ -457,15 +580,21 @@ def match_covalent_pocket(
                 rank = getattr(cand_obj, "rank", None) if cand_obj else None
                 omega_k = getattr(cand_obj, "local_electrophilicity", None) if cand_obj else None
 
-                adj_crd = _find_adjacent_ligand_atom(idx, lig_atoms)
+                adj_crd, is_from_graph = _find_adjacent_ligand_atom(idx, lig_atoms, rdkit_mol=rdkit_mol)
                 angle_bd = _calculate_burgi_dunitz_angle(nucl.coordinates, crd, adj_crd)
-                cfi, f_ang, f_act = _compute_composite_feasibility(
+                rgi_res = compute_reactive_geometry_index(
                     dist_feasibility=feas,
                     angle_deg=angle_bd,
                     nucl_resname=nucl.residue_name,
-                    dyad_present=dyad_present,
+                    candidate_base_present=dyad_present,
                     omega_k=omega_k
                 )
+
+                warnings_list = list(rgi_res.warnings)
+                if not is_from_graph and adj_crd is not None:
+                    warnings_list.append("Attack angle inferred from geometric connectivity; explicit bond graph unavailable.")
+
+                reported_cfi = rgi_res.rgi if rgi_res.rgi is not None else rgi_res.rgi_partial
 
                 contacts.append(CovalentContact(
                     nucleophile=nucl,
@@ -479,8 +608,14 @@ def match_covalent_pocket(
                     burgi_dunitz_angle=angle_bd,
                     catalytic_dyad_present=dyad_present,
                     catalytic_dyad_residue=dyad_lbl,
-                    activation_factor=f_act,
-                    composite_feasibility=cfi
+                    activation_factor=rgi_res.activation_score,
+                    composite_feasibility=reported_cfi,
+                    rgi=rgi_res.rgi,
+                    rgi_partial=rgi_res.rgi_partial,
+                    is_geometry_complete=rgi_res.is_complete,
+                    candidate_catalytic_base_present=dyad_present,
+                    candidate_activation_partner=dyad_lbl,
+                    warnings=warnings_list
                 ))
 
     # Sort contacts by composite feasibility descending
@@ -539,20 +674,54 @@ def match_covalent_pocket(
     )
 
 
+def compute_binding_score(
+    dock_score: Optional[float],
+    ref_score: float = -6.0,
+    tau: float = 1.5
+) -> Optional[float]:
+    """Computes normalized reversible recognition score S_bind via sigmoidal transformation.
+
+    Parameters
+    ----------
+    dock_score : float or None
+        Non-covalent docking binding energy (e.g. -7.244 kcal/mol).
+    ref_score : float
+        Sigmoidal inflection reference energy (default -6.0 kcal/mol).
+    tau : float
+        Sigmoidal softness parameter in kcal/mol (default 1.5 kcal/mol).
+
+    Returns
+    -------
+    float or None
+        S_bind in (0.0, 1.0) or None if dock_score is missing/invalid.
+    """
+    if dock_score is None or not math.isfinite(dock_score):
+        return None
+    z = (dock_score - ref_score) / tau
+    z = max(-50.0, min(50.0, z))
+    return round(1.0 / (1.0 + math.exp(z)), 4)
+
+
 @dataclass
 class TotalCovalentFeasibility:
     """Unified covalent feasibility integrating Pillars 1 (Affinity), 2 (Dynamics), and 3 (Eyring TS)."""
-    cfi_total: float
-    percentage: float
+    cfi_pre: Optional[float]
+    cfi_final: Optional[float]
+    status: str
     tier: str
-    affinity_score: float
-    nac_score: float
+    affinity_score: Optional[float]
+    nac_score: Optional[float]
     ts_score: Optional[float]
     docking_score: Optional[float]
     p_nac: Optional[float]
     delta_g_ts: Optional[float]
+    k_chem: Optional[float]
     weights: dict
     summary: str
+    warnings: List[str] = field(default_factory=list)
+    # Backward compatibility fields
+    cfi_total: float = 0.0
+    percentage: float = 0.0
 
 
 def compute_total_covalent_feasibility(
@@ -560,88 +729,161 @@ def compute_total_covalent_feasibility(
     p_nac: Optional[float] = None,
     delta_g_ts: Optional[float] = None,
     static_cfi: Optional[float] = None,
-    w_aff: float = 0.20,
+    k_chem: Optional[float] = None,
+    w_bind: float = 0.20,
     w_nac: float = 0.40,
-    w_ts: float = 0.40
+    w_chem: float = 0.40,
+    ref_score: float = -6.0,
+    tau: float = 1.5,
+    ts_barrier_midpoint: float = 20.0,
+    ts_barrier_width: float = 2.0,
+    w_aff: Optional[float] = None,
+    w_ts: Optional[float] = None,
 ) -> TotalCovalentFeasibility:
-    """Computes the Unified Total Covalent Feasibility Index (CFI_total).
+    """Computes the Unified Covalent Feasibility Indices (CFI_pre and CFI_final).
+
+    Adopts a weighted geometric mean so an impossible chemical step (S_chem -> 0)
+    cannot be compensated by high non-covalent affinity.
 
     Parameters
     ----------
     docking_score : float or None
-        Non-covalent docking binding energy in kcal/mol (e.g., -6.8 kcal/mol).
+        Non-covalent docking binding energy in kcal/mol (e.g., -7.244 kcal/mol).
     p_nac : float or None
         Near-Attack Conformation persistence from MD trajectory clustering in [0.0, 1.0].
     delta_g_ts : float or None
         Eyring activation free energy barrier in kcal/mol (from Tier 4 TS modeling).
     static_cfi : float or None
         Fallback static geometric composite feasibility if MD is unavailable.
-    w_aff : float
-        Weight for thermodynamic non-covalent affinity (default 0.20).
+    k_chem : float or None
+        Rate constant of the chemical step in s^-1.
+    w_bind : float
+        Weight for reversible binding recognition (default 0.20).
     w_nac : float
         Weight for conformational dynamics and near-attack persistence (default 0.40).
-    w_ts : float
+    w_chem : float
         Weight for chemical transition state activation barrier (default 0.40).
+    ref_score : float
+        Docking reference energy for S_bind sigmoidal scaling (default -6.0 kcal/mol).
+    tau : float
+        Softness parameter for S_bind sigmoidal scaling (default 1.5 kcal/mol).
     """
-    # 1. Pillar 1: Non-covalent affinity normalization
-    # Scores <= -8.0 kcal/mol -> 1.0; score >= -4.0 kcal/mol -> 0.0
-    if docking_score is not None and math.isfinite(docking_score):
-        s_aff = min(1.0, max(0.0, (-docking_score - 4.0) / 4.0))
-    else:
-        s_aff = 0.60  # Reasonable neutral prior for screened poses
+    if w_aff is not None:
+        w_bind = w_aff
+    if w_ts is not None:
+        w_chem = w_ts
 
-    # 2. Pillar 2: Near-Attack Conformation dynamics
+    warnings: List[str] = []
+    EPS = 1e-12
+
+    # 1. Pillar 1: Reversible binding recognition score S_bind
+    s_bind = compute_binding_score(docking_score, ref_score=ref_score, tau=tau)
+    if s_bind is None:
+        warnings.append("Reversible binding score S_bind not evaluated (missing docking score).")
+
+    # 2. Pillar 2: Near-Attack Conformation dynamics / preorganization
     if p_nac is not None and math.isfinite(p_nac):
         s_nac = min(1.0, max(0.0, p_nac))
     elif static_cfi is not None and math.isfinite(static_cfi):
         s_nac = min(1.0, max(0.0, static_cfi))
     else:
-        s_nac = 0.20
+        s_nac = None
+        warnings.append("Dynamic reactive preorganization P_NAC not evaluated.")
 
-    # 3. Pillar 3: Chemical activation barrier (Eyring kinetics)
-    if delta_g_ts is not None and math.isfinite(delta_g_ts):
-        # Sigmoid centered at 20.0 kcal/mol with width 2.0 kcal/mol
-        z = (delta_g_ts - 20.0) / 2.0
-        z = max(-30.0, min(30.0, z))
-        s_ts = 1.0 / (1.0 + math.exp(z))
-        weights = {"affinity": w_aff, "nac": w_nac, "ts": w_ts}
-        cfi_total = w_aff * s_aff + w_nac * s_nac + w_ts * s_ts
+    # 3. Pre-reactive feasibility CFI_pre (geometric mean of S_bind and P_NAC)
+    if s_bind is not None and s_nac is not None:
+        tot_pre_w = w_bind + w_nac
+        w1 = w_bind / tot_pre_w if tot_pre_w > 0 else 0.35
+        w2 = w_nac / tot_pre_w if tot_pre_w > 0 else 0.65
+        log_cfi_pre = w1 * math.log(max(s_bind, EPS)) + w2 * math.log(max(s_nac, EPS))
+        cfi_pre = round(math.exp(log_cfi_pre), 4)
+    elif s_nac is not None:
+        cfi_pre = round(s_nac, 4)
+    elif s_bind is not None:
+        cfi_pre = round(s_bind, 4)
     else:
-        s_ts = None
-        # Normalize weights between affinity and dynamics
-        norm = w_aff + w_nac
-        w_aff_norm = w_aff / norm if norm > 0 else 0.35
-        w_nac_norm = w_nac / norm if norm > 0 else 0.65
-        weights = {"affinity": round(w_aff_norm, 2), "nac": round(w_nac_norm, 2), "ts": 0.0}
-        cfi_total = w_aff_norm * s_aff + w_nac_norm * s_nac
+        cfi_pre = None
 
-    cfi_total = round(max(0.0, min(1.0, cfi_total)), 4)
+    # 4. Pillar 3: Chemical activation kinetics S_chem & CFI_final
+    s_chem = None
+    cfi_final = None
+    weights = {"binding": w_bind, "nac": w_nac, "chem": w_chem}
+
+    if delta_g_ts is not None and math.isfinite(delta_g_ts):
+        z = (delta_g_ts - ts_barrier_midpoint) / ts_barrier_width
+        z = max(-30.0, min(30.0, z))
+        s_chem = round(1.0 / (1.0 + math.exp(z)), 4)
+
+        if k_chem is None:
+            # Eyring rate at 310.15 K, kappa = 1.0
+            T_k = 310.15
+            rt_kcal = 0.00198720425864083 * T_k
+            prefac = 2.0836619e10 * T_k
+            exp_arg = -delta_g_ts / rt_kcal
+            k_chem = prefac * math.exp(exp_arg) if exp_arg > -700 else 0.0
+
+        # Weighted geometric mean: CFI_final = S_bind^w1 * P_NAC^w2 * S_chem^w3
+        v_bind = max(s_bind if s_bind is not None else 0.5, EPS)
+        v_nac = max(s_nac if s_nac is not None else 0.5, EPS)
+        v_chem = max(s_chem, EPS)
+
+        log_cfi = w_bind * math.log(v_bind) + w_nac * math.log(v_nac) + w_chem * math.log(v_chem)
+        cfi_final = round(math.exp(log_cfi), 4)
+        status = "Complete covalent evaluation"
+
+        if cfi_final >= 0.70:
+            tier = "High Covalent Feasibility"
+        elif cfi_final >= 0.40:
+            tier = "Moderate Covalent Feasibility"
+        else:
+            tier = "Low Covalent Feasibility"
+    else:
+        status = "Pending transition-state calculation"
+        warnings.append("Transition-state activation barrier DeltaG‡ not evaluated; chemical step pending.")
+        if cfi_pre is not None:
+            if cfi_pre >= 0.70:
+                tier = "Pre-reactive Favorable"
+            elif cfi_pre >= 0.40:
+                tier = "Pre-reactive Moderate"
+            else:
+                tier = "Pre-reactive Unfavorable"
+        else:
+            tier = "Incomplete Data"
+
+    # Backward compatibility fields
+    cfi_total = cfi_final if cfi_final is not None else (cfi_pre if cfi_pre is not None else 0.0)
     pct = round(cfi_total * 100.0, 1)
 
-    if cfi_total >= 0.75:
-        tier = "High Covalent Feasibility"
-    elif cfi_total >= 0.50:
-        tier = "Moderate Covalent Feasibility"
+    parts = []
+    if cfi_final is not None:
+        parts.append(f"CFI_final: {cfi_final:.3f} ({tier}).")
     else:
-        tier = "Low Covalent Feasibility"
+        pre_str = f"{cfi_pre:.3f}" if cfi_pre is not None else "N/A"
+        parts.append(f"CFI_pre: {pre_str} ({tier}, CFI_final: Pending transition-state calculation).")
 
-    parts = [f"Total Covalent Feasibility: {pct:.1f}% ({tier})."]
-    parts.append(f"Pillar 1 (Affinity): {s_aff:.2f} (docking = {docking_score} kcal/mol).")
-    parts.append(f"Pillar 2 (Dynamics): {s_nac:.2f} (P_NAC = {p_nac if p_nac is not None else static_cfi}).")
-    if s_ts is not None:
-        parts.append(f"Pillar 3 (Kinetics): {s_ts:.2f} (ΔG‡ = {delta_g_ts:.2f} kcal/mol).")
+    if s_bind is not None:
+        parts.append(f"Pillar 1 (S_bind): {s_bind:.3f} (docking = {docking_score} kcal/mol).")
+    if s_nac is not None:
+        parts.append(f"Pillar 2 (P_NAC): {s_nac:.3f}.")
+    if s_chem is not None:
+        parts.append(f"Pillar 3 (S_chem): {s_chem:.3f} (ΔG‡ = {delta_g_ts:.2f} kcal/mol).")
 
     return TotalCovalentFeasibility(
-        cfi_total=cfi_total,
-        percentage=pct,
+        cfi_pre=cfi_pre,
+        cfi_final=cfi_final,
+        status=status,
         tier=tier,
-        affinity_score=round(s_aff, 3),
-        nac_score=round(s_nac, 3),
-        ts_score=round(s_ts, 3) if s_ts is not None else None,
+        affinity_score=s_bind,
+        nac_score=s_nac,
+        ts_score=s_chem,
         docking_score=docking_score,
         p_nac=p_nac,
         delta_g_ts=delta_g_ts,
+        k_chem=k_chem,
         weights=weights,
-        summary=" ".join(parts)
+        summary=" ".join(parts),
+        warnings=warnings,
+        cfi_total=cfi_total,
+        percentage=pct
     )
 

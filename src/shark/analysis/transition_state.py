@@ -245,6 +245,62 @@ def parse_orca_ts_output(
     )
 
 
+def compute_eyring_rate_constant(
+    delta_g_dagger_kcal: float,
+    temperature_k: float = 310.15,
+    kappa: float = 1.0,
+) -> Tuple[float, str]:
+    """Calculates the Eyring chemical rate constant and associated half-life.
+
+    Parameters
+    ----------
+    delta_g_dagger_kcal : float
+        Activation free energy barrier in kcal/mol (Delta G‡).
+    temperature_k : float
+        Temperature in Kelvin (default 310.15 K, physiological).
+    kappa : float
+        Transmission coefficient (default 1.0).
+
+    Returns
+    -------
+    rate_k : float
+        Chemical rate constant in s^-1.
+    half_life_str : str
+        Formatted estimated half-life string.
+    """
+    rt = R_GAS_KCAL * temperature_k
+    eyring_prefactor = kappa * KB_OVER_H * temperature_k
+
+    if delta_g_dagger_kcal < 0.0:
+        return eyring_prefactor, "< 1 ps (Barrierless)"
+
+    exponent = -delta_g_dagger_kcal / rt
+    if exponent < -700.0:
+        return 0.0, "> 1000 years"
+
+    rate_k = eyring_prefactor * math.exp(exponent)
+    if rate_k > 0:
+        half_life_sec = math.log(2) / rate_k
+        if half_life_sec < 1e-3:
+            half_life_str = f"{half_life_sec * 1e6:.1f} microseconds"
+        elif half_life_sec < 1.0:
+            half_life_str = f"{half_life_sec * 1e3:.1f} milliseconds"
+        elif half_life_sec < 60.0:
+            half_life_str = f"{half_life_sec:.1f} seconds"
+        elif half_life_sec < 3600.0:
+            half_life_str = f"{half_life_sec / 60.0:.1f} minutes"
+        elif half_life_sec < 86400.0:
+            half_life_str = f"{half_life_sec / 3600.0:.1f} hours"
+        elif half_life_sec < 365.25 * 86400.0:
+            half_life_str = f"{half_life_sec / 86400.0:.1f} days"
+        else:
+            half_life_str = f"{half_life_sec / (365.25 * 86400.0):.1f} years"
+    else:
+        half_life_str = "> 1000 years"
+
+    return rate_k, half_life_str
+
+
 def compute_reaction_profile(
     reactants_gibbs: float,
     ts_gibbs: float,
@@ -252,7 +308,7 @@ def compute_reaction_profile(
     temperature_k: float = 298.15,
     is_first_order_ts: bool = True
 ) -> ReactionEnergyProfile:
-    """Computes Eyring activation free energy and reaction kinetics.
+    """Calculates thermodynamic and kinetic properties from ground state, TS, and product Gibbs energies.
 
     Parameters
     ----------
@@ -275,55 +331,35 @@ def compute_reaction_profile(
         delta_g_rxn_kcal = (product_gibbs - reactants_gibbs) * HARTREE_TO_KCAL
 
     # Eyring transition state theory rate constant
-    # k = (k_B * T / h) * exp(-Delta G‡ / (R * T))
-    rt = R_GAS_KCAL * temperature_k
-    eyring_prefactor = KB_OVER_H * temperature_k
+    rate_k, half_life_str = compute_eyring_rate_constant(
+        delta_g_act_kcal,
+        temperature_k=temperature_k,
+        kappa=1.0
+    )
 
+    # Categorize kinetic accessibility without confusing with thermodynamic spontaneity
     if delta_g_act_kcal < 0.0:
-        # Barrierless or ground state slightly above TS guess
-        rate_k = eyring_prefactor
-        half_life_str = "< 1 ps (Barrierless)"
         feasibility = "Instantaneous / Barrierless"
+    elif delta_g_act_kcal <= 18.0:
+        feasibility = "Very Rapid Predicted Chemical Step"
+    elif delta_g_act_kcal <= 22.0:
+        feasibility = "Rapid Predicted Chemical Step"
+    elif delta_g_act_kcal <= 25.0:
+        feasibility = "Moderate Predicted Chemical Rate"
     else:
-        exponent = -delta_g_act_kcal / rt
-        if exponent < -700:
-            rate_k = 0.0
-            half_life_str = "> 1000 years"
-            feasibility = "Infeasible (Extremely High Barrier)"
-        else:
-            rate_k = eyring_prefactor * math.exp(exponent)
-            if rate_k > 0:
-                half_life_sec = math.log(2) / rate_k
-                if half_life_sec < 1e-3:
-                    half_life_str = f"{half_life_sec * 1e6:.1f} microseconds"
-                elif half_life_sec < 1.0:
-                    half_life_str = f"{half_life_sec * 1e3:.1f} milliseconds"
-                elif half_life_sec < 60.0:
-                    half_life_str = f"{half_life_sec:.1f} seconds"
-                elif half_life_sec < 3600.0:
-                    half_life_str = f"{half_life_sec / 60.0:.1f} minutes"
-                elif half_life_sec < 86400.0:
-                    half_life_str = f"{half_life_sec / 3600.0:.1f} hours"
-                elif half_life_sec < 365.25 * 86400.0:
-                    half_life_str = f"{half_life_sec / 86400.0:.1f} days"
-                else:
-                    half_life_str = f"{half_life_sec / (365.25 * 86400.0):.1f} years"
-            else:
-                half_life_str = "> 1000 years"
+        feasibility = "Slow Predicted Chemical Step (High Barrier)"
 
-            # Categorize kinetic feasibility at physiological temperature
-            if delta_g_act_kcal <= 18.0:
-                feasibility = "Spontaneous / Rapid Reaction"
-            elif delta_g_act_kcal <= 22.0:
-                feasibility = "High Covalent Feasibility"
-            elif delta_g_act_kcal <= 25.0:
-                feasibility = "Moderate / Physiologically Feasible"
-            else:
-                feasibility = "Infeasible / High Barrier (Requires Acid/Base Catalysis)"
-
-    notes = ""
+    notes_list = []
     if not is_first_order_ts:
-        notes = "Warning: Structure is not a strictly confirmed first-order saddle point."
+        notes_list.append("Warning: Structure is not a strictly confirmed first-order saddle point.")
+
+    if delta_g_rxn_kcal is not None:
+        if delta_g_rxn_kcal > 0.0:
+            notes_list.append(f"Thermodynamics: Endergonic (Delta G_rxn = +{delta_g_rxn_kcal:.2f} kcal/mol, unfavorable product equilibrium).")
+        else:
+            notes_list.append(f"Thermodynamics: Exergonic (Delta G_rxn = {delta_g_rxn_kcal:.2f} kcal/mol, favorable covalent adduct).")
+
+    notes = " ".join(notes_list)
 
     return ReactionEnergyProfile(
         reactants_gibbs=reactants_gibbs,
@@ -338,6 +374,10 @@ def compute_reaction_profile(
         is_first_order_ts=is_first_order_ts,
         notes=notes
     )
+
+
+# Backward-compatible alias
+build_reaction_energy_profile = compute_reaction_profile
 
 
 def prepare_ts_workflow_directory(

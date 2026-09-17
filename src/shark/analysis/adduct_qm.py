@@ -28,6 +28,11 @@ class FMOSymmetryResult:
     overlap_integral_estimate: float
     explanation: str
 
+    @property
+    def orbital_alignment_score(self) -> float:
+        """Geometric orbital alignment score (heuristic overlap descriptor)."""
+        return self.overlap_integral_estimate
+
     def to_dict(self) -> Dict[str, Any]:
         return {
             "is_allowed": self.is_allowed,
@@ -39,6 +44,7 @@ class FMOSymmetryResult:
             "nucleophile_homo_ev": round(self.nucleophile_homo_ev, 3),
             "electrophile_lumo_ev": round(self.electrophile_lumo_ev, 3),
             "overlap_integral_estimate": round(self.overlap_integral_estimate, 4),
+            "orbital_alignment_score": round(self.overlap_integral_estimate, 4),
             "explanation": self.explanation,
         }
 
@@ -184,7 +190,7 @@ def evaluate_fmo_phase_symmetry(
         status = "Constructive Phase Overlap (Fukui Allowed)"
         sym_type = "Constructive sigma-addition"
         explanation = (
-            f"Frontier orbital symmetry is thermally allowed under Woodward-Hoffmann rules. "
+            f"Frontier orbital symmetry and approach trajectory are consistent with a favorable bimolecular addition. "
             f"The nucleophilic lone pair ({nucleophile_symbol}) approaches within the Bürgi-Dunitz cone "
             f"({burgi_dunitz_angle_deg:.1f} deg) with favorable FMO gap ({fmo_gap:.2f} eV)."
         )
@@ -340,8 +346,8 @@ def evaluate_covalent_bond_nature(
     reversibility_str = "Reversible covalent bond" if is_reversible_warhead else "Irreversible covalent adduct"
     explanation = (
         f"Formed {nucleophile_element}-{electrophile_element} bond exhibits a Wiberg bond order of "
-        f"{b_order:.2f} at {bond_distance_angstrom:.2f} A, with {covalency_pct:.1f}% covalent character "
-        f"and {abs(q_transfer):.2f} e charge transfer. {reversibility_str}."
+        f"{b_order:.2f} at {bond_distance_angstrom:.2f} A, consistent with a single covalent bond "
+        f"in the optimized adduct with {abs(q_transfer):.2f} e charge transfer. {reversibility_str}."
     )
 
     return CovalentBondNatureResult(

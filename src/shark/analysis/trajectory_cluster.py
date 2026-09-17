@@ -167,11 +167,11 @@ def cluster_trajectory(
     start_ps = start_ns * 1000.0
     stop_ps = (stop_ns * 1000.0) if stop_ns is not None else float("inf")
 
-    # Sample coordinates after alignment on protein CA
     sampled_coords = []
     frame_indices = []
     frame_times = []
     nac_frame_count = 0
+    nac_continuous_sum = 0.0
 
     # Reference structure for alignment (first frame in interval)
     ref_ca_pos = None
@@ -205,14 +205,20 @@ def cluster_trajectory(
         if target_atoms is not None and len(target_atoms) > 0:
             from MDAnalysis.lib.distances import distance_array
             dmat_t = distance_array(target_atoms.positions, ligand_atoms.positions)
-            if np.min(dmat_t) <= 3.5:
+            min_d = float(np.min(dmat_t))
+            if min_d <= 3.5:
                 nac_frame_count += 1
+            # Continuous sigmoidal distance score: f_d(d) = 1 / (1 + exp((d - 3.5)/0.5))
+            f_d = 1.0 / (1.0 + math.exp(min(50.0, max(-50.0, (min_d - 3.5) / 0.5))))
+            nac_continuous_sum += f_d
 
     n_samples = len(sampled_coords)
     if n_samples == 0:
         raise ValueError("Zero frames sampled for clustering.")
 
-    p_nac = (nac_frame_count / n_samples) if n_samples > 0 else 0.0
+    p_nac = round(nac_continuous_sum / n_samples, 4) if (n_samples > 0 and target_atoms is not None) else (
+        (nac_frame_count / n_samples) if n_samples > 0 else 0.0
+    )
 
     # Compute pairwise RMSD matrix for sampled ligand configurations
     sampled_coords = np.array(sampled_coords)
