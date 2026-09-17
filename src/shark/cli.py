@@ -339,6 +339,7 @@ def main(argv=None):
     parser.add_argument('--scan-end', type=float, default=1.45, help='Ending distance in Angstroms for coordinate scan (default: 1.45)')
     parser.add_argument('--scan-steps', type=int, default=18, help='Number of scan steps along reaction coordinate (default: 18)')
     parser.add_argument('--ph', type=float, default=7.4, help='Solution pH for residue protonation and microstate assignment (default: 7.4)')
+    parser.add_argument('--orca-cluster-sp', action='store_true', help='Execute real ab initio ORCA single-point calculation on the extracted active-site QM cluster and generate HOMO/LUMO 3D volumetric isosurfaces')
     args = parser.parse_args(arguments)
     if args.interactive or not arguments:
         try:
@@ -348,6 +349,8 @@ def main(argv=None):
     if args.fast_analysis:
         args.covalent = True
     if args.simple_gold_standard:
+        args.covalent = True
+    if args.orca_cluster_sp:
         args.covalent = True
     if args.full_gold_standard:
         if not (args.topology and args.trajectory):
@@ -576,8 +579,9 @@ def main(argv=None):
                 'clustering': clustering_info
             }
 
-        if args.tier_4_ts:
-            from .analysis.qm_cluster import extract_qm_cluster
+        cluster_qm_res = None
+        if args.tier_4_ts or args.orca_cluster_sp:
+            from .analysis.qm_cluster import extract_qm_cluster, run_cluster_single_point
             from .analysis.transition_state import (
                 prepare_ts_workflow_directory,
                 parse_orca_scan_output,
@@ -621,100 +625,122 @@ def main(argv=None):
                 el_lbl = cluster.atoms[cluster.electrophile_idx].label
                 print(f"[TIER 4] Reaction coordinate: Nucleophile {nucl_lbl} <--> Electrophile {el_lbl}")
 
-            if args.work_dir:
-                ts_work_dir = Path(args.work_dir) / 'transition_state'
-            else:
-                ts_work_dir = Path.cwd() / 'runs' / f"ts_{p.ligand_id}_{target_residue}_{args.qm_model}"
-            ts_work_dir.mkdir(parents=True, exist_ok=True)
-
-            wf = prepare_ts_workflow_directory(
-                cluster=cluster,
-                output_dir=ts_work_dir,
-                method=args.theory,
-                solvent=None if args.solvent.lower() == 'gas' else args.solvent,
-                scan_start=args.scan_start,
-                scan_end=args.scan_end,
-                scan_steps=args.scan_steps,
-                nprocs=args.nprocs or 4,
-            )
-            print(f"[TIER 4] Workflow prepared at: {ts_work_dir}")
-            print(f"[TIER 4] Scan input: {wf['scan_inp']}")
-            print(f"[TIER 4] Runner script: {wf['run_script']}")
-
-            if args.execute:
-                orca_bin = shutil.which('orca')
-                orca_bin = os.environ.get('SHARK_ORCA') or orca_bin
-                if orca_bin and Path(orca_bin).is_dir():
-                    orca_bin = str(Path(orca_bin) / 'orca')
-                if not orca_bin:
-                    print("[ERROR] ORCA executable not found in PATH or standard location", file=sys.stderr)
-                    return 1
-
-                orca_real = os.path.realpath(orca_bin)
-                print(f"[TIER 4] [Step 1/3] Executing ORCA relaxed coordinate scan with {orca_real}...")
-                with open(ts_work_dir / '01_scan.out', 'w') as out_f:
-                    p_scan = subprocess.run([orca_real, '01_scan.inp'], cwd=ts_work_dir, stdout=out_f, stderr=subprocess.STDOUT)
-                if p_scan.returncode != 0:
-                    print(f"[ERROR] Coordinate scan failed with code {p_scan.returncode}", file=sys.stderr)
-                    return p_scan.returncode
-
-                print("[TIER 4] [Step 2/3] Analyzing scan trajectory and locating Transition State guess...")
-                scan_res = parse_orca_scan_output(ts_work_dir / '01_scan.out', work_dir=ts_work_dir)
-                print(f"[TIER 4] {scan_res.summary}")
-
-                if scan_res.ts_guess_xyz and scan_res.ts_guess_xyz.is_file():
-                    xyz_lines = scan_res.ts_guess_xyz.read_text(encoding='utf-8').splitlines()[2:]
-                    tmpl = (ts_work_dir / '02_optts_template.inp').read_text(encoding='utf-8')
-                    header = tmpl.split('* xyz')[0]
-                    coords_str = '\n'.join(['  ' + ln for ln in xyz_lines if ln.strip()])
-                    new_inp = f"{header}* xyz {cluster.charge} {cluster.multiplicity}\n{coords_str}\n*\n"
-                    (ts_work_dir / '02_optts.inp').write_text(new_inp, encoding='utf-8')
+            if args.orca_cluster_sp:
+                if args.work_dir:
+                    cluster_work_dir = Path(args.work_dir) / 'cluster_qm'
                 else:
-                    shutil.copyfile(ts_work_dir / '02_optts_template.inp', ts_work_dir / '02_optts.inp')
-
-                print(f"[TIER 4] [Step 3/3] Running Saddle Point Optimization & Frequency Verification (! OptTS Freq)...")
-                with open(ts_work_dir / '02_optts.out', 'w') as out_f:
-                    p_ts = subprocess.run([orca_real, '02_optts.inp'], cwd=ts_work_dir, stdout=out_f, stderr=subprocess.STDOUT)
-                if p_ts.returncode != 0:
-                    print(f"[ERROR] OptTS failed with code {p_ts.returncode}", file=sys.stderr)
-                    return p_ts.returncode
-
-                ts_verif = parse_orca_ts_output(ts_work_dir / '02_optts.out', property_file_path=ts_work_dir / '02_optts.property.txt')
-                print(f"[TIER 4] Verification: {ts_verif.transition_vector_summary}")
-
-                reactants_g = scan_res.points[0].energy_hartree if scan_res.points else ts_verif.electronic_energy_hartree
-                ts_g = ts_verif.gibbs_free_energy_hartree if ts_verif.gibbs_free_energy_hartree != 0.0 else ts_verif.electronic_energy_hartree
-                prod_g = scan_res.points[-1].energy_hartree if scan_res.points else None
-
-                profile = compute_reaction_profile(
-                    reactants_gibbs=reactants_g,
-                    ts_gibbs=ts_g,
-                    product_gibbs=prod_g,
-                    is_first_order_ts=ts_verif.is_valid_first_order_saddle_point
+                    cluster_work_dir = Path.cwd() / 'shark_jobs' / f"cluster_sp_{target_residue}_{args.qm_model}"
+                cluster_work_dir.mkdir(parents=True, exist_ok=True)
+                print(f"[CLUSTER QM] Executing ORCA single-point calculation on active-site cluster '{cluster.name}' ({cluster.n_atoms} atoms) using {args.nprocs or 8} cores...")
+                cluster_qm_res = run_cluster_single_point(
+                    cluster=cluster,
+                    work_dir=cluster_work_dir,
+                    method=args.theory,
+                    solvent=None if args.solvent.lower() == 'gas' else args.solvent,
+                    nprocs=args.nprocs or 8,
+                    maxcore_mb=args.maxcore or 2000,
+                    grid=args.orbital_grid if args.orbital_grid else 40,
                 )
-                print("=" * 65)
-                print(f" [TIER 4] REACTION THERMOCHEMISTRY & KINETICS")
-                print(f"  Activation Free Energy (ΔG‡): {profile.delta_g_activation_kcal:.2f} kcal/mol")
-                if profile.delta_g_reaction_kcal is not None:
-                    print(f"  Reaction Free Energy (ΔG_rxn): {profile.delta_g_reaction_kcal:.2f} kcal/mol")
-                print(f"  Kinetic Feasibility:          {profile.kinetic_feasibility}")
-                print(f"  Estimated Half-Life (t1/2):    {profile.estimated_half_life_str}")
-                print(f"  Rate Constant (k):             {profile.rate_constant_s:.3e} s^-1")
-                print("=" * 65)
+                if cluster_qm_res.success:
+                    print(f"[CLUSTER QM] ORCA single-point completed in {cluster_qm_res.execution_time_s:.1f} s: HOMO (MO {cluster_qm_res.homo_idx}) = {cluster_qm_res.homo_energy_ev:.2f} eV, LUMO (MO {cluster_qm_res.lumo_idx}) = {cluster_qm_res.lumo_energy_ev:.2f} eV, Gap = {cluster_qm_res.gap_ev:.2f} eV")
+                else:
+                    print(f"[NOTE] Cluster QM single-point skipped or failed: {cluster_qm_res.error_message}")
 
-                if covalent_summary is not None:
-                    covalent_summary['transition_state'] = {
-                        'delta_g_activation_kcal': profile.delta_g_activation_kcal,
-                        'delta_g_reaction_kcal': profile.delta_g_reaction_kcal,
-                        'kinetic_feasibility': profile.kinetic_feasibility,
-                        'half_life': profile.estimated_half_life_str,
-                        'model_type': cluster.model_type,
-                        'summary': profile.summary,
-                        'is_first_order_ts': ts_verif.is_valid_first_order_saddle_point,
-                    }
-            else:
-                print(f"[TIER 4] To execute the transition state search manually, run:")
-                print(f"         bash {wf['run_script']}")
+            if args.tier_4_ts:
+                if args.work_dir:
+                    ts_work_dir = Path(args.work_dir) / 'transition_state'
+                else:
+                    ts_work_dir = Path.cwd() / 'runs' / f"ts_{p.ligand_id}_{target_residue}_{args.qm_model}"
+                ts_work_dir.mkdir(parents=True, exist_ok=True)
+
+                wf = prepare_ts_workflow_directory(
+                    cluster=cluster,
+                    output_dir=ts_work_dir,
+                    method=args.theory,
+                    solvent=None if args.solvent.lower() == 'gas' else args.solvent,
+                    scan_start=args.scan_start,
+                    scan_end=args.scan_end,
+                    scan_steps=args.scan_steps,
+                    nprocs=args.nprocs or 4,
+                )
+                print(f"[TIER 4] Workflow prepared at: {ts_work_dir}")
+                print(f"[TIER 4] Scan input: {wf['scan_inp']}")
+                print(f"[TIER 4] Runner script: {wf['run_script']}")
+
+                if args.execute:
+                    orca_bin = shutil.which('orca')
+                    orca_bin = os.environ.get('SHARK_ORCA') or orca_bin
+                    if orca_bin and Path(orca_bin).is_dir():
+                        orca_bin = str(Path(orca_bin) / 'orca')
+                    if not orca_bin:
+                        print("[ERROR] ORCA executable not found in PATH or standard location", file=sys.stderr)
+                        return 1
+
+                    orca_real = os.path.realpath(orca_bin)
+                    print(f"[TIER 4] [Step 1/3] Executing ORCA relaxed coordinate scan with {orca_real}...")
+                    with open(ts_work_dir / '01_scan.out', 'w') as out_f:
+                        p_scan = subprocess.run([orca_real, '01_scan.inp'], cwd=ts_work_dir, stdout=out_f, stderr=subprocess.STDOUT)
+                    if p_scan.returncode != 0:
+                        print(f"[ERROR] Coordinate scan failed with code {p_scan.returncode}", file=sys.stderr)
+                        return p_scan.returncode
+
+                    print("[TIER 4] [Step 2/3] Analyzing scan trajectory and locating Transition State guess...")
+                    scan_res = parse_orca_scan_output(ts_work_dir / '01_scan.out', work_dir=ts_work_dir)
+                    print(f"[TIER 4] {scan_res.summary}")
+
+                    if scan_res.ts_guess_xyz and scan_res.ts_guess_xyz.is_file():
+                        xyz_lines = scan_res.ts_guess_xyz.read_text(encoding='utf-8').splitlines()[2:]
+                        tmpl = (ts_work_dir / '02_optts_template.inp').read_text(encoding='utf-8')
+                        header = tmpl.split('* xyz')[0]
+                        coords_str = '\n'.join(['  ' + ln for ln in xyz_lines if ln.strip()])
+                        new_inp = f"{header}* xyz {cluster.charge} {cluster.multiplicity}\n{coords_str}\n*\n"
+                        (ts_work_dir / '02_optts.inp').write_text(new_inp, encoding='utf-8')
+                    else:
+                        shutil.copyfile(ts_work_dir / '02_optts_template.inp', ts_work_dir / '02_optts.inp')
+
+                    print(f"[TIER 4] [Step 3/3] Running Saddle Point Optimization & Frequency Verification (! OptTS Freq)...")
+                    with open(ts_work_dir / '02_optts.out', 'w') as out_f:
+                        p_ts = subprocess.run([orca_real, '02_optts.inp'], cwd=ts_work_dir, stdout=out_f, stderr=subprocess.STDOUT)
+                    if p_ts.returncode != 0:
+                        print(f"[ERROR] OptTS failed with code {p_ts.returncode}", file=sys.stderr)
+                        return p_ts.returncode
+
+                    ts_verif = parse_orca_ts_output(ts_work_dir / '02_optts.out', property_file_path=ts_work_dir / '02_optts.property.txt')
+                    print(f"[TIER 4] Verification: {ts_verif.transition_vector_summary}")
+
+                    reactants_g = scan_res.points[0].energy_hartree if scan_res.points else ts_verif.electronic_energy_hartree
+                    ts_g = ts_verif.gibbs_free_energy_hartree if ts_verif.gibbs_free_energy_hartree != 0.0 else ts_verif.electronic_energy_hartree
+                    prod_g = scan_res.points[-1].energy_hartree if scan_res.points else None
+
+                    profile = compute_reaction_profile(
+                        reactants_gibbs=reactants_g,
+                        ts_gibbs=ts_g,
+                        product_gibbs=prod_g,
+                        is_first_order_ts=ts_verif.is_valid_first_order_saddle_point
+                    )
+                    print("=" * 65)
+                    print(f" [TIER 4] REACTION THERMOCHEMISTRY & KINETICS")
+                    print(f"  Activation Free Energy (ΔG‡): {profile.delta_g_activation_kcal:.2f} kcal/mol")
+                    if profile.delta_g_reaction_kcal is not None:
+                        print(f"  Reaction Free Energy (ΔG_rxn): {profile.delta_g_reaction_kcal:.2f} kcal/mol")
+                    print(f"  Kinetic Feasibility:          {profile.kinetic_feasibility}")
+                    print(f"  Estimated Half-Life (t1/2):    {profile.estimated_half_life_str}")
+                    print(f"  Rate Constant (k):             {profile.rate_constant_s:.3e} s^-1")
+                    print("=" * 65)
+
+                    if covalent_summary is not None:
+                        covalent_summary['transition_state'] = {
+                            'delta_g_activation_kcal': profile.delta_g_activation_kcal,
+                            'delta_g_reaction_kcal': profile.delta_g_reaction_kcal,
+                            'kinetic_feasibility': profile.kinetic_feasibility,
+                            'half_life': profile.estimated_half_life_str,
+                            'model_type': cluster.model_type,
+                            'summary': profile.summary,
+                            'is_first_order_ts': ts_verif.is_valid_first_order_saddle_point,
+                        }
+                else:
+                    print(f"[TIER 4] To execute the transition state search manually, run:")
+                    print(f"         bash {wf['run_script']}")
 
         if covalent_summary is not None:
             from .analysis.covalent_matcher import compute_total_covalent_feasibility
@@ -809,6 +835,10 @@ def main(argv=None):
                         target_residue=target_res,
                         dyad_residue=best_c.get('catalytic_dyad_residue') if best_c else 'ASP199'
                     )
+                    c_qm_dict = cluster_qm_res.to_dict() if ('cluster_qm_res' in locals() and cluster_qm_res and cluster_qm_res.success) else None
+                    if c_qm_dict:
+                        covalent_summary['cluster_qm'] = c_qm_dict
+
                     covalent_summary['adduct_viewer_html'] = generate_adduct_viewer_html(
                         pdb_data=adduct_pdb,
                         target_residue=target_res,
@@ -817,6 +847,9 @@ def main(argv=None):
                         attack_distance=best_c.get('distance_angstrom') if best_c else None,
                         burgi_dunitz_angle=best_c.get('burgi_dunitz_angle') if best_c else None,
                         dyad_residue=best_c.get('catalytic_dyad_residue') if best_c else 'ASP199',
+                        homo_cube_data=cluster_qm_res.homo_cube_data if ('cluster_qm_res' in locals() and cluster_qm_res) else None,
+                        lumo_cube_data=cluster_qm_res.lumo_cube_data if ('cluster_qm_res' in locals() and cluster_qm_res) else None,
+                        cluster_qm_data=c_qm_dict,
                         adduct_qm_data=covalent_summary.get('adduct_qm'),
                         standalone=False
                     )
