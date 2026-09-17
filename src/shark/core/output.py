@@ -6,7 +6,8 @@ from pathlib import Path
 
 def create_job_directory(root: str | Path | None = None) -> Path:
     """Reserve a new job atomically; never reuse an existing analysis folder."""
-    parent = Path(root or os.environ.get('SHARK_OUTPUT_DIR') or Path.cwd()).expanduser().resolve()
+    default_root = Path.cwd() / 'shark_jobs'
+    parent = Path(root or os.environ.get('SHARK_OUTPUT_DIR') or default_root).expanduser().resolve()
     parent.mkdir(parents=True, exist_ok=True)
     base = 'shark_job_' + date.today().strftime('%m%d%y')
     number = 1

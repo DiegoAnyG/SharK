@@ -204,8 +204,15 @@ def generate_html_dossier(project_name: str, poses_data: list[dict], out_html: s
                 (_number(pose.get('delta_e_bind_kcal'), 2) + ' kcal/mol') if pose.get('delta_e_bind_kcal') is not None else 'N/A',
                 _number(pose.get('homo_ev')), _number(pose.get('lumo_ev')), _number(pose.get('gap_ev'))]
         pose_rows.append('<tr>'+''.join(f'<td>{v}</td>' for v in vals)+'</tr>')
+    docking_p_text = (
+        'Initial docking conformations selected from PoliScreen virtual screening (Pillar 1). '
+        'When trajectory sampling is performed, this pose seeds the solvated molecular dynamics simulation, from which '
+        'the representative medoid snapshot is extracted for covalent near-attack verification in Section 03.'
+        if (covalent_summary and covalent_summary.get('clustering')) else
+        'Docking scores and supplied electronic descriptors are computational estimates, not measured affinity.'
+    )
     docking = ('<section id="docking"><div class="section-heading"><span>Context</span><h2>Docking poses</h2></div>'
-               '<p>Docking scores and supplied electronic descriptors are computational estimates, not measured affinity.</p>'
+               f'<p>{docking_p_text}</p>'
                '<div class="table-wrap"><table><thead><tr><th>Ligand</th><th>Pose</th><th>Docking / kcal mol⁻¹</th>'
                '<th>Supplied binding ΔE</th><th>HOMO / eV</th><th>LUMO / eV</th><th>Gap / eV</th></tr></thead><tbody>'
                + ''.join(pose_rows) + '</tbody></table></div></section>') if pose_rows else ''

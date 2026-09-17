@@ -33,4 +33,5 @@ Thumbs.db
 /reports/
 /runs/
 /shark_job_*/
+/shark_jobs/
 .licenses/

@@ -347,32 +347,93 @@ def generate_adduct_viewer_html(
       const d = Math.sqrt(vx*vx + vy*vy + vz*vz) || 1.0;
       const ux = vx / d, uy = vy / d, uz = vz / d;
 
-      // 1. Nucleophile HOMO donor lone-pair lobe (+ phase, sky blue)
-      const sNucl = viewer.addSphere({{
-        center: {{ x: nuclCrd[0] + 0.70 * ux, y: nuclCrd[1] + 0.70 * uy, z: nuclCrd[2] + 0.70 * uz }},
-        radius: 0.55,
+      // 1. Nucleophile HOMO donor lone-pair directional lobe (+ phase, sky blue)
+      const sNuclBase = viewer.addSphere({{
+        center: {{ x: nuclCrd[0] + 0.40 * ux, y: nuclCrd[1] + 0.40 * uy, z: nuclCrd[2] + 0.40 * uz }},
+        radius: 0.46,
         color: '#38bdf8',
-        alpha: 0.55
+        alpha: 0.58
       }});
-      fmoShapes.push(sNucl);
+      fmoShapes.push(sNuclBase);
+
+      const cNucl = viewer.addCylinder({{
+        start: {{ x: nuclCrd[0] + 0.35 * ux, y: nuclCrd[1] + 0.35 * uy, z: nuclCrd[2] + 0.35 * uz }},
+        end: {{ x: nuclCrd[0] + 0.85 * ux, y: nuclCrd[1] + 0.85 * uy, z: nuclCrd[2] + 0.85 * uz }},
+        radius: 0.38,
+        color: '#38bdf8',
+        alpha: 0.52
+      }});
+      fmoShapes.push(cNucl);
+
+      const sNuclTip = viewer.addSphere({{
+        center: {{ x: nuclCrd[0] + 0.85 * ux, y: nuclCrd[1] + 0.85 * uy, z: nuclCrd[2] + 0.85 * uz }},
+        radius: 0.38,
+        color: '#38bdf8',
+        alpha: 0.58
+      }});
+      fmoShapes.push(sNuclTip);
 
       // 2. Electrophile LUMO acceptor lobe (+ phase matching, sky blue) along attack trajectory
-      const sElPlus = viewer.addSphere({{
-        center: {{ x: elCrd[0] - 0.70 * ux, y: elCrd[1] - 0.70 * uy, z: elCrd[2] - 0.70 * uz }},
-        radius: 0.60,
+      const sElBase = viewer.addSphere({{
+        center: {{ x: elCrd[0] - 0.40 * ux, y: elCrd[1] - 0.40 * uy, z: elCrd[2] - 0.40 * uz }},
+        radius: 0.48,
         color: '#38bdf8',
-        alpha: 0.55
+        alpha: 0.58
       }});
-      fmoShapes.push(sElPlus);
+      fmoShapes.push(sElBase);
+
+      const cEl = viewer.addCylinder({{
+        start: {{ x: elCrd[0] - 0.35 * ux, y: elCrd[1] - 0.35 * uy, z: elCrd[2] - 0.35 * uz }},
+        end: {{ x: elCrd[0] - 0.90 * ux, y: elCrd[1] - 0.90 * uy, z: elCrd[2] - 0.90 * uz }},
+        radius: 0.40,
+        color: '#38bdf8',
+        alpha: 0.52
+      }});
+      fmoShapes.push(cEl);
+
+      const sElTip = viewer.addSphere({{
+        center: {{ x: elCrd[0] - 0.90 * ux, y: elCrd[1] - 0.90 * uy, z: elCrd[2] - 0.90 * uz }},
+        radius: 0.40,
+        color: '#38bdf8',
+        alpha: 0.58
+      }});
+      fmoShapes.push(sElTip);
 
       // 3. Electrophile LUMO nodal lobe (- phase, red) on backside
-      const sElMinus = viewer.addSphere({{
-        center: {{ x: elCrd[0] + 0.70 * ux, y: elCrd[1] + 0.70 * uy, z: elCrd[2] + 0.70 * uz }},
-        radius: 0.55,
+      const sElNodBase = viewer.addSphere({{
+        center: {{ x: elCrd[0] + 0.40 * ux, y: elCrd[1] + 0.40 * uy, z: elCrd[2] + 0.40 * uz }},
+        radius: 0.46,
+        color: '#f87171',
+        alpha: 0.48
+      }});
+      fmoShapes.push(sElNodBase);
+
+      const cElNod = viewer.addCylinder({{
+        start: {{ x: elCrd[0] + 0.35 * ux, y: elCrd[1] + 0.35 * uy, z: elCrd[2] + 0.35 * uz }},
+        end: {{ x: elCrd[0] + 0.85 * ux, y: elCrd[1] + 0.85 * uy, z: elCrd[2] + 0.85 * uz }},
+        radius: 0.36,
         color: '#f87171',
         alpha: 0.45
       }});
-      fmoShapes.push(sElMinus);
+      fmoShapes.push(cElNod);
+
+      const sElNodTip = viewer.addSphere({{
+        center: {{ x: elCrd[0] + 0.85 * ux, y: elCrd[1] + 0.85 * uy, z: elCrd[2] + 0.85 * uz }},
+        radius: 0.36,
+        color: '#f87171',
+        alpha: 0.48
+      }});
+      fmoShapes.push(sElNodTip);
+
+      // 4. Translucent constructive overlap bridge between donor and acceptor lobes
+      const cBridge = viewer.addCylinder({{
+        start: {{ x: nuclCrd[0] + 0.85 * ux, y: nuclCrd[1] + 0.85 * uy, z: nuclCrd[2] + 0.85 * uz }},
+        end: {{ x: elCrd[0] - 0.90 * ux, y: elCrd[1] - 0.90 * uy, z: elCrd[2] - 0.90 * uz }},
+        radius: 0.22,
+        color: '#0284c7',
+        alpha: 0.30
+      }});
+      fmoShapes.push(cBridge);
 
       // Constructive phase match label
       const mX = (nuclCrd[0] + elCrd[0]) / 2;
@@ -386,6 +447,9 @@ def generate_adduct_viewer_html(
         borderColor: '#38bdf8',
         borderThickness: 1
       }});
+      if (!showLabels && lOver && lOver.sprite) {{
+        lOver.sprite.visible = false;
+      }}
       fmoLabels.push(lOver);
     }}
 
@@ -445,10 +509,15 @@ def generate_adduct_viewer_html(
     if (labelsBtn) {{
       labelsBtn.addEventListener('click', function() {{
         showLabels = !showLabels;
-        labels.forEach(l => viewer.setLabelStyle(l, {{...l.stylespec, hidden: !showLabels}}));
-        fmoLabels.forEach(l => viewer.setLabelStyle(l, {{...l.stylespec, hidden: !showLabels}}));
+        labels.forEach(l => {{
+          if (l && l.sprite) l.sprite.visible = showLabels;
+        }});
+        fmoLabels.forEach(l => {{
+          if (l && l.sprite) l.sprite.visible = showLabels;
+        }});
         viewer.render();
         labelsBtn.style.background = showLabels ? '#fff' : '#e2e8f0';
+        labelsBtn.style.color = showLabels ? '#1e293b' : '#64748b';
       }});
     }}
 
