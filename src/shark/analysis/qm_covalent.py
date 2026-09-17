@@ -29,6 +29,8 @@ class OrbitalSummary:
     is_open_shell: bool = False
     somo_energy_hartree: Optional[float] = None
     somo_energy_ev: Optional[float] = None
+    homo_idx: Optional[int] = None
+    lumo_idx: Optional[int] = None
 
 
 @dataclass
@@ -58,6 +60,8 @@ def extract_orbital_summary(orca_out_path: str | Path) -> OrbitalSummary:
     homo_eh = None
     lumo_eh = None
     somo_eh = None
+    homo_idx = None
+    lumo_idx = None
     is_uhf = "UHF" in text or "UKS" in text or "SPIN UP" in text
 
     # Search lines
@@ -83,10 +87,12 @@ def extract_orbital_summary(orca_out_path: str | Path) -> OrbitalSummary:
 
                     if occ > 0.0:
                         last_occ_eh = (eh, ev)
+                        homo_idx = idx
                         if occ < 2.0 and not occ == 1.0 and is_uhf:
                             somo_eh = (eh, ev)
                     elif occ == 0.0 and first_unocc_eh is None:
                         first_unocc_eh = (eh, ev)
+                        lumo_idx = idx
                 except ValueError:
                     if "Total" in line or "E(SCF)" in line:
                         break
@@ -102,7 +108,9 @@ def extract_orbital_summary(orca_out_path: str | Path) -> OrbitalSummary:
             gap_ev=gap,
             is_open_shell=is_uhf,
             somo_energy_hartree=somo_eh[0] if somo_eh else None,
-            somo_energy_ev=somo_eh[1] if somo_eh else None
+            somo_energy_ev=somo_eh[1] if somo_eh else None,
+            homo_idx=homo_idx,
+            lumo_idx=lumo_idx,
         )
 
     # Fallback to general parser

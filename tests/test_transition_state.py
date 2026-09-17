@@ -134,7 +134,7 @@ def test_qm_cluster_orca_input(mock_active_site):
     assert "! Opt r2SCAN-3c CPCM(Water) TightSCF" in scan_inp
     assert "Scan" in scan_inp
     assert "B " in scan_inp
-    assert "* xyz 0 1" in scan_inp
+    assert f"* xyz {cluster.charge} {cluster.effective_multiplicity}" in scan_inp
 
     # Test OptTS input
     optts_inp = cluster.to_orca_input(job_type="optts", method="r2SCAN-3c")
@@ -229,7 +229,7 @@ def test_compute_reaction_profile():
     )
     assert pytest.approx(profile.delta_g_activation_kcal, 0.1) == 21.96
     assert pytest.approx(profile.delta_g_reaction_kcal, 0.1) == -12.55
-    assert profile.kinetic_feasibility == "High Covalent Feasibility"
+    assert profile.kinetic_feasibility == "Rapid Predicted Chemical Step"
     assert "minutes" in profile.estimated_half_life_str or "seconds" in profile.estimated_half_life_str
     assert profile.is_first_order_ts is True
 

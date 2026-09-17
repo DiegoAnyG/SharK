@@ -74,6 +74,23 @@ class QMCluster:
         """0-based atom indices marked as frozen for geometric constraints."""
         return [idx for idx, a in enumerate(self.atoms) if a.is_frozen]
 
+    @property
+    def effective_multiplicity(self) -> int:
+        """Determines physically valid spin multiplicity matching electron parity."""
+        periodic_z = {
+            "H": 1, "HE": 2, "LI": 3, "BE": 4, "B": 5, "C": 6, "N": 7, "O": 8, "F": 9, "NE": 10,
+            "NA": 11, "MG": 12, "AL": 13, "SI": 14, "P": 15, "S": 16, "CL": 17, "AR": 18,
+            "K": 19, "CA": 20, "BR": 35, "I": 53
+        }
+        total_z = sum(periodic_z.get(a.element.strip().upper(), 6) for a in self.atoms)
+        n_electrons = total_z - self.charge
+        mult = self.multiplicity
+        if n_electrons % 2 != 0 and mult % 2 != 0:
+            return 2 if mult == 1 else mult + 1
+        elif n_electrons % 2 == 0 and mult % 2 == 0:
+            return 1 if mult == 2 else mult - 1
+        return mult
+
     def to_xyz(self) -> str:
         """Serializes the cluster to standard XYZ format."""
         lines = [f"{len(self.atoms)}", f"{self.name} | Model: {self.model_type} | Charge: {self.charge} Mult: {self.multiplicity}"]
@@ -162,7 +179,7 @@ class QMCluster:
             lines.extend(geom_lines)
 
         # Coordinate block
-        lines.append(f"* xyz {self.charge} {self.multiplicity}")
+        lines.append(f"* xyz {self.charge} {self.effective_multiplicity}")
         for a in self.atoms:
             lines.append(f"  {a.element:<2} {a.coords[0]:12.6f} {a.coords[1]:12.6f} {a.coords[2]:12.6f}")
         lines.append("*")
@@ -800,4 +817,243 @@ def extract_qm_cluster(
             "cutoff_radius": cutoff_radius if model_type == "extended" else None,
         }
     )
+
+
+@dataclass
+class ClusterQMResult:
+    """Consolidated ab initio quantum chemical single-point result on an active-site cluster."""
+    cluster_name: str
+    n_atoms: int
+    charge: int
+    multiplicity: int
+    method: str
+    solvent: Optional[str]
+    homo_idx: Optional[int] = None
+    lumo_idx: Optional[int] = None
+    homo_energy_ev: Optional[float] = None
+    lumo_energy_ev: Optional[float] = None
+    gap_ev: Optional[float] = None
+    energy_hartree: Optional[float] = None
+    homo_cube_data: Optional[str] = None
+    lumo_cube_data: Optional[str] = None
+    homo_cube_path: Optional[str] = None
+    lumo_cube_path: Optional[str] = None
+    execution_time_s: float = 0.0
+    success: bool = True
+    error_message: Optional[str] = None
+
+    def to_dict(self) -> dict:
+        return {
+            "cluster_name": self.cluster_name,
+            "n_atoms": self.n_atoms,
+            "charge": self.charge,
+            "multiplicity": self.multiplicity,
+            "method": self.method,
+            "solvent": self.solvent,
+            "homo_idx": self.homo_idx,
+            "lumo_idx": self.lumo_idx,
+            "homo_energy_ev": self.homo_energy_ev,
+            "lumo_energy_ev": self.lumo_energy_ev,
+            "gap_ev": self.gap_ev,
+            "energy_hartree": self.energy_hartree,
+            "has_homo_cube": bool(self.homo_cube_data),
+            "has_lumo_cube": bool(self.lumo_cube_data),
+            "execution_time_s": self.execution_time_s,
+            "success": self.success,
+            "error_message": self.error_message,
+        }
+
+
+def _find_orca_executable() -> Optional[Path]:
+    """Locates the ORCA binary adhering to SHARK_ORCA, PATH, and standard discovery rules."""
+    import os
+    import shutil
+
+    env_orca = os.environ.get("SHARK_ORCA")
+    if env_orca:
+        p = Path(env_orca).expanduser().resolve()
+        if p.is_file() and os.access(p, os.X_OK):
+            return p
+        if p.is_dir() and (p / "orca").is_file():
+            return p / "orca"
+
+    which_orca = shutil.which("orca")
+    if which_orca:
+        return Path(which_orca).resolve()
+
+    # Search local user bioinformatics directories without hardcoding personal usernames
+    bio_base = Path.home() / "bioinformatics"
+    if bio_base.is_dir():
+        for cand in bio_base.glob("orca*"):
+            if (cand / "orca").is_file() and os.access(cand / "orca", os.X_OK):
+                return cand / "orca"
+
+    local_bin = Path.home() / ".local" / "bin" / "orca"
+    if local_bin.is_file() and os.access(local_bin, os.X_OK):
+        return local_bin.resolve()
+
+    return None
+
+
+def run_cluster_single_point(
+    cluster: QMCluster,
+    work_dir: str | Path,
+    method: str = "r2SCAN-3c",
+    solvent: Optional[str] = "Water",
+    nprocs: Optional[int] = None,
+    maxcore_mb: Optional[int] = None,
+    grid: int = 40,
+    reuse_existing: bool = True,
+) -> ClusterQMResult:
+    """Executes a genuine ab initio ORCA single-point calculation on an active-site QM cluster.
+
+    Generates real Gaussian .cube volumetric files for the HOMO and LUMO using orca_plot.
+    """
+    import os
+    import subprocess
+    import time
+    from .qm_covalent import extract_orbital_summary
+    from ..core.parser import parse_orca_output
+
+    w_path = Path(work_dir).expanduser().resolve()
+    w_path.mkdir(parents=True, exist_ok=True)
+
+    np = nprocs or int(os.environ.get("SHARK_NPROCS", 8))
+    mc = maxcore_mb or int(os.environ.get("SHARK_MAXCORE", 2000))
+
+    inp_path = w_path / "cluster.inp"
+    out_path = w_path / "cluster.out"
+    gbw_path = w_path / "cluster.gbw"
+
+    orca_bin = _find_orca_executable()
+    if not orca_bin:
+        return ClusterQMResult(
+            cluster_name=cluster.name,
+            n_atoms=cluster.n_atoms,
+            charge=cluster.charge,
+            multiplicity=cluster.multiplicity,
+            method=method,
+            solvent=solvent,
+            success=False,
+            error_message="ORCA binary not found in environment or PATH.",
+        )
+
+    # Prepare environment ensuring OpenMPI mpirun finds ORCA in PATH
+    env = os.environ.copy()
+    orca_dir = str(orca_bin.parent)
+    env["PATH"] = f"{orca_dir}:{env.get('PATH', '')}"
+
+    start_t = time.time()
+
+    # Check if calculation already succeeded and we can reuse it
+    need_run = True
+    if reuse_existing and out_path.is_file() and gbw_path.is_file():
+        text = out_path.read_text(encoding="utf-8", errors="replace")
+        if "ORCA TERMINATED NORMALLY" in text:
+            need_run = False
+
+    if need_run:
+        inp_content = cluster.to_orca_input(
+            job_type="sp",
+            method=method,
+            solvent=solvent,
+            nprocs=np,
+            maxcore_mb=mc,
+        )
+        inp_path.write_text(inp_content, encoding="utf-8")
+
+        with open(out_path, "w", encoding="utf-8") as out_f:
+            p_orca = subprocess.run(
+                [str(orca_bin), "cluster.inp"],
+                cwd=w_path,
+                env=env,
+                stdout=out_f,
+                stderr=subprocess.STDOUT,
+                check=False,
+            )
+        if p_orca.returncode != 0:
+            return ClusterQMResult(
+                cluster_name=cluster.name,
+                n_atoms=cluster.n_atoms,
+                charge=cluster.charge,
+                multiplicity=cluster.multiplicity,
+                method=method,
+                solvent=solvent,
+                execution_time_s=time.time() - start_t,
+                success=False,
+                error_message=f"ORCA single-point execution failed with returncode {p_orca.returncode}.",
+            )
+
+    # Parse orbital energies and total energy
+    orb_summary = extract_orbital_summary(out_path)
+    parsed_out = parse_orca_output(out_path)
+    e_scf = parsed_out.get("energy_scf", 0.0)
+
+    homo_idx = orb_summary.homo_idx
+    lumo_idx = orb_summary.lumo_idx
+
+    # Plot orbitals with orca_plot
+    homo_cube_data = None
+    lumo_cube_data = None
+    homo_cube_path = None
+    lumo_cube_path = None
+
+    if homo_idx is not None and lumo_idx is not None and gbw_path.is_file():
+        h_cube_file = w_path / f"cluster.mo{homo_idx}a.cube"
+        l_cube_file = w_path / f"cluster.mo{lumo_idx}a.cube"
+
+        need_plot = not (reuse_existing and h_cube_file.is_file() and l_cube_file.is_file())
+        if need_plot:
+            orca_plot_bin = orca_bin.parent / ("orca_plot.exe" if os.name == "nt" else "orca_plot")
+            if not orca_plot_bin.is_file():
+                import shutil
+                wh_plot = shutil.which("orca_plot")
+                if wh_plot:
+                    orca_plot_bin = Path(wh_plot).resolve()
+
+            if orca_plot_bin.is_file():
+                plot_cmd = f"4\n{grid}\n5\n7\n2\n{homo_idx}\n3\n0\n11\n2\n{lumo_idx}\n3\n0\n11\n12\n"
+                (w_path / "plot_mo.txt").write_text(plot_cmd, encoding="utf-8")
+                with open(w_path / "plot_mo.log", "w", encoding="utf-8") as plot_log:
+                    subprocess.run(
+                        [str(orca_plot_bin), "cluster.gbw", "-i"],
+                        input=plot_cmd,
+                        text=True,
+                        cwd=w_path,
+                        env=env,
+                        stdout=plot_log,
+                        stderr=subprocess.STDOUT,
+                        check=False,
+                    )
+
+        if h_cube_file.is_file():
+            homo_cube_data = h_cube_file.read_text(encoding="utf-8", errors="replace")
+            homo_cube_path = str(h_cube_file)
+        if l_cube_file.is_file():
+            lumo_cube_data = l_cube_file.read_text(encoding="utf-8", errors="replace")
+            lumo_cube_path = str(l_cube_file)
+
+    exec_time = time.time() - start_t
+
+    return ClusterQMResult(
+        cluster_name=cluster.name,
+        n_atoms=cluster.n_atoms,
+        charge=cluster.charge,
+        multiplicity=cluster.effective_multiplicity,
+        method=method,
+        solvent=solvent,
+        homo_idx=homo_idx,
+        lumo_idx=lumo_idx,
+        homo_energy_ev=orb_summary.homo_energy_ev,
+        lumo_energy_ev=orb_summary.lumo_energy_ev,
+        gap_ev=orb_summary.gap_ev,
+        energy_hartree=e_scf,
+        homo_cube_data=homo_cube_data,
+        lumo_cube_data=lumo_cube_data,
+        homo_cube_path=homo_cube_path,
+        lumo_cube_path=lumo_cube_path,
+        execution_time_s=exec_time,
+        success=True,
+    )
+
 
