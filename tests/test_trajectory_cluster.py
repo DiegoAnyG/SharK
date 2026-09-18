@@ -151,3 +151,116 @@ def test_cli_simple_gold_standard_and_fast_analysis(tmp_path):
     assert "Top cluster population" in gold_text
     assert "THR309" in gold_text
 
+
+def test_nac_1_identical_distance_different_angle():
+    """Test NAC-1: Two frames with identical distance but different attack angle must produce different scores."""
+    from shark.analysis.trajectory_cluster import compute_frame_nac_score
+    import numpy as np
+
+    # Electrophile at origin, adjacent atom along +x
+    el = np.array([0.0, 0.0, 0.0])
+    adj = np.array([1.4, 0.0, 0.0])
+
+    # Case A: nucleophile at 107 degrees (ideal Bürgi-Dunitz), distance 3.0 A
+    theta_a = np.radians(107.0)
+    nucl_a = np.array([3.0 * np.cos(theta_a), 3.0 * np.sin(theta_a), 0.0])
+
+    # Case B: nucleophile at 160 degrees (poor angle), same distance 3.0 A
+    theta_b = np.radians(160.0)
+    nucl_b = np.array([3.0 * np.cos(theta_b), 3.0 * np.sin(theta_b), 0.0])
+
+    score_a, fd_a, fth_a, ang_a = compute_frame_nac_score(nucl_a, el, adj)
+    score_b, fd_b, fth_b, ang_b = compute_frame_nac_score(nucl_b, el, adj)
+
+    assert pytest.approx(fd_a, rel=1e-3) == fd_b  # Distances are identical
+    assert pytest.approx(ang_a, abs=0.5) == 107.0
+    assert pytest.approx(ang_b, abs=0.5) == 160.0
+    assert score_a > 0.5
+    assert score_b < 0.1
+    assert score_a > score_b * 5.0  # Favorable angle produces significantly higher score
+
+
+def test_nac_2_favorable_angle_poor_distance():
+    """Test NAC-2: Favorable angle with poor distance must remain low."""
+    from shark.analysis.trajectory_cluster import compute_frame_nac_score
+    import numpy as np
+
+    el = np.array([0.0, 0.0, 0.0])
+    adj = np.array([1.4, 0.0, 0.0])
+
+    # Favorable angle (107 deg) but very far (6.0 A)
+    theta = np.radians(107.0)
+    nucl = np.array([6.0 * np.cos(theta), 6.0 * np.sin(theta), 0.0])
+
+    score, fd, fth, ang = compute_frame_nac_score(nucl, el, adj)
+    assert fth > 0.95  # Perfect angle
+    assert fd < 0.01   # Crushed by distance
+    assert score < 0.01
+
+
+def test_nac_3_favorable_distance_poor_angle():
+    """Test NAC-3: Favorable distance with poor angle must remain low."""
+    from shark.analysis.trajectory_cluster import compute_frame_nac_score
+    import numpy as np
+
+    el = np.array([0.0, 0.0, 0.0])
+    adj = np.array([1.4, 0.0, 0.0])
+
+    # Close contact (2.5 A) but nearly collinear with back-side (30 deg)
+    theta = np.radians(30.0)
+    nucl = np.array([2.5 * np.cos(theta), 2.5 * np.sin(theta), 0.0])
+
+    score, fd, fth, ang = compute_frame_nac_score(nucl, el, adj)
+    assert fd > 0.85   # Good distance
+    assert fth < 1e-4  # Crushed by angular penalty
+    assert score < 1e-4
+
+
+def test_nac_5_missing_angle_returns_none():
+    """Test NAC-5: If angle data are unavailable, p_nac is None."""
+    from shark.analysis.trajectory_cluster import compute_frame_nac_score
+    import numpy as np
+
+    nucl = np.array([0.0, 2.5, 0.0])
+    el = np.array([0.0, 0.0, 0.0])
+
+    score, fd, fth, ang = compute_frame_nac_score(nucl, el, adj_coord=None)
+    assert score is None
+    assert fth is None
+    assert ang is None
+    assert fd > 0.8
+
+
+def test_rigid_body_superposition_synthetic():
+    """Priority 13: Synthetic test for centered Kabsch alignment recovering known rotation/translation."""
+    from shark.analysis.trajectory_cluster import rigid_body_superposition, apply_rigid_body_transformation
+    import numpy as np
+
+    # Reference coordinates: 4 non-coplanar points
+    ref_coords = np.array([
+        [1.0, 2.0, 3.0],
+        [4.0, 1.0, 2.0],
+        [2.0, 5.0, 1.0],
+        [3.0, 2.0, 6.0],
+    ])
+
+    # Apply known 3D rotation (around z-axis by 45 deg) and arbitrary translation
+    theta = np.radians(45.0)
+    rot_z = np.array([
+        [np.cos(theta), -np.sin(theta), 0.0],
+        [np.sin(theta),  np.cos(theta), 0.0],
+        [0.0,            0.0,           1.0],
+    ])
+    translation = np.array([12.5, -8.3, 44.1])
+
+    # mobile = ref @ rot_z.T + translation
+    mobile_coords = np.dot(ref_coords, rot_z.T) + translation
+
+    # Compute optimal superposition of mobile onto ref
+    R, mobile_center, ref_center = rigid_body_superposition(mobile_coords, ref_coords)
+    aligned = apply_rigid_body_transformation(mobile_coords, mobile_center, R, ref_center)
+
+    rmsd = np.sqrt(np.mean((aligned - ref_coords) ** 2))
+    assert rmsd < 1e-6, f"Superposition failed to recover reference structure: RMSD = {rmsd}"
+
+
