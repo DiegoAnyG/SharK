@@ -105,3 +105,29 @@ def test_run_md_from_session_selects_raw_receptor(mock_pipeline_dir, mock_sessio
     assert (mock_pipeline_dir / "inputs" / "run_LIG1_2ns_receptor.pdb").is_file()
     assert (mock_pipeline_dir / "config" / "config.env").is_file()
 
+
+def test_run_md_from_session_with_reference_ligand(mock_pipeline_dir, tmp_path):
+    archive = tmp_path / "screening_with_ref.poliscreen"
+    with zipfile.ZipFile(archive, "w") as z:
+        z.writestr("manifest.json", json.dumps({"format": 1, "full": True}))
+        z.writestr("receptors/8HTB.pdb", "HEADER    RAW RECEPTOR PDB FOR MD\nATOM      1  N   MET A   1      10.0  10.0  10.0  1.00 20.00           N\nEND\n")
+        z.writestr("poses/docking_8HTB_compounds_a_BENZO-model1.pdb", "ATOM      1  C1  BEN A   1      12.0  12.0  12.0  1.00 20.00           C\nEND\n")
+        z.writestr("input_ligands/BENZO.mol2", "@<TRIPOS>MOLECULE\nBENZO\n1 0 0 0 0\nSMALL\nNO_CHARGES\n@<TRIPOS>ATOM\n1 C1 0.0 0.0 0.0 C.3 1 BEN 0.0\n")
+        z.writestr("docking_results.csv", "receptor,pose_name,compound_name,docking_score,engine\n8HTB,docking_8HTB_compounds_a_BENZO-model1,BENZO,-8.5,vina\n")
+
+    session = read_poliscreen_session(archive, tmp_path / "session_with_ref_unpacked")
+    result = run_md_from_session(
+        session=session,
+        ligand_id="BENZO",
+        pose_idx=1,
+        sim_time_ns=5.0,
+        pipeline_dir=mock_pipeline_dir,
+        run_now=False
+    )
+
+    assert result.status == "prepared"
+    assert (result.run_dir / "00_prep" / "BENZO_ref.mol2").is_file()
+    assert (mock_pipeline_dir / "inputs" / "run_BENZO_5ns_ref.mol2").is_file()
+    cfg_text = (result.run_dir / "config.env").read_text()
+    assert 'POLISCREEN_LIGAND_SDF="inputs/run_BENZO_5ns_ref.mol2"' in cfg_text
+

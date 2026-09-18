@@ -251,10 +251,12 @@ def generate_html_dossier(project_name: str, poses_data: list[dict], out_html: s
         dom = tautomers_data[0]
         card1_main = dom['label']
         if len(tautomers_data) > 1:
+            boltz_pct = dom.get('boltzmann_pct')
+            boltz_str = f"{float(boltz_pct):.1f}%" if boltz_pct is not None else "N/A"
             if has_gibbs_energies:
-                card1_sub = f"{dom.get('boltzmann_pct', 78.2):.1f}% Boltzmann population (ΔG = 0.00 kcal/mol)"
+                card1_sub = f"{boltz_str} Boltzmann population (ΔG = 0.00 kcal/mol)"
             else:
-                card1_sub = f"{dom.get('boltzmann_pct', 78.2):.1f}% electronic population proxy (ΔE = 0.00 kcal/mol)"
+                card1_sub = f"{boltz_str} electronic population proxy (ΔE = 0.00 kcal/mol)"
         else:
             card1_sub = "Single supplied state; global minimum not established"
 
@@ -321,11 +323,18 @@ def generate_html_dossier(project_name: str, poses_data: list[dict], out_html: s
         cluster_info = covalent_summary.get('clustering', {})
         cluster_block = ''
         if cluster_info:
+            top_frac = cluster_info.get('top_cluster_fraction')
+            top_frac_str = f" ({float(top_frac)*100:.1f}%)" if top_frac is not None else ""
+            med_time = cluster_info.get('medoid_time_ns')
+            med_time_str = f"{float(med_time):.2f} ns" if med_time is not None else "N/A"
+            p_nac_c = cluster_info.get('p_nac')
+            p_nac_str = f"{float(p_nac_c)*100:.1f}%" if p_nac_c is not None else "N/A"
+
             c_items = [
                 ('Sampling frames', f"{cluster_info.get('total_sampled_frames', 'N/A')} frames"),
-                ('Top cluster population', f"{cluster_info.get('top_cluster_size', 'N/A')} frames ({cluster_info.get('top_cluster_fraction', 0)*100:.1f}%)"),
-                ('Medoid snapshot time', f"{cluster_info.get('medoid_time_ns', 0):.2f} ns (Frame #{cluster_info.get('medoid_frame_index', 'N/A')})"),
-                ('Legacy distance-contact fraction', f"{cluster_info.get('p_nac', 0)*100:.1f}%"),
+                ('Top cluster population', f"{cluster_info.get('top_cluster_size', 'N/A')} frames{top_frac_str}"),
+                ('Medoid snapshot time', f"{med_time_str} (Frame #{cluster_info.get('medoid_frame_index', 'N/A')})"),
+                ('Legacy distance-contact fraction', p_nac_str),
             ]
             cluster_block = (
                 '<div class="insight" style="margin: 16px 0;">'
@@ -339,9 +348,14 @@ def generate_html_dossier(project_name: str, poses_data: list[dict], out_html: s
         ts_info = covalent_summary.get('transition_state', {})
         ts_block = ''
         if ts_info:
+            dg_act = ts_info.get('delta_g_activation_kcal')
+            dg_act_str = f"{float(dg_act):.2f} kcal/mol" if dg_act is not None else "N/A"
+            dg_rxn = ts_info.get('delta_g_reaction_kcal')
+            dg_rxn_str = f"{float(dg_rxn):.2f} kcal/mol" if dg_rxn is not None else "N/A"
+
             ts_items = [
-                ('Activation barrier (ΔG‡)', f"{ts_info.get('delta_g_activation_kcal', 0):.2f} kcal/mol"),
-                ('Reaction energy (ΔG_rxn)', (f"{ts_info.get('delta_g_reaction_kcal'):.2f} kcal/mol" if ts_info.get('delta_g_reaction_kcal') is not None else 'N/A')),
+                ('Activation barrier (ΔG‡)', dg_act_str),
+                ('Reaction energy (ΔG_rxn)', dg_rxn_str),
                 ('Kinetic feasibility', str(ts_info.get('kinetic_feasibility', 'N/A'))),
                 ('Estimated half-life (t1/2)', str(ts_info.get('half_life', 'N/A'))),
                 ('Active site model', f"{str(ts_info.get('model_type', 'minimal')).capitalize()} Model"),
@@ -686,11 +700,11 @@ def generate_html_dossier(project_name: str, poses_data: list[dict], out_html: s
     card3_sub = "Docking pose (no MD trajectory)"
     cluster_info = (covalent_summary.get('clustering') or {}) if covalent_summary else {}
     if cluster_info and cluster_info.get('p_nac') is not None:
-        p_nac = cluster_info.get('p_nac', 0.0)
+        p_nac = float(cluster_info.get('p_nac', 0.0))
         card3_title = 'Trajectory Sampling (P_NAC) <span class="help-bubble" tabindex="0" data-tooltip="Percentage of solvated MD frames maintaining near-attack conformation (d <= 3.5 Å, theta_BD in 90-135 deg).">?</span>'
         card3_main = f"{p_nac * 100:.1f}%"
-        medoid_ns = cluster_info.get('medoid_time_ns', 0.0)
-        top_frac = cluster_info.get('top_cluster_fraction', 0.0) * 100
+        medoid_ns = float(cluster_info.get('medoid_time_ns') or 0.0)
+        top_frac = float(cluster_info.get('top_cluster_fraction') or 0.0) * 100
         card3_sub = f"Medoid at {medoid_ns:.2f} ns ({top_frac:.0f}% top cluster)"
     elif md_summary:
         card3_title = 'Trajectory Contacts <span class="help-bubble" tabindex="0" data-tooltip="Sampled frames in classical MD.">?</span>'

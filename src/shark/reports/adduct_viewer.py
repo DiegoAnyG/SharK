@@ -79,6 +79,16 @@ def build_adduct_pdb(
     return "\n".join(lines) + "\n"
 
 
+def _safe_float(val: Any, default: Optional[float] = None) -> Optional[float]:
+    if val is None:
+        return default
+    try:
+        f = float(val)
+        return f if math.isfinite(f) else default
+    except (TypeError, ValueError):
+        return default
+
+
 def generate_adduct_viewer_html(
     pdb_data: str,
     target_residue: str = "",
@@ -141,9 +151,11 @@ def generate_adduct_viewer_html(
         if dyad_m:
             dyad_resi = int(dyad_m.group(1))
 
-    dist_str = f"{attack_distance:.2f} Å" if attack_distance is not None else "N/A"
-    angle_str = f"{burgi_dunitz_angle:.1f}°" if burgi_dunitz_angle is not None else "N/A"
-    angle_suffix = f" (θ={angle_str})" if burgi_dunitz_angle is not None else ""
+    att_dist_f = _safe_float(attack_distance)
+    bd_ang_f = _safe_float(burgi_dunitz_angle)
+    dist_str = f"{att_dist_f:.2f} Å" if att_dist_f is not None else "N/A"
+    angle_str = f"{bd_ang_f:.1f}°" if bd_ang_f is not None else "N/A"
+    angle_suffix = f" (θ={angle_str})" if bd_ang_f is not None else ""
     full_dist_label = f"d = {dist_str}{angle_suffix}"
     full_dist_json = json.dumps(full_dist_label)
     dyad_display = html.escape(dyad_residue) if dyad_residue else "Not identified"
@@ -167,14 +179,14 @@ def generate_adduct_viewer_html(
 
     cqm = cluster_qm_data or {}
     has_cluster = bool(cqm.get("success", False) or cqm.get("homo_idx") is not None)
-    homo_mo_idx = cqm.get("homo_idx", 78)
-    lumo_mo_idx = cqm.get("lumo_idx", 79)
-    homo_ev_val = cqm.get("homo_energy_ev", -3.08)
-    lumo_ev_val = cqm.get("lumo_energy_ev", -2.34)
-    gap_ev_val = cqm.get("gap_ev", 0.74)
-    cluster_n_atoms = cqm.get("n_atoms", 43)
-    cluster_method = cqm.get("method", "r2SCAN-3c")
-    cluster_solv = cqm.get("solvent", "Water")
+    homo_mo_idx = cqm.get("homo_idx") or 78
+    lumo_mo_idx = cqm.get("lumo_idx") or 79
+    homo_ev_val = _safe_float(cqm.get("homo_energy_ev"), -3.08)
+    lumo_ev_val = _safe_float(cqm.get("lumo_energy_ev"), -2.34)
+    gap_ev_val = _safe_float(cqm.get("gap_ev"), 0.74)
+    cluster_n_atoms = cqm.get("n_atoms") or 43
+    cluster_method = cqm.get("method") or "r2SCAN-3c"
+    cluster_solv = cqm.get("solvent") or "Water"
 
     badges = []
     if has_cluster and (effective_lumo_cube or effective_homo_cube):
@@ -188,8 +200,13 @@ def generate_adduct_viewer_html(
         badges.append('<span style="display:inline-flex;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:600;background:#fef3c7;color:#92400e;border:1px solid #fde68a;">Pre-reactive NAC Geometry (QM CUBE Pending)</span>')
 
     if has_qm:
-        bo_txt = f"Wiberg BO: {bond.get('wiberg_bond_order', 0.96):.2f}"
-        badges.append(f'<span style="display:inline-flex;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:600;background:#f1f5f9;color:#334155;border:1px solid #cbd5e1;">{bo_txt}</span>')
+        wbo = _safe_float(bond.get('wiberg_bond_order'))
+        if wbo is not None:
+            bo_txt = f"Wiberg BO: {wbo:.2f}"
+            badges.append(f'<span style="display:inline-flex;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:600;background:#f1f5f9;color:#334155;border:1px solid #cbd5e1;">{bo_txt}</span>')
+        elif bond.get('bond_type'):
+            btype = html.escape(str(bond.get('bond_type')))
+            badges.append(f'<span style="display:inline-flex;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:600;background:#f1f5f9;color:#334155;border:1px solid #cbd5e1;">{btype}</span>')
 
     badge_html = " ".join(badges)
 
@@ -206,11 +223,37 @@ def generate_adduct_viewer_html(
         desc_parts.append("Frontier orbital overlap unavailable: no quantum field (.cube) for this active site pocket geometry was supplied. Displaying verified Pre-reactive Near-Attack Conformation (NAC).")
 
     if has_qm:
+        sym_type = fmo.get('symmetry_type') or 'σ-type'
+        s_eff = _safe_float(fmo.get('overlap_integral_estimate'))
+        s_eff_str = f", S_eff = {s_eff:.4f}" if s_eff is not None else ""
+        gap_fmo = _safe_float(fmo.get('fmo_energy_gap_ev'))
+        gap_fmo_str = f", Δϵ = {gap_fmo:.2f} eV" if gap_fmo is not None else ""
+
+        dlumo = _safe_float(pol.get('delta_lumo_ev'))
+        dlumo_str = f"{dlumo:+.2f} eV" if dlumo is not None else "N/A"
+        domega = _safe_float(pol.get('delta_electrophilicity_ev'))
+        domega_str = f"{domega:+.2f} eV" if domega is not None else "N/A"
+        epol = _safe_float(pol.get('stabilization_kcal_mol'))
+        epol_str = f" (E_pol = {epol:.1f} kcal/mol)" if epol is not None else ""
+
+        target_idx = reg.get('target_atom_index', 0)
+        target_sym = reg.get('target_atom_symbol', 'C')
+        target_rnk = reg.get('target_rank', 1)
+        sites = reg.get('sites') or []
+        fukui_val = _safe_float(sites[0].get('fukui_electrophilic')) if sites else None
+        fukui_str = f" (f_k^+ = {fukui_val:.3f})" if fukui_val is not None else ""
+
+        wbo = _safe_float(bond.get('wiberg_bond_order'))
+        wbo_str = f"Wiberg BO = {wbo:.2f}" if wbo is not None else "Wiberg BO = N/A"
+        dq = _safe_float(bond.get('charge_transfer_e'))
+        dq_str = f"Δq = {dq:.2f} e" if dq is not None else "Δq = N/A"
+        b_type = bond.get('bond_type') or 'Polar covalent σ-bond'
+
         desc_parts.append(
-            f"Local FMO Phase Symmetry: Constructive Allowed ({fmo.get('symmetry_type', 'σ-type')}, S_eff = {fmo.get('overlap_integral_estimate', 0.0418):.4f}, Δϵ = {fmo.get('fmo_energy_gap_ev', 3.51):.2f} eV). "
-            f"Active Pocket Polarization: Δϵ_LUMO = {pol.get('delta_lumo_ev', -0.22):+.2f} eV, Δω = {pol.get('delta_electrophilicity_ev', 0.31):+.2f} eV (E_pol = {pol.get('stabilization_kcal_mol', -5.07):.1f} kcal/mol). "
-            f"Regiospecificity: Atom #{reg.get('target_atom_index', 0)} ({reg.get('target_atom_symbol', 'C')}) rank {reg.get('target_rank', 1)} primary locus (f_k^+ = {reg.get('sites', [{}])[0].get('fukui_electrophilic', 0.231):.3f}). "
-            f"Adduct Bond: Wiberg BO = {bond.get('wiberg_bond_order', 0.96):.2f} (Δq = {bond.get('charge_transfer_e', -0.29):.2f} e, {bond.get('bond_type', 'Polar covalent σ-bond')})."
+            f"Local FMO Phase Symmetry: Constructive Allowed ({sym_type}{s_eff_str}{gap_fmo_str}). "
+            f"Active Pocket Polarization: Δϵ_LUMO = {dlumo_str}, Δω = {domega_str}{epol_str}. "
+            f"Regiospecificity: Atom #{target_idx} ({target_sym}) rank {target_rnk} primary locus{fukui_str}. "
+            f"Adduct Bond: {wbo_str} ({dq_str}, {b_type})."
         )
 
     field_desc = " ".join(desc_parts)

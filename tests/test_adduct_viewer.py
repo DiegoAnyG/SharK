@@ -120,3 +120,53 @@ def test_generate_adduct_viewer_with_orca_cluster_cubes():
     assert "createLabels()" in html
 
 
+def test_generate_adduct_viewer_with_none_values():
+    pdb_snippet = "ATOM      1  OG1 THR A 309      10.000  10.000  10.000  1.00 20.00           O\nEND\n"
+    cluster_qm_none = {
+        "cluster_name": "QM_Cluster_None",
+        "homo_idx": None,
+        "lumo_idx": None,
+        "homo_energy_ev": None,
+        "lumo_energy_ev": None,
+        "gap_ev": None,
+        "success": False,
+    }
+    adduct_qm_none = {
+        "fmo_symmetry": {
+            "symmetry_type": "sigma-type",
+            "overlap_integral_estimate": None,
+            "fmo_energy_gap_ev": None,
+        },
+        "polarization": {
+            "delta_lumo_ev": None,
+            "delta_electrophilicity_ev": None,
+            "stabilization_kcal_mol": None,
+        },
+        "regiospecificity": {
+            "target_atom_index": 0,
+            "target_atom_symbol": "C",
+            "target_rank": 1,
+            "sites": [{"fukui_electrophilic": None}],
+        },
+        "bond_nature": {
+            "wiberg_bond_order": None,
+            "charge_transfer_e": None,
+            "bond_type": "Pre-reactive Contact (Unreacted)",
+        },
+    }
+
+    html = generate_adduct_viewer_html(
+        pdb_data=pdb_snippet,
+        target_residue="THR309",
+        attack_distance=None,
+        burgi_dunitz_angle=None,
+        dyad_residue=None,
+        cluster_qm_data=cluster_qm_none,
+        adduct_qm_data=adduct_qm_none,
+        standalone=False
+    )
+    assert "adduct-viewer-container" in html
+    assert "Pre-reactive Contact (Unreacted)" in html
+    assert "Wiberg BO = N/A" in html
+
+
