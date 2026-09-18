@@ -99,3 +99,9 @@ def test_run_md_from_session_selects_raw_receptor(mock_pipeline_dir, mock_sessio
     assert "RAW RECEPTOR PDB FOR MD" in content
     assert "DOCKING READY PDB" not in content
 
+    cfg_text = (result.run_dir / "config.env").read_text()
+    assert 'PROTEIN_FF="amber99sb-ildn"' in cfg_text
+    assert 'WATER_MODEL="spce"' in cfg_text
+    assert (mock_pipeline_dir / "inputs" / "run_LIG1_2ns_receptor.pdb").is_file()
+    assert (mock_pipeline_dir / "config" / "config.env").is_file()
+

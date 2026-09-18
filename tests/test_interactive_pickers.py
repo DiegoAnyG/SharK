@@ -136,3 +136,4 @@ def test_cli_pose_argument_filtering(tmp_path):
     assert out_html.is_file()
     html_text = out_html.read_text(encoding="utf-8")
     assert "LIG1" in html_text
+

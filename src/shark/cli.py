@@ -66,17 +66,35 @@ def interactive_receptor_picker(session) -> Optional[str]:
         c_count = len(set(p.ligand_id for p in session.poses if p.receptor_id == rec))
         p_count = sum(1 for p in session.poses if p.receptor_id == rec)
         count_str = f"({c_count} compounds, {p_count} poses)" if p_count > 0 else ""
-        print(f"  [{idx:2d}] {rec:<24} {count_str}")
+        try:
+            raw_rec = session.receptor_for(rec, raw=True)
+            raw_label = f"[Raw crystal: {raw_rec.name}]"
+        except Exception:
+            raw_label = "[Raw crystal: auto]"
+        print(f"  [{idx:2d}] {rec:<22} {raw_label:<25} {count_str}")
 
     choice = input(f"Select receptor [1-{len(receptors)}, default: 1] > ").strip()
     if not choice:
-        return receptors[0]
-    if choice.isdigit() and 1 <= int(choice) <= len(receptors):
-        return receptors[int(choice) - 1]
-    for rec in receptors:
-        if rec.casefold() == choice.casefold():
-            return rec
-    return receptors[0]
+        picked = receptors[0]
+    elif choice.isdigit() and 1 <= int(choice) <= len(receptors):
+        picked = receptors[int(choice) - 1]
+    else:
+        matched = False
+        for rec in receptors:
+            if rec.casefold() == choice.casefold():
+                picked = rec
+                matched = True
+                break
+        if not matched:
+            picked = receptors[0]
+
+    try:
+        raw_rec = session.receptor_for(picked, raw=True)
+        print(f"\n[Receptor Selected] Docking Target: '{picked}' -> RAW Crystal Structure: '{raw_rec.name}'")
+        print(f"                    (GROMACS MD pdb2gmx will build topology strictly from {raw_rec.name})")
+    except Exception:
+        pass
+    return picked
 
 
 def interactive_compound_picker(session, receptor_id: Optional[str] = None) -> Optional[str]:
@@ -688,11 +706,15 @@ def main(argv=None):
             selected_poses = _get_selected_poses()
 
             for pose in selected_poses:
+                raw_rec = session.receptor_for(pose.receptor_id, raw=True)
                 print(f"[MD] Preparing simulation for {pose.ligand_id} (pose #{pose.pose_idx}) against {pose.receptor_id}...")
+                print(f"[MD] Sourcing RAW crystal structure: {raw_rec.name} (bypassing {pose.receptor_id}.pdb)")
+                print(f"[MD] Force fields: AMBER99SB-ILDN (protein) + GAFF2/AM1-BCC (ligand) + SPC/E (0.15 M NaCl)")
                 res = run_md_from_session(
                     session=session,
                     ligand_id=pose.ligand_id,
                     pose_idx=pose.pose_idx,
+                    receptor_id=pose.receptor_id,
                     sim_time_ns=args.time_ns,
                     run_now=args.execute,
                     pipeline_dir=args.pipeline_dir,
