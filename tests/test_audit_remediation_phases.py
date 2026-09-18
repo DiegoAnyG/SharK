@@ -332,3 +332,44 @@ class TestPriority15MDSDFSemantics:
         text = cfg_file.read_text()
         assert 'POLISCREEN_LIGAND_SDF="inputs/run_LIG1_1ns_ref.sdf"' in text
 
+
+class TestManifestWritingScalarAndEvidenceValues:
+    """Verify write_analysis_manifest safely handles scalar floats, EvidenceValue, and dicts."""
+
+    def test_write_manifest_with_scalar_float(self, tmp_path):
+        from shark.core.analysis_result import SharKAnalysisResult
+
+        result = SharKAnalysisResult(
+            analysis_id="test_scalar",
+            binding={"s_bind": -7.4},
+            dynamics={"p_nac": 0.001},
+        )
+        manifest_path = tmp_path / "analysis_manifest.json"
+        result.write_analysis_manifest(manifest_path)
+
+        assert manifest_path.is_file()
+        import json
+        data = json.loads(manifest_path.read_text())
+        assert data["stages"]["binding"]["status"] == "completed"
+        assert data["stages"]["dynamics"]["status"] == "completed"
+        assert data["stages"]["dynamics"]["reason"] is None
+
+    def test_write_manifest_with_evidence_value(self, tmp_path):
+        from shark.core.analysis_result import SharKAnalysisResult, EvidenceValue
+
+        result = SharKAnalysisResult(
+            analysis_id="test_ev",
+            binding={"s_bind": EvidenceValue("s_bind", -8.2)},
+            dynamics={"p_nac": EvidenceValue("p_nac", None, reason="No trajectory provided")},
+        )
+        manifest_path = tmp_path / "analysis_manifest.json"
+        result.write_analysis_manifest(manifest_path)
+
+        assert manifest_path.is_file()
+        import json
+        data = json.loads(manifest_path.read_text())
+        assert data["stages"]["binding"]["status"] == "completed"
+        assert data["stages"]["dynamics"]["status"] == "not_evaluated"
+        assert data["stages"]["dynamics"]["reason"] == "No trajectory provided"
+
+

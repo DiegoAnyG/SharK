@@ -263,42 +263,54 @@ GPU_FLAGS="-nb gpu -pme gpu -bonded gpu -update gpu"
                                 sys.stdout.flush()
                                 last_progress_rendered = False
                             print(f"[SharK-MD] -> {phase_label}")
+                            matched = False
                             for label, aliases, steps in phase_specs:
                                 if any(a in phase_label.lower() for a in aliases):
                                     current_phase = label
                                     current_total_steps = steps
+                                    matched = True
                                     break
+                            if not matched:
+                                current_phase = phase_label
+                                current_total_steps = 0
+                            continue
+
+                        # Analysis step announcements
+                        if line.startswith(">>>"):
+                            if last_progress_rendered:
+                                sys.stdout.write("\n")
+                                sys.stdout.flush()
+                                last_progress_rendered = False
+                            print(f"[SharK-MD] {line}")
                             continue
 
                         # GROMACS MD progress parsing
-                        step_m = step_pattern.search(line)
-                        if step_m:
-                            try:
-                                cur_step = int(step_m.group(1))
-                                if current_total_steps > 0:
+                        if current_total_steps > 0:
+                            step_m = step_pattern.search(line)
+                            if step_m:
+                                try:
+                                    cur_step = int(step_m.group(1))
                                     pct = min(100.0, (cur_step / current_total_steps) * 100.0)
-                                else:
-                                    pct = 0.0
 
-                                bar_len = 24
-                                filled = int(round(bar_len * pct / 100.0))
-                                bar_str = "=" * max(0, filled - 1) + (">" if filled > 0 else "")
-                                bar_str = bar_str.ljust(bar_len, " ")
+                                    bar_len = 24
+                                    filled = int(round(bar_len * pct / 100.0))
+                                    bar_str = "=" * max(0, filled - 1) + (">" if filled > 0 else "")
+                                    bar_str = bar_str.ljust(bar_len, " ")
 
-                                rem_m = rem_pattern.search(line)
-                                fin_m = finish_pattern.search(line)
-                                rem_info = ""
-                                if rem_m:
-                                    rem_info = f" | ETA: {rem_m.group(1).strip()}"
-                                elif fin_m:
-                                    rem_info = f" | Ends: {fin_m.group(1).strip()}"
+                                    rem_m = rem_pattern.search(line)
+                                    fin_m = finish_pattern.search(line)
+                                    rem_info = ""
+                                    if rem_m:
+                                        rem_info = f" | ETA: {rem_m.group(1).strip()}"
+                                    elif fin_m:
+                                        rem_info = f" | Ends: {fin_m.group(1).strip()}"
 
-                                prog_line = f"\r[SharK-MD] {current_phase} [{bar_str}] {pct:5.1f}% | Step {cur_step}/{current_total_steps}{rem_info}"
-                                sys.stdout.write(prog_line)
-                                sys.stdout.flush()
-                                last_progress_rendered = True
-                            except Exception:
-                                pass
+                                    prog_line = f"\r[SharK-MD] {current_phase} [{bar_str}] {pct:5.1f}% | Step {cur_step}/{current_total_steps}{rem_info}"
+                                    sys.stdout.write(prog_line)
+                                    sys.stdout.flush()
+                                    last_progress_rendered = True
+                                except Exception:
+                                    pass
 
                     proc.wait()
                     if last_progress_rendered:

@@ -152,29 +152,47 @@ class SharKAnalysisResult:
         """Writes analysis_manifest.json containing stage execution states."""
         p = Path(filepath).resolve()
         p.parent.mkdir(parents=True, exist_ok=True)
+
+        def _extract_val_and_reason(item: Any) -> Tuple[Any, Optional[str]]:
+            if isinstance(item, dict):
+                return item.get("value"), item.get("reason")
+            if isinstance(item, EvidenceValue):
+                return item.value, item.reason
+            return item, None
+
+        p_nac_raw = self.dynamics.get("p_nac") if isinstance(self.dynamics, dict) else None
+        p_nac_val, p_nac_reason = _extract_val_and_reason(p_nac_raw)
+
+        s_bind_raw = self.binding.get("s_bind") if isinstance(self.binding, dict) else None
+        s_bind_val, _ = _extract_val_and_reason(s_bind_raw)
+
+        cqm_status = self.cluster_qm.get("status", "not_evaluated") if isinstance(self.cluster_qm, dict) else "not_evaluated"
+        ts_status = self.transition_state.get("status", "not_evaluated") if isinstance(self.transition_state, dict) else "not_evaluated"
+        adduct_status = self.adduct.get("status", "not_evaluated") if isinstance(self.adduct, dict) else "not_evaluated"
+
         manifest_data = {
             "schema_version": "1.0",
             "analysis_id": self.analysis_id,
             "workflow": self.workflow,
             "stages": {
                 "binding": {
-                    "status": "completed" if self.binding.get("s_bind") else "not_evaluated"
+                    "status": "completed" if s_bind_val is not None else "not_evaluated"
                 },
                 "static_geometry": {
                     "status": "completed" if self.static_reactive_geometry else "not_evaluated"
                 },
                 "dynamics": {
-                    "status": "completed" if self.dynamics.get("p_nac", {}).get("value") is not None else "not_evaluated",
-                    "reason": self.dynamics.get("p_nac", {}).get("reason")
+                    "status": "completed" if p_nac_val is not None else "not_evaluated",
+                    "reason": p_nac_reason
                 },
                 "cluster_qm": {
-                    "status": self.cluster_qm.get("status", "not_evaluated")
+                    "status": cqm_status
                 },
                 "transition_state": {
-                    "status": self.transition_state.get("status", "not_evaluated")
+                    "status": ts_status
                 },
                 "adduct": {
-                    "status": self.adduct.get("status", "not_evaluated")
+                    "status": adduct_status
                 }
             },
             "completeness": self.completeness,
