@@ -838,7 +838,7 @@ def compute_total_covalent_feasibility(
             k_chem = prefac * math.exp(exp_arg) if exp_arg > -700 else 0.0
 
         # INV-003: CFI_final requires all 3 pillars (S_bind, P_NAC, S_chem).
-        if s_bind is not None and s_nac is not None:
+        if s_bind is not None and s_nac is not None and s_chem is not None:
             v_bind = max(s_bind, EPS)
             v_nac = max(s_nac, EPS)
             v_chem = max(s_chem, EPS)
@@ -852,13 +852,21 @@ def compute_total_covalent_feasibility(
             else:
                 tier = "Low Covalent Feasibility"
         else:
-            status = "Incomplete evaluation (missing dynamic preorganization)"
+            cfi_final = None
             tier = "Incomplete Data"
-            warnings.append("CFI_final requires dynamic preorganization P_NAC in addition to transition-state barrier.")
+            missing_pillars = []
+            if s_bind is None:
+                missing_pillars.append("reversible binding score S_bind")
+            if s_nac is None:
+                missing_pillars.append("dynamic preorganization P_NAC")
+            if s_chem is None:
+                missing_pillars.append("chemical accessibility S_chem")
+            status = f"Incomplete evaluation (missing {', '.join(missing_pillars)})"
+            warnings.append(f"CFI_final cannot be computed: missing {', '.join(missing_pillars)}.")
     else:
-        status = "Pending transition-state calculation"
-        warnings.append("Transition-state activation barrier DeltaG‡ not evaluated; chemical step pending.")
         if cfi_pre is not None:
+            status = "Pending transition-state calculation"
+            warnings.append("Transition-state activation barrier DeltaG‡ not evaluated; chemical step pending.")
             if cfi_pre >= 0.70:
                 tier = "Pre-reactive Favorable"
             elif cfi_pre >= 0.40:
@@ -867,6 +875,13 @@ def compute_total_covalent_feasibility(
                 tier = "Pre-reactive Unfavorable"
         else:
             tier = "Incomplete Data"
+            missing_pre = []
+            if s_bind is None:
+                missing_pre.append("reversible binding score")
+            if s_nac is None:
+                missing_pre.append("dynamic preorganization")
+            status = f"Incomplete evaluation (missing {', '.join(missing_pre) if missing_pre else 'required pillars'})"
+            warnings.append("Transition-state activation barrier DeltaG‡ not evaluated; chemical step pending.")
 
     completeness = {
         "binding": s_bind is not None,

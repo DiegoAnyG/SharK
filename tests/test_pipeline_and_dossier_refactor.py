@@ -267,11 +267,22 @@ def test_013_reject_mixed_energy_basis():
     assert sel["is_valid"] is False
     assert sel["barrier_symbol"] is None
 
-    # Reaction profile calculation must reject mixed bases without producing false ΔG‡
+    # Reaction profile calculation returns safe profile with delta_g_activation_kcal=None and warnings (Test TS-1)
+    prof = compute_reaction_profile(
+        reactants_electronic=-500.10,
+        ts_gibbs=-500.05,
+    )
+    assert prof.delta_g_activation_kcal is None
+    assert prof.rate_constant_s is None
+    assert "Not available" in prof.estimated_half_life_str
+    assert any("mixed" in w.lower() or "inv-006" in w.lower() for w in prof.warnings)
+
+    # With raise_on_inconsistent=True, it raises ValueError
     with pytest.raises(ValueError) as excinfo:
         compute_reaction_profile(
             reactants_electronic=-500.10,
             ts_gibbs=-500.05,
+            raise_on_inconsistent=True,
         )
     assert "INV-006" in str(excinfo.value) or "Inconsistent energy basis" in str(excinfo.value)
 
@@ -289,6 +300,8 @@ def test_014_consistent_electronic_route_reports_delta_e():
     assert prof.reaction_energy_symbol == "ΔE_rxn"
     assert prof.delta_e_activation_kcal == pytest.approx(31.38, 0.5)
     assert prof.delta_g_activation_kcal is None
+    assert prof.rate_constant_s is None
+    assert "Not available" in prof.estimated_half_life_str
 
 
 # TEST-015: Consistent Gibbs route reports ΔG‡

@@ -45,6 +45,8 @@ class ScanResult:
     max_energy_step: int = 1
     max_energy_hartree: float = 0.0
     barrier_estimate_kcal: float = 0.0
+    delta_e_scan_activation_kcal: float = 0.0
+    delta_e_scan_rxn_kcal: Optional[float] = None
     ts_guess_coord_value: float = 0.0
     ts_guess_xyz: Optional[Path] = None
     converged: bool = True
@@ -52,10 +54,11 @@ class ScanResult:
 
     @property
     def summary(self) -> str:
+        rxn_str = f" | Estimated ΔE_scan_rxn: {self.delta_e_scan_rxn_kcal:.2f} kcal/mol" if self.delta_e_scan_rxn_kcal is not None else ""
         return (
-            f"Coordinate Scan: {len(self.points)} steps | "
+            f"Coordinate Scan (Electronic): {len(self.points)} steps | "
             f"TS Guess at Step {self.max_energy_step} (d={self.ts_guess_coord_value:.2f} A) | "
-            f"Estimated Barrier: {self.barrier_estimate_kcal:.2f} kcal/mol"
+            f"Estimated ΔE_scan‡: {self.delta_e_scan_activation_kcal:.2f} kcal/mol{rxn_str}"
         )
 
 
@@ -88,18 +91,16 @@ class ReactionEnergyProfile:
     reactants_electronic: Optional[float] = None  # Hartree
     ts_electronic: Optional[float] = None         # Hartree
     product_electronic: Optional[float] = None    # Hartree
-    energy_basis: str = "gibbs"               # "gibbs" or "electronic"
+    energy_basis: str = "gibbs"               # "gibbs", "electronic", or "inconsistent"
     barrier_symbol: str = "ΔG‡"              # "ΔG‡" or "ΔE‡"
     reaction_energy_symbol: str = "ΔG_rxn"    # "ΔG_rxn" or "ΔE_rxn"
-    delta_g_activation_kcal: float = 0.0      # kcal/mol: activation barrier
-    delta_g_reaction_kcal: Optional[float] = None  # kcal/mol: reaction free energy
-    delta_e_activation_kcal: Optional[float] = None
-    delta_e_reaction_kcal: Optional[float] = None
     delta_g_activation_kcal: Optional[float] = None  # kcal/mol: activation Gibbs free energy (Route B)
     delta_g_reaction_kcal: Optional[float] = None    # kcal/mol: reaction Gibbs free energy (Route B)
     delta_e_activation_kcal: Optional[float] = None  # kcal/mol: activation electronic energy (Route A)
     delta_e_reaction_kcal: Optional[float] = None    # kcal/mol: reaction electronic energy (Route A)
-    rate_constant_s: float = 0.0              # s^-1
+    delta_e_scan_activation_kcal: Optional[float] = None  # kcal/mol: electronic scan barrier
+    delta_e_scan_rxn_kcal: Optional[float] = None    # kcal/mol: electronic scan reaction energy
+    rate_constant_s: Optional[float] = None   # s^-1 (None when energy_basis == "electronic" or "inconsistent")
     estimated_half_life_str: str = ""
     kinetic_feasibility: str = ""
     temperature_k: float = 298.15
@@ -113,23 +114,26 @@ class ReactionEnergyProfile:
             return self.delta_g_activation_kcal
         if self.delta_e_activation_kcal is not None:
             return self.delta_e_activation_kcal
+        if self.delta_e_scan_activation_kcal is not None:
+            return self.delta_e_scan_activation_kcal
         return self.delta_g_activation_kcal if self.delta_g_activation_kcal is not None else 0.0
 
     @property
     def reaction_energy_kcal(self) -> Optional[float]:
         if self.energy_basis == "gibbs":
             return self.delta_g_reaction_kcal
-        return self.delta_e_reaction_kcal
+        if self.delta_e_reaction_kcal is not None:
+            return self.delta_e_reaction_kcal
+        return self.delta_e_scan_rxn_kcal
 
     @property
     def summary(self) -> str:
-        prod_str = f", {self.reaction_energy_symbol}: {self.delta_g_reaction_kcal:.2f} kcal/mol" if self.delta_g_reaction_kcal is not None else ""
         rxn_val = self.reaction_energy_kcal
         prod_str = f", {self.reaction_energy_symbol}: {rxn_val:.2f} kcal/mol" if rxn_val is not None else ""
+        rate_info = f"t1/2 ~ {self.estimated_half_life_str}" if self.rate_constant_s is not None else self.estimated_half_life_str
         return (
-            f"Reaction Profile ({self.energy_basis}): {self.barrier_symbol} = {self.delta_g_activation_kcal:.2f} kcal/mol{prod_str} | "
             f"Reaction Profile ({self.energy_basis}): {self.barrier_symbol} = {self.activation_barrier_kcal:.2f} kcal/mol{prod_str} | "
-            f"Feasibility: {self.kinetic_feasibility} (t1/2 ~ {self.estimated_half_life_str})"
+            f"Feasibility: {self.kinetic_feasibility} ({rate_info})"
         )
 
     def to_dict(self) -> Dict[str, Any]:
@@ -141,6 +145,8 @@ class ReactionEnergyProfile:
             "delta_g_reaction_kcal": self.delta_g_reaction_kcal,
             "delta_e_activation_kcal": self.delta_e_activation_kcal,
             "delta_e_reaction_kcal": self.delta_e_reaction_kcal,
+            "delta_e_scan_activation_kcal": self.delta_e_scan_activation_kcal,
+            "delta_e_scan_rxn_kcal": self.delta_e_scan_rxn_kcal,
             "activation_barrier_kcal": self.activation_barrier_kcal,
             "reaction_energy_kcal": self.reaction_energy_kcal,
             "rate_constant_s": self.rate_constant_s,
@@ -314,12 +320,15 @@ def parse_orca_scan_output(
     max_pt = max(points, key=lambda pt: pt.energy_hartree)
     min_pt_before_max = min([pt for pt in points if pt.step <= max_pt.step], key=lambda pt: pt.energy_hartree, default=points[0])
     barrier_est = (max_pt.energy_hartree - min_pt_before_max.energy_hartree) * HARTREE_TO_KCAL
+    rxn_est = (points[-1].energy_hartree - points[0].energy_hartree) * HARTREE_TO_KCAL if len(points) >= 2 else None
 
     return ScanResult(
         points=points,
         max_energy_step=max_pt.step,
         max_energy_hartree=max_pt.energy_hartree,
         barrier_estimate_kcal=round(barrier_est, 2),
+        delta_e_scan_activation_kcal=round(barrier_est, 2),
+        delta_e_scan_rxn_kcal=round(rxn_est, 2) if rxn_est is not None else None,
         ts_guess_coord_value=max_pt.coordinate_value,
         ts_guess_xyz=max_pt.xyz_path,
         converged=True,
@@ -349,13 +358,15 @@ def parse_orca_ts_output(
     # Standard threshold: nu < -15 cm^-1
     genuine_imag = [f for f in calc.frequencies if f < -15.0]
 
-    is_valid_ts = (len(genuine_imag) == 1)
+    # Valid first-order saddle point requires BOTH optimization convergence and exactly 1 genuine imaginary frequency
+    is_valid_ts = bool(calc.converged and len(genuine_imag) == 1)
 
-    summary_str = (
-        f"Valid 1st-Order TS (nu_i = {genuine_imag[0]:.1f} cm^-1)"
-        if is_valid_ts
-        else f"Invalid TS: {len(genuine_imag)} imaginary mode(s) {genuine_imag}"
-    )
+    if not calc.converged:
+        summary_str = f"Invalid TS: Optimization did not converge ({len(genuine_imag)} imaginary mode(s))"
+    elif is_valid_ts:
+        summary_str = f"Valid 1st-Order TS (converged, nu_i = {genuine_imag[0]:.1f} cm^-1)"
+    else:
+        summary_str = f"Invalid TS: {len(genuine_imag)} imaginary mode(s) {genuine_imag}"
 
     return TSVerificationResult(
         name=name,
@@ -441,12 +452,14 @@ def compute_reaction_profile(
     product_electronic: Optional[float] = None,
     temperature_k: float = 298.15,
     is_first_order_ts: bool = True,
+    raise_on_inconsistent: bool = False,
 ) -> ReactionEnergyProfile:
     """Calculates thermodynamic and kinetic properties from ground state, TS, and product energies.
 
     Enforces INV-006:
     Energy basis must be homogeneous across compared species (Route B: Gibbs free energies,
     Route A: Electronic energies). Mixed energy bases (e.g. E_reactants with G_TS) are strictly rejected.
+    Eyring rate constant and half-life are evaluated ONLY when homogeneous Gibbs free energies are available.
     """
     basis_sel = select_consistent_energy_basis(
         reactant_el=reactants_electronic,
@@ -459,8 +472,32 @@ def compute_reaction_profile(
     )
 
     if not basis_sel["is_valid"]:
-        raise ValueError(
-            f"Cannot compute reaction profile: {'; '.join(basis_sel.get('warnings', ['Inconsistent energy basis (INV-006)']))}"
+        msg = f"Cannot compute reaction profile: {'; '.join(basis_sel.get('warnings', ['Inconsistent energy basis (INV-006)']))}"
+        if raise_on_inconsistent:
+            raise ValueError(msg)
+        return ReactionEnergyProfile(
+            reactants_gibbs=reactants_gibbs,
+            ts_gibbs=ts_gibbs,
+            product_gibbs=product_gibbs,
+            reactants_electronic=reactants_electronic,
+            ts_electronic=ts_electronic,
+            product_electronic=product_electronic,
+            energy_basis="inconsistent",
+            barrier_symbol="N/A",
+            reaction_energy_symbol="N/A",
+            delta_g_activation_kcal=None,
+            delta_g_reaction_kcal=None,
+            delta_e_activation_kcal=None,
+            delta_e_reaction_kcal=None,
+            delta_e_scan_activation_kcal=None,
+            delta_e_scan_rxn_kcal=None,
+            rate_constant_s=None,
+            estimated_half_life_str="Not available",
+            kinetic_feasibility="Not evaluated (inconsistent energy basis)",
+            temperature_k=temperature_k,
+            is_first_order_ts=is_first_order_ts,
+            notes="Mixed thermodynamic quantities cannot produce ΔG‡ or ΔG_rxn (INV-006).",
+            warnings=list(basis_sel.get("warnings", [])) + ["Mixed thermodynamic quantities cannot produce ΔG‡."],
         )
 
     basis = basis_sel["basis"]
@@ -478,24 +515,6 @@ def compute_reaction_profile(
     if p_val is not None:
         rxn_energy_kcal = (p_val - r_val) * HARTREE_TO_KCAL
 
-    # Eyring transition state theory rate constant
-    rate_k, half_life_str = compute_eyring_rate_constant(
-        act_barrier_kcal,
-        temperature_k=temperature_k,
-        kappa=1.0
-    )
-
-    if act_barrier_kcal < 0.0:
-        feasibility = "Instantaneous / Barrierless"
-    elif act_barrier_kcal <= 18.0:
-        feasibility = "Very Rapid Predicted Chemical Step"
-    elif act_barrier_kcal <= 22.0:
-        feasibility = "Rapid Predicted Chemical Step"
-    elif act_barrier_kcal <= 25.0:
-        feasibility = "Moderate Predicted Chemical Rate"
-    else:
-        feasibility = "Slow Predicted Chemical Step (High Barrier)"
-
     notes_list = []
     if not is_first_order_ts:
         notes_list.append("Warning: Structure is not a strictly confirmed first-order saddle point.")
@@ -509,6 +528,24 @@ def compute_reaction_profile(
     notes = " ".join(notes_list)
 
     if basis == "gibbs":
+        # Eyring transition state theory rate constant ONLY when Gibbs free energy is available
+        rate_k, half_life_str = compute_eyring_rate_constant(
+            act_barrier_kcal,
+            temperature_k=temperature_k,
+            kappa=1.0
+        )
+
+        if act_barrier_kcal < 0.0:
+            feasibility = "Instantaneous / Barrierless"
+        elif act_barrier_kcal <= 18.0:
+            feasibility = "Very Rapid Predicted Chemical Step"
+        elif act_barrier_kcal <= 22.0:
+            feasibility = "Rapid Predicted Chemical Step"
+        elif act_barrier_kcal <= 25.0:
+            feasibility = "Moderate Predicted Chemical Rate"
+        else:
+            feasibility = "Slow Predicted Chemical Step (High Barrier)"
+
         return ReactionEnergyProfile(
             reactants_gibbs=r_val,
             ts_gibbs=ts_val,
@@ -523,6 +560,8 @@ def compute_reaction_profile(
             delta_g_reaction_kcal=round(rxn_energy_kcal, 2) if rxn_energy_kcal is not None else None,
             delta_e_activation_kcal=None,
             delta_e_reaction_kcal=None,
+            delta_e_scan_activation_kcal=None,
+            delta_e_scan_rxn_kcal=None,
             rate_constant_s=rate_k,
             estimated_half_life_str=half_life_str,
             kinetic_feasibility=feasibility,
@@ -532,6 +571,11 @@ def compute_reaction_profile(
             warnings=warnings,
         )
     else:
+        # Route A: Electronic energies. Forbid Eyring kinetics per INV-006.
+        warnings.append(
+            "Eyring rate constant and half-life are not computed from electronic energies; "
+            "homogeneous Gibbs free energies are required (INV-006)."
+        )
         return ReactionEnergyProfile(
             reactants_gibbs=reactants_gibbs,
             ts_gibbs=ts_gibbs,
@@ -546,9 +590,11 @@ def compute_reaction_profile(
             delta_g_reaction_kcal=None,
             delta_e_activation_kcal=round(act_barrier_kcal, 2),
             delta_e_reaction_kcal=round(rxn_energy_kcal, 2) if rxn_energy_kcal is not None else None,
-            rate_constant_s=rate_k,
-            estimated_half_life_str=half_life_str,
-            kinetic_feasibility=feasibility,
+            delta_e_scan_activation_kcal=round(act_barrier_kcal, 2),
+            delta_e_scan_rxn_kcal=round(rxn_energy_kcal, 2) if rxn_energy_kcal is not None else None,
+            rate_constant_s=None,
+            estimated_half_life_str="Not available (requires Gibbs free energy)",
+            kinetic_feasibility=f"Electronic Barrier: {round(act_barrier_kcal, 2):.2f} kcal/mol (Eyring kinetics pending Gibbs calculation)",
             temperature_k=temperature_k,
             is_first_order_ts=is_first_order_ts,
             notes=notes,
@@ -612,14 +658,17 @@ echo " Cluster: {cluster.name} ({cluster.model_type} model)"
 echo " Target: {cluster.target_residue} | Method: {method} ({solvent or 'gas'})"
 echo "=========================================================="
 
-ORCA_BIN=$(which orca 2>/dev/null || true)
+if [ -n "$SHARK_ORCA" ] && [ -x "$SHARK_ORCA" ]; then
+    ORCA_BIN="$SHARK_ORCA"
+elif [ -n "$ORCA_PATH" ] && [ -x "$ORCA_PATH" ]; then
+    ORCA_BIN="$ORCA_PATH"
+else
+    ORCA_BIN=$(which orca 2>/dev/null || true)
+fi
+
 if [ -z "$ORCA_BIN" ]; then
-    if [ -f "/home/diego/bioinformatics/orca_6_1_1_linux_x86-64_shared_openmpi418_nodmrg/orca" ]; then
-        ORCA_BIN="/home/diego/bioinformatics/orca_6_1_1_linux_x86-64_shared_openmpi418_nodmrg/orca"
-    else
-        echo "Error: ORCA executable not found in PATH."
-        exit 1
-    fi
+    echo "Error: ORCA executable not found. Please set SHARK_ORCA or ensure 'orca' is in PATH."
+    exit 1
 fi
 # Resolve symlink to realpath for ORCA 6
 ORCA_REAL=$(readlink -f "$ORCA_BIN")
@@ -642,7 +691,7 @@ if res.ts_guess_xyz and res.ts_guess_xyz.exists():
     # Replace coordinates
     header = tmpl.split('* xyz')[0]
     coords_str = '\n'.join(['  ' + ln for ln in xyz_lines if ln.strip()])
-    new_inp = f'{{header}}* xyz {cluster.charge} {cluster.multiplicity}\n{{coords_str}}\n*'
+    new_inp = f'{{header}}* xyz {cluster.charge} {cluster.effective_multiplicity}\n{{coords_str}}\n*'
     Path('02_optts.inp').write_text(new_inp)
 else:
     print('Warning: Specific step XYZ not found, using template coordinates')
