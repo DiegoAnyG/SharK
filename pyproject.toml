@@ -31,7 +31,7 @@ shark = "shark.cli:main"
 shark-orbitals = "shark.reports.orbital_viewer:main"
 
 [tool.setuptools.package-data]
-"shark.reports" = ["orbital_viewer.html", "dossier.html"]
+"shark.reports" = ["orbital_viewer.html", "dossier.html", "3Dmol-min.js"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
