@@ -131,3 +131,80 @@ def test_run_md_from_session_with_reference_ligand(mock_pipeline_dir, tmp_path):
     cfg_text = (result.run_dir / "config.env").read_text()
     assert 'POLISCREEN_LIGAND_SDF="inputs/run_BENZO_5ns_ref.mol2"' in cfg_text
 
+
+def test_setup_and_launch_md_fe_restraint_detection(mock_pipeline_dir, tmp_path):
+    # Case 1: Receptor without Fe/Heme, but with CHEM.BIOL. in header (must NOT enable restraint)
+    rec_no_fe = tmp_path / "rec_no_fe.pdb"
+    rec_no_fe.write_text(
+        "HEADER    ACS CHEM.BIOL. ARTICLE\n"
+        "ATOM      1  N   MET A   1      10.0  10.0  10.0  1.00 20.00           N\n"
+        "END\n",
+        encoding="utf-8"
+    )
+    lig_pdb = tmp_path / "lig.pdb"
+    lig_pdb.write_text("ATOM      1  C1  LIG A   1      12.0  12.0  12.0\nEND\n", encoding="utf-8")
+
+    res_no_fe = setup_and_launch_md(
+        receptor_pdb=rec_no_fe,
+        ligand_pose_file=lig_pdb,
+        ligand_name="LIG1",
+        pipeline_dir=mock_pipeline_dir,
+        enable_metal_restraint=True,
+        run_now=False,
+    )
+    cfg_no_fe = (res_no_fe.run_dir / "config.env").read_text()
+    assert 'RESTRAINT_FE_N=false' in cfg_no_fe
+
+    # Case 2: Receptor with Heme/Fe (must enable restraint)
+    rec_fe = tmp_path / "rec_fe.pdb"
+    rec_fe.write_text(
+        "ATOM      1  N   MET A   1      10.0  10.0  10.0  1.00 20.00           N\n"
+        "HETATM 1000 FE   HEM A 500      20.0  20.0  20.0  1.00 20.00          FE\n"
+        "END\n",
+        encoding="utf-8"
+    )
+    res_fe = setup_and_launch_md(
+        receptor_pdb=rec_fe,
+        ligand_pose_file=lig_pdb,
+        ligand_name="LIG2",
+        pipeline_dir=mock_pipeline_dir,
+        enable_metal_restraint=True,
+        run_now=False,
+    )
+    cfg_fe = (res_fe.run_dir / "config.env").read_text()
+    assert 'RESTRAINT_FE_N=true' in cfg_fe
+
+
+def test_setup_and_launch_md_live_execution_with_progress(mock_pipeline_dir, tmp_path, capsys):
+    rec_pdb = tmp_path / "rec.pdb"
+    rec_pdb.write_text("ATOM      1  N   MET A   1      10.0  10.0  10.0\nEND\n", encoding="utf-8")
+    lig_pdb = tmp_path / "lig.pdb"
+    lig_pdb.write_text("ATOM      1  C1  LIG A   1      12.0  12.0  12.0\nEND\n", encoding="utf-8")
+
+    # Mock run_pipeline.sh script that outputs phases and gromacs-like step lines
+    script_sh = mock_pipeline_dir / "scripts" / "run_pipeline.sh"
+    script_sh.write_text(
+        "#!/bin/bash\n"
+        "echo '### Phase: NVT Equilibration (Canonical Ensemble) ###'\n"
+        "echo 'step 25000, will finish soon, remaining runtime: 10 s'\n"
+        "echo '### Phase: Production Molecular Dynamics (10.0 ns) ###'\n"
+        "echo 'step 250000, will finish tomorrow, remaining runtime: 120 s'\n"
+        "exit 0\n",
+        encoding="utf-8"
+    )
+
+    res = setup_and_launch_md(
+        receptor_pdb=rec_pdb,
+        ligand_pose_file=lig_pdb,
+        ligand_name="LIG_PROG",
+        sim_time_ns=1.0,
+        pipeline_dir=mock_pipeline_dir,
+        run_now=True,
+    )
+    assert res.status == "completed"
+    captured = capsys.readouterr()
+    assert "[SharK-MD] -> Phase: NVT Equilibration" in captured.out
+    assert "NVT" in captured.out
+    assert "Production MD" in captured.out
+
+
