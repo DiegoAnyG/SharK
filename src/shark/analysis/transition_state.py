@@ -82,25 +82,156 @@ class TSVerificationResult:
 @dataclass
 class ReactionEnergyProfile:
     """Comprehensive thermodynamic and kinetic profile of the covalent reaction."""
-    reactants_gibbs: float                  # Hartree
-    ts_gibbs: float                         # Hartree
-    product_gibbs: Optional[float] = None   # Hartree
-    delta_g_activation_kcal: float = 0.0    # kcal/mol: G(TS) - G(Reactants)
-    delta_g_reaction_kcal: Optional[float] = None  # kcal/mol: G(Product) - G(Reactants)
-    rate_constant_s: float = 0.0            # s^-1
+    reactants_gibbs: Optional[float] = None   # Hartree
+    ts_gibbs: Optional[float] = None          # Hartree
+    product_gibbs: Optional[float] = None     # Hartree
+    reactants_electronic: Optional[float] = None  # Hartree
+    ts_electronic: Optional[float] = None         # Hartree
+    product_electronic: Optional[float] = None    # Hartree
+    energy_basis: str = "gibbs"               # "gibbs" or "electronic"
+    barrier_symbol: str = "ΔG‡"              # "ΔG‡" or "ΔE‡"
+    reaction_energy_symbol: str = "ΔG_rxn"    # "ΔG_rxn" or "ΔE_rxn"
+    delta_g_activation_kcal: float = 0.0      # kcal/mol: activation barrier
+    delta_g_reaction_kcal: Optional[float] = None  # kcal/mol: reaction free energy
+    delta_e_activation_kcal: Optional[float] = None
+    delta_e_reaction_kcal: Optional[float] = None
+    delta_g_activation_kcal: Optional[float] = None  # kcal/mol: activation Gibbs free energy (Route B)
+    delta_g_reaction_kcal: Optional[float] = None    # kcal/mol: reaction Gibbs free energy (Route B)
+    delta_e_activation_kcal: Optional[float] = None  # kcal/mol: activation electronic energy (Route A)
+    delta_e_reaction_kcal: Optional[float] = None    # kcal/mol: reaction electronic energy (Route A)
+    rate_constant_s: float = 0.0              # s^-1
     estimated_half_life_str: str = ""
     kinetic_feasibility: str = ""
     temperature_k: float = 298.15
     is_first_order_ts: bool = True
     notes: str = ""
+    warnings: List[str] = field(default_factory=list)
+
+    @property
+    def activation_barrier_kcal(self) -> float:
+        if self.energy_basis == "gibbs" and self.delta_g_activation_kcal is not None:
+            return self.delta_g_activation_kcal
+        if self.delta_e_activation_kcal is not None:
+            return self.delta_e_activation_kcal
+        return self.delta_g_activation_kcal if self.delta_g_activation_kcal is not None else 0.0
+
+    @property
+    def reaction_energy_kcal(self) -> Optional[float]:
+        if self.energy_basis == "gibbs":
+            return self.delta_g_reaction_kcal
+        return self.delta_e_reaction_kcal
 
     @property
     def summary(self) -> str:
-        prod_str = f", Delta G_rxn: {self.delta_g_reaction_kcal:.2f} kcal/mol" if self.delta_g_reaction_kcal is not None else ""
+        prod_str = f", {self.reaction_energy_symbol}: {self.delta_g_reaction_kcal:.2f} kcal/mol" if self.delta_g_reaction_kcal is not None else ""
+        rxn_val = self.reaction_energy_kcal
+        prod_str = f", {self.reaction_energy_symbol}: {rxn_val:.2f} kcal/mol" if rxn_val is not None else ""
         return (
-            f"Reaction Profile: Delta G‡ = {self.delta_g_activation_kcal:.2f} kcal/mol{prod_str} | "
+            f"Reaction Profile ({self.energy_basis}): {self.barrier_symbol} = {self.delta_g_activation_kcal:.2f} kcal/mol{prod_str} | "
+            f"Reaction Profile ({self.energy_basis}): {self.barrier_symbol} = {self.activation_barrier_kcal:.2f} kcal/mol{prod_str} | "
             f"Feasibility: {self.kinetic_feasibility} (t1/2 ~ {self.estimated_half_life_str})"
         )
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "energy_basis": self.energy_basis,
+            "barrier_symbol": self.barrier_symbol,
+            "reaction_energy_symbol": self.reaction_energy_symbol,
+            "delta_g_activation_kcal": self.delta_g_activation_kcal,
+            "delta_g_reaction_kcal": self.delta_g_reaction_kcal,
+            "delta_e_activation_kcal": self.delta_e_activation_kcal,
+            "delta_e_reaction_kcal": self.delta_e_reaction_kcal,
+            "activation_barrier_kcal": self.activation_barrier_kcal,
+            "reaction_energy_kcal": self.reaction_energy_kcal,
+            "rate_constant_s": self.rate_constant_s,
+            "estimated_half_life_str": self.estimated_half_life_str,
+            "kinetic_feasibility": self.kinetic_feasibility,
+            "temperature_k": self.temperature_k,
+            "is_first_order_ts": self.is_first_order_ts,
+            "reactants_gibbs": self.reactants_gibbs,
+            "ts_gibbs": self.ts_gibbs,
+            "product_gibbs": self.product_gibbs,
+            "reactants_electronic": self.reactants_electronic,
+            "ts_electronic": self.ts_electronic,
+            "product_electronic": self.product_electronic,
+            "notes": self.notes,
+            "warnings": list(self.warnings),
+        }
+
+
+def select_consistent_energy_basis(
+    reactant_el: Optional[float] = None,
+    ts_el: Optional[float] = None,
+    product_el: Optional[float] = None,
+    reactant_gibbs: Optional[float] = None,
+    ts_gibbs: Optional[float] = None,
+    product_gibbs: Optional[float] = None,
+    temperature_k: float = 298.15,
+) -> Dict[str, Any]:
+    """Selects a homogeneous energy basis across reaction species without mixing E and G.
+
+    Enforces INV-006:
+    Allowed: ΔE‡ = E_TS - E_R, ΔE_rxn = E_P - E_R
+    Allowed: ΔG‡ = G_TS - G_R, ΔG_rxn = G_P - G_R
+    Forbidden: G_TS - E_R or any combination of mixed bases.
+    """
+    has_gibbs_r = reactant_gibbs is not None and math.isfinite(reactant_gibbs) and reactant_gibbs != 0.0
+    has_gibbs_ts = ts_gibbs is not None and math.isfinite(ts_gibbs) and ts_gibbs != 0.0
+    has_gibbs_p = product_gibbs is not None and math.isfinite(product_gibbs) and product_gibbs != 0.0
+
+    has_el_r = reactant_el is not None and math.isfinite(reactant_el) and reactant_el != 0.0
+    has_el_ts = ts_el is not None and math.isfinite(ts_el) and ts_el != 0.0
+    has_el_p = product_el is not None and math.isfinite(product_el) and product_el != 0.0
+
+    # Route B: Gibbs free energies if both R and TS have valid Gibbs
+    if has_gibbs_r and has_gibbs_ts:
+        return {
+            "basis": "gibbs",
+            "temperature_k": temperature_k,
+            "reactant": reactant_gibbs,
+            "ts": ts_gibbs,
+            "product": product_gibbs if has_gibbs_p else None,
+            "barrier_symbol": "ΔG‡",
+            "reaction_symbol": "ΔG_rxn",
+            "units": "kcal/mol",
+            "is_valid": True,
+            "warnings": [],
+        }
+
+    # Route A: Electronic energies if both R and TS have valid electronic energies
+    if has_el_r and has_el_ts:
+        warnings = []
+        if has_gibbs_ts and not has_gibbs_r:
+            warnings.append("TS Gibbs free energy was available but reactant Gibbs was missing; selected consistent electronic energy basis.")
+        elif has_gibbs_r and not has_gibbs_ts:
+            warnings.append("Reactant Gibbs free energy was available but TS Gibbs was missing; selected consistent electronic energy basis.")
+
+        return {
+            "basis": "electronic",
+            "temperature_k": temperature_k,
+            "reactant": reactant_el,
+            "ts": ts_el,
+            "product": product_el if has_el_p else None,
+            "barrier_symbol": "ΔE‡",
+            "reaction_symbol": "ΔE_rxn",
+            "units": "kcal/mol",
+            "is_valid": True,
+            "warnings": warnings,
+        }
+
+    # Inconsistent or missing
+    return {
+        "basis": "inconsistent",
+        "temperature_k": temperature_k,
+        "reactant": None,
+        "ts": None,
+        "product": None,
+        "barrier_symbol": None,
+        "reaction_symbol": None,
+        "units": "kcal/mol",
+        "is_valid": False,
+        "warnings": ["Incompatible or missing energy bases between reactant and transition state (INV-006)."],
+    }
 
 
 def parse_orca_scan_output(
@@ -302,49 +433,65 @@ def compute_eyring_rate_constant(
 
 
 def compute_reaction_profile(
-    reactants_gibbs: float,
-    ts_gibbs: float,
+    reactants_gibbs: Optional[float] = None,
+    ts_gibbs: Optional[float] = None,
     product_gibbs: Optional[float] = None,
+    reactants_electronic: Optional[float] = None,
+    ts_electronic: Optional[float] = None,
+    product_electronic: Optional[float] = None,
     temperature_k: float = 298.15,
-    is_first_order_ts: bool = True
+    is_first_order_ts: bool = True,
 ) -> ReactionEnergyProfile:
-    """Calculates thermodynamic and kinetic properties from ground state, TS, and product Gibbs energies.
+    """Calculates thermodynamic and kinetic properties from ground state, TS, and product energies.
 
-    Parameters
-    ----------
-    reactants_gibbs : float
-        Gibbs free energy of ground state reactants in Hartrees.
-    ts_gibbs : float
-        Gibbs free energy of the transition state in Hartrees.
-    product_gibbs : float or None
-        Gibbs free energy of the covalent adduct product in Hartrees.
-    temperature_k : float
-        Temperature in Kelvin (default 298.15 K).
-    is_first_order_ts : bool
-        Whether the TS Hessian was confirmed to have strictly 1 imaginary mode.
+    Enforces INV-006:
+    Energy basis must be homogeneous across compared species (Route B: Gibbs free energies,
+    Route A: Electronic energies). Mixed energy bases (e.g. E_reactants with G_TS) are strictly rejected.
     """
-    delta_g_act_eh = ts_gibbs - reactants_gibbs
-    delta_g_act_kcal = delta_g_act_eh * HARTREE_TO_KCAL
+    basis_sel = select_consistent_energy_basis(
+        reactant_el=reactants_electronic,
+        ts_el=ts_electronic,
+        product_el=product_electronic,
+        reactant_gibbs=reactants_gibbs,
+        ts_gibbs=ts_gibbs,
+        product_gibbs=product_gibbs,
+        temperature_k=temperature_k,
+    )
 
-    delta_g_rxn_kcal = None
-    if product_gibbs is not None:
-        delta_g_rxn_kcal = (product_gibbs - reactants_gibbs) * HARTREE_TO_KCAL
+    if not basis_sel["is_valid"]:
+        raise ValueError(
+            f"Cannot compute reaction profile: {'; '.join(basis_sel.get('warnings', ['Inconsistent energy basis (INV-006)']))}"
+        )
+
+    basis = basis_sel["basis"]
+    r_val = basis_sel["reactant"]
+    ts_val = basis_sel["ts"]
+    p_val = basis_sel["product"]
+    barrier_symbol = basis_sel["barrier_symbol"]
+    reaction_symbol = basis_sel["reaction_symbol"]
+    warnings = list(basis_sel.get("warnings", []))
+
+    act_barrier_eh = ts_val - r_val
+    act_barrier_kcal = act_barrier_eh * HARTREE_TO_KCAL
+
+    rxn_energy_kcal = None
+    if p_val is not None:
+        rxn_energy_kcal = (p_val - r_val) * HARTREE_TO_KCAL
 
     # Eyring transition state theory rate constant
     rate_k, half_life_str = compute_eyring_rate_constant(
-        delta_g_act_kcal,
+        act_barrier_kcal,
         temperature_k=temperature_k,
         kappa=1.0
     )
 
-    # Categorize kinetic accessibility without confusing with thermodynamic spontaneity
-    if delta_g_act_kcal < 0.0:
+    if act_barrier_kcal < 0.0:
         feasibility = "Instantaneous / Barrierless"
-    elif delta_g_act_kcal <= 18.0:
+    elif act_barrier_kcal <= 18.0:
         feasibility = "Very Rapid Predicted Chemical Step"
-    elif delta_g_act_kcal <= 22.0:
+    elif act_barrier_kcal <= 22.0:
         feasibility = "Rapid Predicted Chemical Step"
-    elif delta_g_act_kcal <= 25.0:
+    elif act_barrier_kcal <= 25.0:
         feasibility = "Moderate Predicted Chemical Rate"
     else:
         feasibility = "Slow Predicted Chemical Step (High Barrier)"
@@ -353,27 +500,60 @@ def compute_reaction_profile(
     if not is_first_order_ts:
         notes_list.append("Warning: Structure is not a strictly confirmed first-order saddle point.")
 
-    if delta_g_rxn_kcal is not None:
-        if delta_g_rxn_kcal > 0.0:
-            notes_list.append(f"Thermodynamics: Endergonic (Delta G_rxn = +{delta_g_rxn_kcal:.2f} kcal/mol, unfavorable product equilibrium).")
+    if rxn_energy_kcal is not None:
+        if rxn_energy_kcal > 0.0:
+            notes_list.append(f"Thermodynamics: Endergonic ({reaction_symbol} = +{rxn_energy_kcal:.2f} kcal/mol, unfavorable product equilibrium).")
         else:
-            notes_list.append(f"Thermodynamics: Exergonic (Delta G_rxn = {delta_g_rxn_kcal:.2f} kcal/mol, favorable covalent adduct).")
+            notes_list.append(f"Thermodynamics: Exergonic ({reaction_symbol} = {rxn_energy_kcal:.2f} kcal/mol, favorable covalent adduct).")
 
     notes = " ".join(notes_list)
 
-    return ReactionEnergyProfile(
-        reactants_gibbs=reactants_gibbs,
-        ts_gibbs=ts_gibbs,
-        product_gibbs=product_gibbs,
-        delta_g_activation_kcal=round(delta_g_act_kcal, 2),
-        delta_g_reaction_kcal=round(delta_g_rxn_kcal, 2) if delta_g_rxn_kcal is not None else None,
-        rate_constant_s=rate_k,
-        estimated_half_life_str=half_life_str,
-        kinetic_feasibility=feasibility,
-        temperature_k=temperature_k,
-        is_first_order_ts=is_first_order_ts,
-        notes=notes
-    )
+    if basis == "gibbs":
+        return ReactionEnergyProfile(
+            reactants_gibbs=r_val,
+            ts_gibbs=ts_val,
+            product_gibbs=p_val,
+            reactants_electronic=reactants_electronic,
+            ts_electronic=ts_electronic,
+            product_electronic=product_electronic,
+            energy_basis="gibbs",
+            barrier_symbol="ΔG‡",
+            reaction_energy_symbol="ΔG_rxn",
+            delta_g_activation_kcal=round(act_barrier_kcal, 2),
+            delta_g_reaction_kcal=round(rxn_energy_kcal, 2) if rxn_energy_kcal is not None else None,
+            delta_e_activation_kcal=None,
+            delta_e_reaction_kcal=None,
+            rate_constant_s=rate_k,
+            estimated_half_life_str=half_life_str,
+            kinetic_feasibility=feasibility,
+            temperature_k=temperature_k,
+            is_first_order_ts=is_first_order_ts,
+            notes=notes,
+            warnings=warnings,
+        )
+    else:
+        return ReactionEnergyProfile(
+            reactants_gibbs=reactants_gibbs,
+            ts_gibbs=ts_gibbs,
+            product_gibbs=product_gibbs,
+            reactants_electronic=r_val,
+            ts_electronic=ts_val,
+            product_electronic=p_val,
+            energy_basis="electronic",
+            barrier_symbol="ΔE‡",
+            reaction_energy_symbol="ΔE_rxn",
+            delta_g_activation_kcal=None,
+            delta_g_reaction_kcal=None,
+            delta_e_activation_kcal=round(act_barrier_kcal, 2),
+            delta_e_reaction_kcal=round(rxn_energy_kcal, 2) if rxn_energy_kcal is not None else None,
+            rate_constant_s=rate_k,
+            estimated_half_life_str=half_life_str,
+            kinetic_feasibility=feasibility,
+            temperature_k=temperature_k,
+            is_first_order_ts=is_first_order_ts,
+            notes=notes,
+            warnings=warnings,
+        )
 
 
 # Backward-compatible alias

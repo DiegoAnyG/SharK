@@ -16,7 +16,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 @dataclass
 class FMOSymmetryResult:
-    """Results of Frontier Molecular Orbital phase and symmetry analysis."""
+    """Results of Frontier Molecular Orbital alignment and trajectory analysis."""
     is_allowed: bool
     status: str
     symmetry_type: str
@@ -27,6 +27,12 @@ class FMOSymmetryResult:
     electrophile_lumo_ev: float
     overlap_integral_estimate: float
     explanation: str
+    name: str = "orbital_alignment_heuristic"
+    evidence_type: str = "model_derived"
+    warnings: List[str] = field(default_factory=lambda: [
+        "Not an orbital overlap integral",
+        "Does not determine wavefunction phase symmetry"
+    ])
 
     @property
     def orbital_alignment_score(self) -> float:
@@ -35,6 +41,8 @@ class FMOSymmetryResult:
 
     def to_dict(self) -> Dict[str, Any]:
         return {
+            "name": self.name,
+            "evidence_type": self.evidence_type,
             "is_allowed": self.is_allowed,
             "status": self.status,
             "symmetry_type": self.symmetry_type,
@@ -46,6 +54,7 @@ class FMOSymmetryResult:
             "overlap_integral_estimate": round(self.overlap_integral_estimate, 4),
             "orbital_alignment_score": round(self.overlap_integral_estimate, 4),
             "explanation": self.explanation,
+            "warnings": list(self.warnings),
         }
 
 
@@ -61,9 +70,16 @@ class PocketPolarizationResult:
     polarization_effect: str
     stabilization_kcal_mol: float
     explanation: str
+    name: str = "polarization_proxy"
+    evidence_type: str = "model_derived"
+    warnings: List[str] = field(default_factory=lambda: [
+        "Estimated electrostatic proxy; not an ab initio pocket shift"
+    ])
 
     def to_dict(self) -> Dict[str, Any]:
         return {
+            "name": self.name,
+            "evidence_type": self.evidence_type,
             "isolated_lumo_ev": round(self.isolated_lumo_ev, 3),
             "complex_lumo_ev": round(self.complex_lumo_ev, 3),
             "delta_lumo_ev": round(self.delta_lumo_ev, 3),
@@ -73,6 +89,7 @@ class PocketPolarizationResult:
             "polarization_effect": self.polarization_effect,
             "stabilization_kcal_mol": round(self.stabilization_kcal_mol, 2),
             "explanation": self.explanation,
+            "warnings": list(self.warnings),
         }
 
 
@@ -89,7 +106,7 @@ class RegiospecificitySite:
 
 @dataclass
 class RegiospecificityResult:
-    """Evaluation of electrophilic attack regiospecificity."""
+    """Evaluation of electrophilic attack regiospecificity prior."""
     target_atom_index: int
     target_atom_symbol: str
     target_rank: int
@@ -97,9 +114,16 @@ class RegiospecificityResult:
     is_primary_locus: bool
     sites: List[RegiospecificitySite]
     explanation: str
+    name: str = "candidate_site_score"
+    evidence_type: str = "model_derived"
+    warnings: List[str] = field(default_factory=lambda: [
+        "Empirical heuristic for candidate site ranking; not a computed ab initio Fukui index."
+    ])
 
     def to_dict(self) -> Dict[str, Any]:
         return {
+            "name": self.name,
+            "evidence_type": self.evidence_type,
             "target_atom_index": self.target_atom_index,
             "target_atom_symbol": self.target_atom_symbol,
             "target_rank": self.target_rank,
@@ -109,6 +133,7 @@ class RegiospecificityResult:
                 {
                     "atom_index": s.atom_index,
                     "atom_symbol": s.atom_symbol,
+                    "candidate_score": round(s.fukui_electrophilic, 4),
                     "fukui_electrophilic": round(s.fukui_electrophilic, 4),
                     "local_softness": round(s.local_softness, 4),
                     "rank": s.rank,
@@ -117,29 +142,40 @@ class RegiospecificityResult:
                 for s in self.sites
             ],
             "explanation": self.explanation,
+            "warnings": list(self.warnings),
         }
 
 
 @dataclass
 class CovalentBondNatureResult:
-    """Characterization of the covalent bond formed upon reaction completion."""
+    """Characterization of the covalent bond / product adduct."""
     bond_type: str
-    equilibrium_distance_angstrom: float
-    wiberg_bond_order: float
-    charge_transfer_e: float
-    bond_covalency_percent: float
-    is_reversible: bool
-    explanation: str
+    equilibrium_distance_angstrom: Optional[float] = None
+    wiberg_bond_order: Optional[float] = None
+    charge_transfer_e: Optional[float] = None
+    bond_covalency_percent: Optional[float] = None
+    bond_likelihood_proxy: Optional[float] = None
+    is_reversible: bool = False
+    is_calculated: bool = False
+    status: str = "not_evaluated"
+    evidence_type: str = "model_derived"
+    explanation: str = "Covalent product analysis not performed; requires optimized adduct geometry."
+    warnings: List[str] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
+            "status": self.status,
+            "is_calculated": self.is_calculated,
+            "evidence_type": self.evidence_type,
             "bond_type": self.bond_type,
-            "equilibrium_distance_angstrom": round(self.equilibrium_distance_angstrom, 3),
-            "wiberg_bond_order": round(self.wiberg_bond_order, 3),
-            "charge_transfer_e": round(self.charge_transfer_e, 3),
-            "bond_covalency_percent": round(self.bond_covalency_percent, 1),
+            "equilibrium_distance_angstrom": round(self.equilibrium_distance_angstrom, 3) if self.equilibrium_distance_angstrom is not None else None,
+            "wiberg_bond_order": self.wiberg_bond_order,
+            "charge_transfer_e": self.charge_transfer_e,
+            "bond_covalency_percent": self.bond_covalency_percent,
+            "bond_likelihood_proxy": self.bond_likelihood_proxy,
             "is_reversible": self.is_reversible,
             "explanation": self.explanation,
+            "warnings": list(self.warnings),
         }
 
 
@@ -168,7 +204,7 @@ def evaluate_fmo_phase_symmetry(
     nucleophile_symbol: str = "O",
     electrophile_symbol: str = "N",
 ) -> FMOSymmetryResult:
-    """Evaluates Frontier Molecular Orbital phase symmetry according to Fukui & Woodward-Hoffmann theory."""
+    """Evaluates orbital alignment and approach trajectory using geometric FMO heuristic model."""
     fmo_gap = abs(electrophile_lumo_ev - nucleophile_homo_ev)
 
     is_angle_favorable = (85.0 <= burgi_dunitz_angle_deg <= 145.0)
@@ -187,19 +223,21 @@ def evaluate_fmo_phase_symmetry(
     is_allowed = is_angle_favorable and is_dist_favorable and (fmo_gap < 7.5)
 
     if is_allowed:
-        status = "Constructive Phase Overlap (Fukui Allowed)"
-        sym_type = "Constructive sigma-addition"
+        status = "Favorable Trajectory Geometry (Model Heuristic)"
+        status = "Constructive Phase Overlap (Model Heuristic)"
+        sym_type = "Constructive sigma-addition (Model Heuristic)"
         explanation = (
-            f"Frontier orbital symmetry and approach trajectory are consistent with a favorable bimolecular addition. "
+            f"Approach trajectory is geometrically compatible with addition. "
             f"The nucleophilic lone pair ({nucleophile_symbol}) approaches within the Bürgi-Dunitz cone "
-            f"({burgi_dunitz_angle_deg:.1f} deg) with favorable FMO gap ({fmo_gap:.2f} eV)."
+            f"({burgi_dunitz_angle_deg:.1f} deg) with FMO gap ({fmo_gap:.2f} eV). "
+            f"Note: Model-derived geometric proxy, not a computed orbital overlap integral."
         )
     else:
-        status = "Destructive or Hindered Symmetry"
+        status = "Destructive or Hindered Symmetry (Model Heuristic)"
         sym_type = "Mismatched Trajectory"
         explanation = (
             f"The nucleophile approach angle ({burgi_dunitz_angle_deg:.1f} deg) or distance "
-            f"({distance_angstrom:.2f} A) violates optimal phase overlap criteria."
+            f"({distance_angstrom:.2f} A) violates geometric phase overlap criteria."
         )
 
     return FMOSymmetryResult(
@@ -216,6 +254,10 @@ def evaluate_fmo_phase_symmetry(
     )
 
 
+# Explicit alias adhering to INV-008
+evaluate_orbital_alignment_heuristic = evaluate_fmo_phase_symmetry
+
+
 def evaluate_pocket_polarization(
     isolated_homo_ev: float = -6.34,
     isolated_lumo_ev: float = -2.89,
@@ -223,7 +265,7 @@ def evaluate_pocket_polarization(
     pocket_dielectric: float = 4.0,
     has_catalytic_partner: bool = True,
 ) -> PocketPolarizationResult:
-    """Evaluates the electrostatic polarization shift of the pocket on ligand frontier orbitals."""
+    """Evaluates electrostatic polarization proxy of the pocket on ligand frontier orbitals."""
     delta_lumo = -0.32 if has_catalytic_partner else -0.15
     complex_lumo = isolated_lumo_ev + delta_lumo
     complex_homo = isolated_homo_ev - 0.10
@@ -239,11 +281,11 @@ def evaluate_pocket_polarization(
     delta_omega = cpx_omega - iso_omega
     stab_kcal = abs(delta_lumo) * 23.0605
 
-    effect = "Electrophilic Activation (LUMO Stabilization)"
+    effect = "Electrophilic Activation Proxy (LUMO Stabilization)"
     explanation = (
-        f"Active pocket electrostatic field lowers the LUMO by {abs(delta_lumo):.2f} eV "
-        f"({stab_kcal:.1f} kcal/mol stabilization), enhancing the electrophilicity index "
-        f"by +{delta_omega:.2f} eV to facilitate covalent bond formation."
+        f"Active pocket electrostatic field proxy estimates a LUMO lowering by {abs(delta_lumo):.2f} eV "
+        f"({stab_kcal:.1f} kcal/mol stabilization), modifying electrophilicity index "
+        f"by {delta_omega:+.2f} eV. Note: Model-derived proxy, not a computed ab initio pocket shift."
     )
 
     return PocketPolarizationResult(
@@ -265,11 +307,9 @@ def evaluate_regiospecificity(
     target_atom_symbol: str = "O",
     electrophilicity_index: float = 3.09,
 ) -> RegiospecificityResult:
-    """Calculates local electrophilic Fukui indices f_k^+ and local softness s_k^+."""
+    """Evaluates candidate site scoring based on proximity and chemical prior."""
     sites: List[RegiospecificitySite] = []
-
     raw_weights = {}
-    # Determine whether target_atom_index matches at_num or idx
     matched_by_num = any(at_num == target_atom_index for _, at_num in ligand_heavy_atoms)
 
     for idx, (sym, at_num) in enumerate(ligand_heavy_atoms):
@@ -307,10 +347,9 @@ def evaluate_regiospecificity(
 
     is_primary = (target_rank == 1)
     explanation = (
-        f"Atom #{target_atom_index} ({target_atom_symbol}) ranks #{target_rank} in local "
-        f"electrophilic Fukui index (f_k^+ = {sites[0].fukui_electrophilic:.3f}), "
-        f"confirming targeted regiospecificity." if is_primary else
-        f"Atom #{target_atom_index} ranks #{target_rank}; secondary reactive locus detected."
+        f"Atom #{target_atom_index} ({target_atom_symbol}) ranks #{target_rank} in candidate site prior "
+        f"(score = {sites[0].fukui_electrophilic:.3f}). "
+        f"Note: Model-derived prior score; not a computed ab initio Fukui function."
     )
 
     return RegiospecificityResult(
@@ -329,35 +368,75 @@ def evaluate_covalent_bond_nature(
     electrophile_element: str = "C",
     bond_distance_angstrom: float = 1.45,
     is_reversible_warhead: bool = False,
+    is_optimized_adduct: Optional[bool] = None,
+    distance_angstrom: Optional[float] = None,
+    warhead_type: Optional[str] = None,
+    has_optimized_adduct: Optional[bool] = None,
 ) -> CovalentBondNatureResult:
-    """Computes bond order, covalency percentage, and charge transfer of the formed adduct."""
+    """Characterizes covalent adduct bond nature when an optimized product structure is available."""
+    if distance_angstrom is not None:
+        bond_distance_angstrom = distance_angstrom
+    if has_optimized_adduct is not None:
+        is_optimized_adduct = has_optimized_adduct
+
     ref_d = 1.43 if {nucleophile_element, electrophile_element} == {"C", "O"} else (
         1.82 if "S" in (nucleophile_element, electrophile_element) else 1.47
     )
 
-    b_order = max(0.05, min(1.20, math.exp(-1.4 * (bond_distance_angstrom - ref_d))))
-    covalency_pct = min(100.0, max(10.0, b_order * 100.0))
+    # If is_optimized_adduct is not explicitly specified, infer from distance
+    if is_optimized_adduct is None:
+        is_optimized_adduct = (bond_distance_angstrom <= 2.0)
 
+    # Heuristic distance-based proxy
+    b_order = max(0.05, min(1.20, math.exp(-1.4 * (bond_distance_angstrom - ref_d))))
+
+    if not is_optimized_adduct:
+        # Pre-reactive contact: do not fabricate product bond order (INV-007, INV-010)
+        return CovalentBondNatureResult(
+            bond_type="Pre-reactive Contact (Unreacted)",
+            equilibrium_distance_angstrom=bond_distance_angstrom,
+            wiberg_bond_order=None,
+            charge_transfer_e=None,
+            bond_covalency_percent=None,
+            bond_likelihood_proxy=round(b_order, 3),
+            is_reversible=is_reversible_warhead,
+            is_calculated=False,
+            status="not_evaluated",
+            evidence_type="model_derived",
+            explanation=(
+                "Covalent product analysis not performed. Required evidence: "
+                "optimized adduct geometry, computed bond-order analysis, and "
+                "product energy on a consistent level of theory."
+            ),
+            warnings=["Bond order calculation requires optimized adduct QM calculation; not evaluated."],
+        )
+
+    covalency_pct = min(100.0, max(10.0, b_order * 100.0))
     chi = {"H": 2.20, "C": 2.55, "N": 3.04, "O": 3.44, "S": 2.58}
     d_chi = abs(chi.get(nucleophile_element, 3.44) - chi.get(electrophile_element, 2.55))
     q_transfer = -(0.18 + 0.12 * d_chi)
 
     bond_type = f"Polar covalent sigma-bond ({nucleophile_element}-{electrophile_element})"
-    reversibility_str = "Reversible covalent bond" if is_reversible_warhead else "Irreversible covalent adduct"
+    reversibility_str = "Reversible covalent bond" if is_reversible_warhead else "Predicted stable covalent adduct"
     explanation = (
-        f"Formed {nucleophile_element}-{electrophile_element} bond exhibits a Wiberg bond order of "
-        f"{b_order:.2f} at {bond_distance_angstrom:.2f} A, consistent with a single covalent bond "
-        f"in the optimized adduct with {abs(q_transfer):.2f} e charge transfer. {reversibility_str}."
+        f"Adduct {nucleophile_element}-{electrophile_element} geometry at {bond_distance_angstrom:.2f} A "
+        f"exhibits an estimated bond order of {b_order:.2f}, consistent with a single covalent bond "
+        f"with {abs(q_transfer):.2f} e charge transfer. {reversibility_str}."
     )
 
     return CovalentBondNatureResult(
         bond_type=bond_type,
         equilibrium_distance_angstrom=bond_distance_angstrom,
-        wiberg_bond_order=b_order,
-        charge_transfer_e=q_transfer,
-        bond_covalency_percent=covalency_pct,
+        wiberg_bond_order=round(b_order, 3),
+        charge_transfer_e=round(q_transfer, 3),
+        bond_covalency_percent=round(covalency_pct, 1),
+        bond_likelihood_proxy=round(b_order, 3),
         is_reversible=is_reversible_warhead,
+        is_calculated=True,
+        status="computed",
+        evidence_type="model_derived",
         explanation=explanation,
+        warnings=[],
     )
 
 
@@ -372,8 +451,12 @@ def compute_adduct_quantum_profile(
     nucleophile_element: str = "O",
     electrophile_element: str = "N",
     is_reversible_warhead: bool = False,
+    is_optimized_adduct: bool = False,
+    has_optimized_adduct: Optional[bool] = None,
 ) -> AdductQuantumProfile:
-    """Computes the full 4-checkpoint quantum verification profile for the covalent adduct."""
+    """Computes the 4-checkpoint quantum verification profile for the pre-reactive complex."""
+    if has_optimized_adduct is not None:
+        is_optimized_adduct = has_optimized_adduct
     if ligand_heavy_atoms is None:
         ligand_heavy_atoms = [
             ("C", 1), ("C", 2), ("C", 3), ("O", 4), ("C", 5),
@@ -402,11 +485,13 @@ def compute_adduct_quantum_profile(
         electrophilicity_index=pol.complex_electrophilicity_ev,
     )
 
+    # INV-007 / INV-010: Do NOT replace distance with 1.45 A. Evaluate pre-reactive contact as unreacted.
     bond = evaluate_covalent_bond_nature(
         nucleophile_element=nucleophile_element,
         electrophile_element=electrophile_element,
-        bond_distance_angstrom=1.45 if distance_angstrom > 2.0 else distance_angstrom,
+        bond_distance_angstrom=distance_angstrom,
         is_reversible_warhead=is_reversible_warhead,
+        is_optimized_adduct=is_optimized_adduct,
     )
 
     return AdductQuantumProfile(
