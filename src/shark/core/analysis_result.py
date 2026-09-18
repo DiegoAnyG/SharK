@@ -163,7 +163,12 @@ class SharKAnalysisResult:
         p_nac_raw = self.dynamics.get("p_nac") if isinstance(self.dynamics, dict) else None
         p_nac_val, p_nac_reason = _extract_val_and_reason(p_nac_raw)
 
-        s_bind_raw = self.binding.get("s_bind") if isinstance(self.binding, dict) else None
+        s_bind_raw = None
+        if isinstance(self.binding, dict):
+            for k in ("s_bind", "docking_score", "affinity_score"):
+                if self.binding.get(k) is not None:
+                    s_bind_raw = self.binding.get(k)
+                    break
         s_bind_val, _ = _extract_val_and_reason(s_bind_raw)
 
         cqm_status = self.cluster_qm.get("status", "not_evaluated") if isinstance(self.cluster_qm, dict) else "not_evaluated"
