@@ -719,9 +719,38 @@ class TotalCovalentFeasibility:
     weights: dict
     summary: str
     warnings: List[str] = field(default_factory=list)
+    rgi_static: Optional[float] = None
+    completeness: Dict[str, bool] = field(default_factory=dict)
+    missing_components: List[str] = field(default_factory=list)
+    s_bind: Optional[float] = None
+    s_nac: Optional[float] = None
+    s_chem: Optional[float] = None
     # Backward compatibility fields
     cfi_total: float = 0.0
     percentage: float = 0.0
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Serializes feasibility data into schema v2 format."""
+        return {
+            "s_bind": self.s_bind if self.s_bind is not None else self.affinity_score,
+            "p_nac": self.p_nac,
+            "s_chem": self.s_chem if self.s_chem is not None else self.ts_score,
+            "rgi_static": self.rgi_static,
+            "cfi_pre": self.cfi_pre,
+            "cfi_final": self.cfi_final,
+            "status": self.status,
+            "tier": self.tier,
+            "completeness": dict(self.completeness),
+            "missing_components": list(self.missing_components),
+            "docking_score": self.docking_score,
+            "delta_g_ts": self.delta_g_ts,
+            "k_chem": self.k_chem,
+            "weights": dict(self.weights),
+            "summary": self.summary,
+            "warnings": list(self.warnings),
+            "cfi_total": self.cfi_total,
+            "percentage": self.percentage,
+        }
 
 
 def compute_total_covalent_feasibility(
@@ -742,31 +771,10 @@ def compute_total_covalent_feasibility(
 ) -> TotalCovalentFeasibility:
     """Computes the Unified Covalent Feasibility Indices (CFI_pre and CFI_final).
 
-    Adopts a weighted geometric mean so an impossible chemical step (S_chem -> 0)
-    cannot be compensated by high non-covalent affinity.
-
-    Parameters
-    ----------
-    docking_score : float or None
-        Non-covalent docking binding energy in kcal/mol (e.g., -7.244 kcal/mol).
-    p_nac : float or None
-        Near-Attack Conformation persistence from MD trajectory clustering in [0.0, 1.0].
-    delta_g_ts : float or None
-        Eyring activation free energy barrier in kcal/mol (from Tier 4 TS modeling).
-    static_cfi : float or None
-        Fallback static geometric composite feasibility if MD is unavailable.
-    k_chem : float or None
-        Rate constant of the chemical step in s^-1.
-    w_bind : float
-        Weight for reversible binding recognition (default 0.20).
-    w_nac : float
-        Weight for conformational dynamics and near-attack persistence (default 0.40).
-    w_chem : float
-        Weight for chemical transition state activation barrier (default 0.40).
-    ref_score : float
-        Docking reference energy for S_bind sigmoidal scaling (default -6.0 kcal/mol).
-    tau : float
-        Softness parameter for S_bind sigmoidal scaling (default 1.5 kcal/mol).
+    Strict scientific invariants enforced:
+    - INV-001: Static geometry must NEVER populate P_NAC or s_nac.
+    - INV-002: CFI_pre requires dynamic P_NAC. Missing P_NAC means CFI_pre is None.
+    - INV-003: CFI_final requires S_bind, P_NAC, and S_chem. Missing any means CFI_final is None.
     """
     if w_aff is not None:
         w_bind = w_aff
@@ -782,25 +790,24 @@ def compute_total_covalent_feasibility(
         warnings.append("Reversible binding score S_bind not evaluated (missing docking score).")
 
     # 2. Pillar 2: Near-Attack Conformation dynamics / preorganization
+    # INV-001: Static geometry must NEVER populate P_NAC or s_nac.
     if p_nac is not None and math.isfinite(p_nac):
         s_nac = min(1.0, max(0.0, p_nac))
-    elif static_cfi is not None and math.isfinite(static_cfi):
-        s_nac = min(1.0, max(0.0, static_cfi))
     else:
         s_nac = None
         warnings.append("Dynamic reactive preorganization P_NAC not evaluated.")
 
+    # Explicit separate static reactive geometry index
+    rgi_static = static_cfi if (static_cfi is not None and math.isfinite(static_cfi)) else None
+
     # 3. Pre-reactive feasibility CFI_pre (geometric mean of S_bind and P_NAC)
+    # INV-002: Requires dynamic preorganization (P_NAC). If P_NAC is missing, CFI_pre is None.
     if s_bind is not None and s_nac is not None:
         tot_pre_w = w_bind + w_nac
         w1 = w_bind / tot_pre_w if tot_pre_w > 0 else 0.35
         w2 = w_nac / tot_pre_w if tot_pre_w > 0 else 0.65
         log_cfi_pre = w1 * math.log(max(s_bind, EPS)) + w2 * math.log(max(s_nac, EPS))
         cfi_pre = round(math.exp(log_cfi_pre), 4)
-    elif s_nac is not None:
-        cfi_pre = round(s_nac, 4)
-    elif s_bind is not None:
-        cfi_pre = round(s_bind, 4)
     else:
         cfi_pre = None
 
@@ -822,21 +829,24 @@ def compute_total_covalent_feasibility(
             exp_arg = -delta_g_ts / rt_kcal
             k_chem = prefac * math.exp(exp_arg) if exp_arg > -700 else 0.0
 
-        # Weighted geometric mean: CFI_final = S_bind^w1 * P_NAC^w2 * S_chem^w3
-        v_bind = max(s_bind if s_bind is not None else 0.5, EPS)
-        v_nac = max(s_nac if s_nac is not None else 0.5, EPS)
-        v_chem = max(s_chem, EPS)
-
-        log_cfi = w_bind * math.log(v_bind) + w_nac * math.log(v_nac) + w_chem * math.log(v_chem)
-        cfi_final = round(math.exp(log_cfi), 4)
-        status = "Complete covalent evaluation"
-
-        if cfi_final >= 0.70:
-            tier = "High Covalent Feasibility"
-        elif cfi_final >= 0.40:
-            tier = "Moderate Covalent Feasibility"
+        # INV-003: CFI_final requires all 3 pillars (S_bind, P_NAC, S_chem).
+        if s_bind is not None and s_nac is not None:
+            v_bind = max(s_bind, EPS)
+            v_nac = max(s_nac, EPS)
+            v_chem = max(s_chem, EPS)
+            log_cfi = w_bind * math.log(v_bind) + w_nac * math.log(v_nac) + w_chem * math.log(v_chem)
+            cfi_final = round(math.exp(log_cfi), 4)
+            status = "Complete covalent evaluation"
+            if cfi_final >= 0.70:
+                tier = "High Covalent Feasibility"
+            elif cfi_final >= 0.40:
+                tier = "Moderate Covalent Feasibility"
+            else:
+                tier = "Low Covalent Feasibility"
         else:
-            tier = "Low Covalent Feasibility"
+            status = "Incomplete evaluation (missing dynamic preorganization)"
+            tier = "Incomplete Data"
+            warnings.append("CFI_final requires dynamic preorganization P_NAC in addition to transition-state barrier.")
     else:
         status = "Pending transition-state calculation"
         warnings.append("Transition-state activation barrier DeltaG‡ not evaluated; chemical step pending.")
@@ -850,6 +860,24 @@ def compute_total_covalent_feasibility(
         else:
             tier = "Incomplete Data"
 
+    completeness = {
+        "binding": s_bind is not None,
+        "docking": s_bind is not None,
+        "p_nac": s_nac is not None,
+        "dynamic_preorganization": s_nac is not None,
+        "chemical_accessibility": s_chem is not None,
+        "ts_barrier": s_chem is not None,
+        "cfi_pre": cfi_pre is not None,
+        "cfi_final": cfi_final is not None,
+    }
+    missing_components = []
+    if s_bind is None:
+        missing_components.append("docking")
+    if s_nac is None:
+        missing_components.append("p_nac")
+    if s_chem is None:
+        missing_components.append("ts_barrier")
+
     # Backward compatibility fields
     cfi_total = cfi_final if cfi_final is not None else (cfi_pre if cfi_pre is not None else 0.0)
     pct = round(cfi_total * 100.0, 1)
@@ -857,14 +885,17 @@ def compute_total_covalent_feasibility(
     parts = []
     if cfi_final is not None:
         parts.append(f"CFI_final: {cfi_final:.3f} ({tier}).")
+    elif cfi_pre is not None:
+        parts.append(f"CFI_pre: {cfi_pre:.3f} ({tier}, CFI_final: Pending transition-state calculation).")
     else:
-        pre_str = f"{cfi_pre:.3f}" if cfi_pre is not None else "N/A"
-        parts.append(f"CFI_pre: {pre_str} ({tier}, CFI_final: Pending transition-state calculation).")
+        parts.append("CFI: Incomplete (CFI_pre and CFI_final not available).")
 
     if s_bind is not None:
         parts.append(f"Pillar 1 (S_bind): {s_bind:.3f} (docking = {docking_score} kcal/mol).")
     if s_nac is not None:
         parts.append(f"Pillar 2 (P_NAC): {s_nac:.3f}.")
+    elif rgi_static is not None:
+        parts.append(f"Static RGI: {rgi_static:.3f} (static pose only, not dynamic P_NAC).")
     if s_chem is not None:
         parts.append(f"Pillar 3 (S_chem): {s_chem:.3f} (ΔG‡ = {delta_g_ts:.2f} kcal/mol).")
 
@@ -883,7 +914,13 @@ def compute_total_covalent_feasibility(
         weights=weights,
         summary=" ".join(parts),
         warnings=warnings,
+        rgi_static=rgi_static,
+        completeness=completeness,
+        missing_components=missing_components,
+        s_bind=s_bind,
+        s_nac=s_nac,
+        s_chem=s_chem,
         cfi_total=cfi_total,
-        percentage=pct
+        percentage=pct,
     )
 
