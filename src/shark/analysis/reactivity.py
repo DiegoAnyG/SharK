@@ -55,6 +55,7 @@ class LocalReactivityAtom:
     local_electrophilicity: Optional[float] = None  # omega_k = omega * f_k^+ (eV)
     is_warhead_candidate: bool = False
     rank: Optional[int] = None
+    fukui_method: str = "partial_charge_proxy"
 
 
 @dataclass
@@ -64,6 +65,9 @@ class ReactivityProfile:
     global_descriptors: CDFTDescriptors
     atoms: List[LocalReactivityAtom] = field(default_factory=list)
     warhead_candidates: List[LocalReactivityAtom] = field(default_factory=list)
+    fukui_method: str = "partial_charge_proxy"
+    charge_scheme: str = "loewdin"
+    warnings: List[str] = field(default_factory=list)
 
     @property
     def top_electrophile(self) -> Optional[LocalReactivityAtom]:
@@ -203,6 +207,17 @@ def build_reactivity_profile(
     if not coords:
         coords = [None] * n_atoms
 
+    has_charged = (anion_charges is not None and len(anion_charges) == n_atoms) or (
+        cation_charges is not None and len(cation_charges) == n_atoms
+    )
+    fukui_method = "finite_difference" if has_charged else "partial_charge_proxy"
+    warnings_list: List[str] = []
+    if not has_charged:
+        warnings_list.append(
+            "Anion/cation charges not provided; Fukui values are approximate partial-charge proxies, "
+            "not genuine finite-difference CDFT observables."
+        )
+
     f_plus, f_minus, f_zero = calculate_condensed_fukui(
         neutral_charges=charges,
         anion_charges=anion_charges,
@@ -234,7 +249,8 @@ def build_reactivity_profile(
             fukui_minus=fm,
             fukui_zero=fz,
             local_electrophilicity=omega_k,
-            is_warhead_candidate=is_cand
+            is_warhead_candidate=is_cand,
+            fukui_method=fukui_method,
         )
         atom_list.append(atom_obj)
         if is_cand:
@@ -249,6 +265,9 @@ def build_reactivity_profile(
         name=mol_name,
         global_descriptors=global_desc,
         atoms=atom_list,
-        warhead_candidates=candidates
+        warhead_candidates=candidates,
+        fukui_method=fukui_method,
+        charge_scheme=charge_type,
+        warnings=warnings_list,
     )
 

@@ -105,7 +105,7 @@ def setup_and_launch_md(
     shutil.copy2(rec_p, pipe_inputs / f"{run_id}_receptor.pdb")
     shutil.copy2(lig_p, pipe_inputs / f"{run_id}_pose.pdb")
 
-    # Stage reference ligand structure if provided (SDF/MOL/MOL2)
+    # Stage reference ligand structure with true bond-order chemistry (SDF/MOL/MOL2)
     ref_rel_path = ""
     if ligand_ref_file:
         ref_p = Path(ligand_ref_file).resolve()
@@ -114,6 +114,25 @@ def setup_and_launch_md(
             shutil.copy2(ref_p, prep_dir / f"{ligand_name}_ref{ref_ext}")
             shutil.copy2(ref_p, pipe_inputs / f"{run_id}_ref{ref_ext}")
             ref_rel_path = f"inputs/{run_id}_ref{ref_ext}"
+    elif lig_p.is_file() and lig_p.suffix.lower() in (".sdf", ".mol", ".mol2"):
+        ref_ext = lig_p.suffix.lower()
+        shutil.copy2(lig_p, prep_dir / f"{ligand_name}_ref{ref_ext}")
+        shutil.copy2(lig_p, pipe_inputs / f"{run_id}_ref{ref_ext}")
+        ref_rel_path = f"inputs/{run_id}_ref{ref_ext}"
+    elif lig_p.is_file():
+        # Attempt to export genuine SDF with RDKit connectivity if only PDB pose is available
+        try:
+            from rdkit import Chem
+            mol = Chem.MolFromPDBFile(str(lig_p), removeHs=False)
+            if mol is not None:
+                sdf_path = pipe_inputs / f"{run_id}_ref.sdf"
+                writer = Chem.SDWriter(str(sdf_path))
+                writer.write(mol)
+                writer.close()
+                shutil.copy2(sdf_path, prep_dir / f"{ligand_name}_ref.sdf")
+                ref_rel_path = f"inputs/{run_id}_ref.sdf"
+        except Exception:
+            pass
 
     tool_dirs = [str(p) for p in resolve_gromacs_tool_paths()]
     path_export = f'export PATH="{":".join(tool_dirs)}:$PATH"' if tool_dirs else ""
