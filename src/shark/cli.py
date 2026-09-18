@@ -409,12 +409,14 @@ def run_interactive():
         dft_dir = input('Directory with existing ORCA DFT outputs (.out) [optional, press enter to skip] > ').strip()
         if dft_dir:
             argv += ['--dft-dir', dft_dir]
-        qm_choice = input('Post-MD ab initio ORCA quantum calculation on solvated medoid [1: Active-Site Cluster QM Single-Point (HOMO/LUMO + CUBE orbitals, ~1-3 min) [Recommended], 2: Full Transition State (TS) Reaction Coordinate Scan & Activation Barrier (ΔG‡, ~30-60 min), 3: Skip QM step (Classical MD & Pre-reactive only)] [default: 1] > ').strip() or '1'
-        if qm_choice == '1':
-            argv += ['--orca-cluster-sp']
-        elif qm_choice == '2':
-            argv += ['--tier-4-ts']
-        exec_now = input('Launch GROMACS and ORCA simulation immediately? [Y/n] > ').strip().lower()
+        # Tier 3 Full Gold Standard chains MD -> Clustering -> Medoid Snapshot -> Active-Site Cluster QM & TS Reaction Coordinate Scan
+        argv += ['--orca-cluster-sp', '--tier-4-ts']
+        qm_model = input('Active site QM model [1: Minimal Capped Residue (recommended/fast), 2: Extended Pocket Cluster] [default: 1] > ').strip() or '1'
+        if qm_model == '2' or qm_model.lower().startswith('ext'):
+            argv += ['--qm-model', 'extended']
+        else:
+            argv += ['--qm-model', 'minimal']
+        exec_now = input('Launch complete Full Gold Standard pipeline (GROMACS MD + ORCA TS) immediately? [Y/n] > ').strip().lower()
         if exec_now != 'n':
             argv += ['--execute']
 
@@ -456,16 +458,29 @@ def run_interactive():
                     if snap_rec.is_file() and snap_lig.is_file():
                         argv += ['--work-dir', str(cand_dir)]
                         print(f"[TIER 4] Staged solvated medoid snapshot from: {cand_dir}")
+                        def_res = "THR309"
+                        ev_file = cand_dir / 'evidence.json'
+                        if ev_file.is_file():
+                            try:
+                                ev_data = json.loads(ev_file.read_text(encoding='utf-8'))
+                                b_cont = ev_data.get('static_reactive_geometry', {}).get('best_contact', {})
+                                if b_cont and b_cont.get('residue'):
+                                    def_res = b_cont['residue'].split(':')[0]
+                            except Exception:
+                                pass
+                        res_in = input(f'Target reactive residue [default: {def_res}] > ').strip() or def_res
+                        argv += ['--target-residue', res_in]
+            else:
+                rec, comp, pose, target_res = _prompt_covalent_targets(default_res="THR309")
+                if rec:
+                    argv += ['--target', rec]
+                if comp:
+                    argv += ['--compound', comp]
+                if pose:
+                    argv += ['--pose', str(pose)]
+                if target_res:
+                    argv += ['--target-residue', target_res]
 
-            rec, comp, pose, target_res = _prompt_covalent_targets(default_res="THR309")
-            if rec:
-                argv += ['--target', rec]
-            if comp:
-                argv += ['--compound', comp]
-            if pose:
-                argv += ['--pose', str(pose)]
-            if target_res:
-                argv += ['--target-residue', target_res]
             exec_now = input('Launch ORCA TS workflow immediately? [Y/n] > ').strip().lower()
             if exec_now != 'n':
                 argv += ['--execute']
@@ -665,6 +680,8 @@ def main(argv=None):
         if not (args.topology and args.trajectory):
             args.run_md = True
         args.covalent = True
+        args.orca_cluster_sp = True
+        args.tier_4_ts = True
     if args.tier_4_ts:
         args.covalent = True
     # One persistent root per invocation; explicit --work-dir remains supported.
@@ -1097,7 +1114,7 @@ def main(argv=None):
             d_score = p_top.score if (p_top and math.isfinite(p_top.score)) else None
             p_nac_val = clustering_info.get('p_nac') if clustering_info else None
             ts_res = covalent_summary.get('transition_state', {})
-            dg_val = ts_res.get('delta_g_activation_kcal') if ts_res else None
+            dg_val = (ts_res.get('delta_g_activation_kcal') or ts_res.get('activation_barrier_kcal')) if ts_res else None
             static_cfi = all_contacts[0].get('composite_feasibility') if all_contacts else None
 
             tot_feas = compute_total_covalent_feasibility(
