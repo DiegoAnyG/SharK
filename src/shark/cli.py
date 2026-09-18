@@ -1114,17 +1114,27 @@ def main(argv=None):
                 if any(k in w_type for k in ('reversible', 'pseudo', 'cyano', 'nitrile', 'furoxan', 'boron')):
                     is_rev = True
 
+                homo_val = -6.40
+                lumo_val = -2.89
+                orb_src = "model_derived"
+                if 'cluster_qm_res' in locals() and cluster_qm_res and cluster_qm_res.success:
+                    if cluster_qm_res.homo_energy_ev is not None and cluster_qm_res.lumo_energy_ev is not None:
+                        homo_val = float(cluster_qm_res.homo_energy_ev)
+                        lumo_val = float(cluster_qm_res.lumo_energy_ev)
+                        orb_src = "ORCA cluster single-point"
+
                 adduct_qm_prof = compute_adduct_quantum_profile(
                     distance_angstrom=att_dist,
                     burgi_dunitz_angle_deg=bd_ang,
-                    nucleophile_homo_ev=-6.40,
-                    electrophile_lumo_ev=-2.89,
+                    nucleophile_homo_ev=homo_val,
+                    electrophile_lumo_ev=lumo_val,
                     target_atom_index=el_idx,
                     target_atom_symbol=el_el_sym,
                     ligand_heavy_atoms=lig_h_atoms,
                     nucleophile_element=nucl_el_sym,
                     electrophile_element=el_el_sym,
                     is_reversible_warhead=is_rev,
+                    orbital_source=orb_src,
                 )
                 covalent_summary['adduct_qm'] = adduct_qm_prof.to_dict()
 

@@ -27,11 +27,12 @@ class FMOSymmetryResult:
     electrophile_lumo_ev: float
     overlap_integral_estimate: float
     explanation: str
-    name: str = "orbital_alignment_heuristic"
+    name: str = "orbital_alignment_descriptor"
     evidence_type: str = "model_derived"
+    orbital_source: str = "model_derived"
     warnings: List[str] = field(default_factory=lambda: [
-        "Not an orbital overlap integral",
-        "Does not determine wavefunction phase symmetry"
+        "Geometric orbital alignment proxy; not a computed wavefunction overlap integral",
+        "Does not determine ab initio phase symmetry"
     ])
 
     @property
@@ -43,6 +44,7 @@ class FMOSymmetryResult:
         return {
             "name": self.name,
             "evidence_type": self.evidence_type,
+            "orbital_source": self.orbital_source,
             "is_allowed": self.is_allowed,
             "status": self.status,
             "symmetry_type": self.symmetry_type,
@@ -98,10 +100,17 @@ class RegiospecificitySite:
     """Individual atom regiospecificity ranking entry."""
     atom_index: int
     atom_symbol: str
-    fukui_electrophilic: float
-    local_softness: float
-    rank: int
-    is_target_site: bool
+    candidate_site_score: float = 0.0
+    local_softness: float = 0.0
+    rank: int = 1
+    is_target_site: bool = False
+    fukui_electrophilic: Optional[float] = None
+
+    def __post_init__(self):
+        if self.fukui_electrophilic is not None and self.candidate_site_score == 0.0:
+            self.candidate_site_score = self.fukui_electrophilic
+        elif self.fukui_electrophilic is None:
+            self.fukui_electrophilic = self.candidate_site_score
 
 
 @dataclass
@@ -133,8 +142,9 @@ class RegiospecificityResult:
                 {
                     "atom_index": s.atom_index,
                     "atom_symbol": s.atom_symbol,
-                    "candidate_score": round(s.fukui_electrophilic, 4),
-                    "fukui_electrophilic": round(s.fukui_electrophilic, 4),
+                    "candidate_score": round(s.candidate_site_score, 4),
+                    "candidate_site_score": round(s.candidate_site_score, 4),
+                    "fukui_electrophilic": round(s.fukui_electrophilic if s.fukui_electrophilic is not None else s.candidate_site_score, 4),
                     "local_softness": round(s.local_softness, 4),
                     "rank": s.rank,
                     "is_target_site": s.is_target_site,
@@ -151,6 +161,7 @@ class CovalentBondNatureResult:
     """Characterization of the covalent bond / product adduct."""
     bond_type: str
     equilibrium_distance_angstrom: Optional[float] = None
+    distance_based_bond_order_proxy: Optional[float] = None
     wiberg_bond_order: Optional[float] = None
     charge_transfer_e: Optional[float] = None
     bond_covalency_percent: Optional[float] = None
@@ -162,6 +173,12 @@ class CovalentBondNatureResult:
     explanation: str = "Covalent product analysis not performed; requires optimized adduct geometry."
     warnings: List[str] = field(default_factory=list)
 
+    def __post_init__(self):
+        if self.distance_based_bond_order_proxy is None and self.wiberg_bond_order is not None:
+            self.distance_based_bond_order_proxy = self.wiberg_bond_order
+        elif self.wiberg_bond_order is None and self.distance_based_bond_order_proxy is not None:
+            self.wiberg_bond_order = self.distance_based_bond_order_proxy
+
     def to_dict(self) -> Dict[str, Any]:
         return {
             "status": self.status,
@@ -169,6 +186,7 @@ class CovalentBondNatureResult:
             "evidence_type": self.evidence_type,
             "bond_type": self.bond_type,
             "equilibrium_distance_angstrom": round(self.equilibrium_distance_angstrom, 3) if self.equilibrium_distance_angstrom is not None else None,
+            "distance_based_bond_order_proxy": self.distance_based_bond_order_proxy,
             "wiberg_bond_order": self.wiberg_bond_order,
             "charge_transfer_e": self.charge_transfer_e,
             "bond_covalency_percent": self.bond_covalency_percent,
@@ -203,6 +221,7 @@ def evaluate_fmo_phase_symmetry(
     burgi_dunitz_angle_deg: float = 132.7,
     nucleophile_symbol: str = "O",
     electrophile_symbol: str = "N",
+    orbital_source: str = "model_derived",
 ) -> FMOSymmetryResult:
     """Evaluates orbital alignment and approach trajectory using geometric FMO heuristic model."""
     fmo_gap = abs(electrophile_lumo_ev - nucleophile_homo_ev)
@@ -222,15 +241,20 @@ def evaluate_fmo_phase_symmetry(
 
     is_allowed = is_angle_favorable and is_dist_favorable and (fmo_gap < 7.5)
 
+    ev_type = "orca_cluster" if orbital_source != "model_derived" else "model_derived"
+    warns = [
+        f"Geometric orbital alignment proxy (orbital source: {orbital_source}); not a computed wavefunction overlap integral",
+        "Does not determine ab initio phase symmetry"
+    ]
+
     if is_allowed:
-        status = "Favorable Trajectory Geometry (Model Heuristic)"
         status = "Constructive Phase Overlap (Model Heuristic)"
         sym_type = "Constructive sigma-addition (Model Heuristic)"
         explanation = (
             f"Approach trajectory is geometrically compatible with addition. "
             f"The nucleophilic lone pair ({nucleophile_symbol}) approaches within the Bürgi-Dunitz cone "
             f"({burgi_dunitz_angle_deg:.1f} deg) with FMO gap ({fmo_gap:.2f} eV). "
-            f"Note: Model-derived geometric proxy, not a computed orbital overlap integral."
+            f"Note: Model-derived geometric proxy (source: {orbital_source}), not a computed orbital overlap integral."
         )
     else:
         status = "Destructive or Hindered Symmetry (Model Heuristic)"
@@ -251,6 +275,9 @@ def evaluate_fmo_phase_symmetry(
         electrophile_lumo_ev=electrophile_lumo_ev,
         overlap_integral_estimate=s_overlap,
         explanation=explanation,
+        evidence_type=ev_type,
+        orbital_source=orbital_source,
+        warnings=warns,
     )
 
 
@@ -453,6 +480,7 @@ def compute_adduct_quantum_profile(
     is_reversible_warhead: bool = False,
     is_optimized_adduct: bool = False,
     has_optimized_adduct: Optional[bool] = None,
+    orbital_source: str = "model_derived",
 ) -> AdductQuantumProfile:
     """Computes the 4-checkpoint quantum verification profile for the pre-reactive complex."""
     if has_optimized_adduct is not None:
@@ -471,6 +499,7 @@ def compute_adduct_quantum_profile(
         burgi_dunitz_angle_deg=burgi_dunitz_angle_deg,
         nucleophile_symbol=nucleophile_element,
         electrophile_symbol=electrophile_element,
+        orbital_source=orbital_source,
     )
 
     pol = evaluate_pocket_polarization(
