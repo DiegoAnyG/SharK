@@ -1015,9 +1015,10 @@ def main(argv=None):
                     print(f"  Activation Barrier ({profile.barrier_symbol}): {profile.activation_barrier_kcal:.2f} kcal/mol")
                     if profile.reaction_energy_kcal is not None:
                         print(f"  Reaction Energy ({profile.reaction_energy_symbol}): {profile.reaction_energy_kcal:.2f} kcal/mol")
+                    k_str = f"{profile.rate_constant_s:.3e} s^-1" if profile.rate_constant_s is not None else "Not available (requires Gibbs free energy)"
                     print(f"  Kinetic Feasibility:          {profile.kinetic_feasibility}")
                     print(f"  Estimated Half-Life (t1/2):    {profile.estimated_half_life_str}")
-                    print(f"  Rate Constant (k):             {profile.rate_constant_s:.3e} s^-1")
+                    print(f"  Rate Constant (k):             {k_str}")
                     print("=" * 65)
 
                     if covalent_summary is not None:
@@ -1065,6 +1066,7 @@ def main(argv=None):
                 'cfi_pre': tot_feas.cfi_pre,
                 'cfi_total': tot_feas.cfi_total,
                 'percentage': tot_feas.percentage,
+                'status': tot_feas.status,
                 'tier': tot_feas.tier,
                 'affinity_score': tot_feas.affinity_score,
                 'nac_score': tot_feas.nac_score,
@@ -1072,11 +1074,13 @@ def main(argv=None):
                 'docking_score': tot_feas.docking_score,
                 'p_nac': tot_feas.p_nac,
                 'delta_g_ts': tot_feas.delta_g_ts,
+                'k_chem': tot_feas.k_chem,
                 'rgi_static': tot_feas.rgi_static,
                 'completeness': tot_feas.completeness,
                 'missing_components': tot_feas.missing_components,
                 'weights': tot_feas.weights,
                 'summary': tot_feas.summary,
+                'warnings': tot_feas.warnings,
             }
             print(f"[FEASIBILITY] {tot_feas.summary}")
 

@@ -443,6 +443,13 @@ def generate_html_dossier(project_name: str, poses_data: list[dict], out_html: s
                 tf_items.append(('Final Feasibility Index (CFI_final)', "Not available (dynamic trajectory and TS chemical barrier missing)"))
                 tf_items.append(('Status', "<span style='color:#b45309;font-weight:600;'>CFI_pre = Not available · CFI_final = Not available</span> (Requires MD trajectory for CFI_pre, and TS calculation for CFI_final)"))
 
+            missing_comps = tot_feas.get('missing_components') or []
+            if missing_comps:
+                tf_items.append(('Missing Pillars', f"<span style='color:#b45309;font-weight:600;'>{', '.join(missing_comps)}</span>"))
+            tf_warns = tot_feas.get('warnings') or []
+            if tf_warns:
+                tf_items.append(('Methodological Warnings', "<br>".join(f"• {w}" for w in tf_warns)))
+
             tot_feas_block = (
                 f'<div class="insight" style="margin:20px 0;background:#f8fafc;border-left:4px solid #087b70;padding:16px 20px;border-radius:0 10px 10px 0;">'
                 f'<h3 style="margin:0 0 8px;display:flex;align-items:center;">Unified Covalent Feasibility Evaluation <span class="help-bubble" tabindex="0" data-tooltip="Disentangles reversible recognition (S_bind), dynamic preorganization (P_NAC), local reactive geometry (RGI), and Eyring chemical activation kinetics (S_chem).">?</span></h3>'
