@@ -635,6 +635,22 @@ def generate_html_dossier(project_name: str, poses_data: list[dict], out_html: s
                             break
                 if snap_rec and snap_lig and Path(snap_rec).is_file() and Path(snap_lig).is_file():
                     adduct_pdb = build_adduct_pdb(snap_lig, snap_rec, target_residue=best.get('residue', 'THR309'), dyad_residue=best.get('catalytic_dyad_residue'))
+                    
+                    # Resolve cluster QM cubes if available
+                    cqm_dict = covalent_summary.get('cluster_qm') or {}
+                    h_cube = covalent_summary.get('homo_cube_data')
+                    l_cube = covalent_summary.get('lumo_cube_data')
+                    if not h_cube and cqm_dict.get('homo_cube') and Path(cqm_dict['homo_cube']).is_file():
+                        try:
+                            h_cube = Path(cqm_dict['homo_cube']).read_text(encoding='utf-8')
+                        except Exception:
+                            pass
+                    if not l_cube and cqm_dict.get('lumo_cube') and Path(cqm_dict['lumo_cube']).is_file():
+                        try:
+                            l_cube = Path(cqm_dict['lumo_cube']).read_text(encoding='utf-8')
+                        except Exception:
+                            pass
+
                     adduct_viewer_block = generate_adduct_viewer_html(
                         pdb_data=adduct_pdb,
                         target_residue=best.get('residue', 'THR309'),
@@ -644,6 +660,8 @@ def generate_html_dossier(project_name: str, poses_data: list[dict], out_html: s
                         burgi_dunitz_angle=best.get('burgi_dunitz_angle'),
                         dyad_residue=best.get('catalytic_dyad_residue'),
                         cluster_qm_data=covalent_summary.get('cluster_qm'),
+                        homo_cube_data=h_cube,
+                        lumo_cube_data=l_cube,
                         adduct_qm_data=covalent_summary.get('adduct_qm'),
                         standalone=False
                     )
@@ -654,12 +672,12 @@ def generate_html_dossier(project_name: str, poses_data: list[dict], out_html: s
         cluster_qm_block = ""
         cluster_qm = covalent_summary.get('cluster_qm')
         if cluster_qm and cluster_qm.get('success'):
-            c_homo = cluster_qm.get('homo_ev')
-            c_lumo = cluster_qm.get('lumo_ev')
+            c_homo = cluster_qm.get('homo_ev') if cluster_qm.get('homo_ev') is not None else cluster_qm.get('homo_energy_ev')
+            c_lumo = cluster_qm.get('lumo_ev') if cluster_qm.get('lumo_ev') is not None else cluster_qm.get('lumo_energy_ev')
             c_gap = cluster_qm.get('gap_ev')
             c_en = cluster_qm.get('electronic_energy_hartree')
             c_meth = cluster_qm.get('method', 'r2SCAN-3c')
-            c_atoms = cluster_qm.get('num_atoms', 'N/A')
+            c_atoms = cluster_qm.get('num_atoms') or cluster_qm.get('n_atoms', 'N/A')
             cluster_qm_block = (
                 f'<div class="cluster-qm-section" style="margin:20px 0;background:#f0f9ff;border:1px solid #bae6fd;border-radius:10px;padding:16px;">'
                 f'<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">'
