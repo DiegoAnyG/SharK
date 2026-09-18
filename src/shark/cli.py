@@ -340,7 +340,19 @@ def main(argv=None):
     parser.add_argument('--scan-steps', type=int, default=18, help='Number of scan steps along reaction coordinate (default: 18)')
     parser.add_argument('--ph', type=float, default=7.4, help='Solution pH for residue protonation and microstate assignment (default: 7.4)')
     parser.add_argument('--orca-cluster-sp', action='store_true', help='Execute real ab initio ORCA single-point calculation on the extracted active-site QM cluster and generate HOMO/LUMO 3D volumetric isosurfaces')
+    parser.add_argument('--report-from-evidence', help='Generate HTML dossier directly from an existing evidence.json file without running calculations')
     args = parser.parse_args(arguments)
+    if args.report_from_evidence:
+        ev_file = Path(args.report_from_evidence).expanduser().resolve()
+        if not ev_file.is_file():
+            sys.stderr.write(f"ERROR: Evidence file not found: {ev_file}\n")
+            return 1
+        from .core.analysis_result import SharKAnalysisResult
+        res = SharKAnalysisResult.from_json(ev_file)
+        out_html = Path(args.html).expanduser().resolve() if args.html else ev_file.parent / "dossier.html"
+        generate_html_dossier(res.analysis_id or "SharK Analysis", [], out_html, result=res)
+        print(f"[REPORT] Regenerated dossier from evidence: {out_html}")
+        return 0
     if args.interactive or not arguments:
         try:
             return run_interactive()
@@ -349,6 +361,13 @@ def main(argv=None):
     if args.fast_analysis:
         args.covalent = True
     if args.simple_gold_standard:
+        if not (args.topology and args.trajectory):
+            sys.stderr.write(
+                "ERROR: --simple-gold-standard requires both --topology and --trajectory "
+                "because dynamic NAC analysis is part of this workflow. "
+                "Use --fast-analysis for static-only analysis.\n"
+            )
+            return 1
         args.covalent = True
     if args.orca_cluster_sp:
         args.covalent = True
@@ -708,21 +727,27 @@ def main(argv=None):
                     ts_verif = parse_orca_ts_output(ts_work_dir / '02_optts.out', property_file_path=ts_work_dir / '02_optts.property.txt')
                     print(f"[TIER 4] Verification: {ts_verif.transition_vector_summary}")
 
-                    reactants_g = scan_res.points[0].energy_hartree if scan_res.points else ts_verif.electronic_energy_hartree
-                    ts_g = ts_verif.gibbs_free_energy_hartree if ts_verif.gibbs_free_energy_hartree != 0.0 else ts_verif.electronic_energy_hartree
-                    prod_g = scan_res.points[-1].energy_hartree if scan_res.points else None
+                    reactants_el = scan_res.points[0].energy_hartree if scan_res.points else None
+                    reactants_g = None
+                    ts_el = ts_verif.electronic_energy_hartree if ts_verif.electronic_energy_hartree != 0.0 else None
+                    ts_g = ts_verif.gibbs_free_energy_hartree if ts_verif.gibbs_free_energy_hartree != 0.0 else None
+                    prod_el = scan_res.points[-1].energy_hartree if scan_res.points else None
+                    prod_g = None
 
                     profile = compute_reaction_profile(
+                        reactants_electronic=reactants_el,
+                        ts_electronic=ts_el,
+                        product_electronic=prod_el,
                         reactants_gibbs=reactants_g,
                         ts_gibbs=ts_g,
                         product_gibbs=prod_g,
                         is_first_order_ts=ts_verif.is_valid_first_order_saddle_point
                     )
                     print("=" * 65)
-                    print(f" [TIER 4] REACTION THERMOCHEMISTRY & KINETICS")
-                    print(f"  Activation Free Energy (ΔG‡): {profile.delta_g_activation_kcal:.2f} kcal/mol")
-                    if profile.delta_g_reaction_kcal is not None:
-                        print(f"  Reaction Free Energy (ΔG_rxn): {profile.delta_g_reaction_kcal:.2f} kcal/mol")
+                    print(f" [TIER 4] REACTION THERMOCHEMISTRY & KINETICS ({profile.energy_basis.upper()})")
+                    print(f"  Activation Barrier ({profile.barrier_symbol}): {profile.activation_barrier_kcal:.2f} kcal/mol")
+                    if profile.reaction_energy_kcal is not None:
+                        print(f"  Reaction Energy ({profile.reaction_energy_symbol}): {profile.reaction_energy_kcal:.2f} kcal/mol")
                     print(f"  Kinetic Feasibility:          {profile.kinetic_feasibility}")
                     print(f"  Estimated Half-Life (t1/2):    {profile.estimated_half_life_str}")
                     print(f"  Rate Constant (k):             {profile.rate_constant_s:.3e} s^-1")
@@ -730,13 +755,21 @@ def main(argv=None):
 
                     if covalent_summary is not None:
                         covalent_summary['transition_state'] = {
+                            'energy_basis': profile.energy_basis,
+                            'barrier_symbol': profile.barrier_symbol,
+                            'reaction_energy_symbol': profile.reaction_energy_symbol,
                             'delta_g_activation_kcal': profile.delta_g_activation_kcal,
                             'delta_g_reaction_kcal': profile.delta_g_reaction_kcal,
+                            'delta_e_activation_kcal': profile.delta_e_activation_kcal,
+                            'delta_e_reaction_kcal': profile.delta_e_reaction_kcal,
+                            'activation_barrier_kcal': profile.activation_barrier_kcal,
+                            'reaction_energy_kcal': profile.reaction_energy_kcal,
                             'kinetic_feasibility': profile.kinetic_feasibility,
                             'half_life': profile.estimated_half_life_str,
                             'model_type': cluster.model_type,
                             'summary': profile.summary,
                             'is_first_order_ts': ts_verif.is_valid_first_order_saddle_point,
+                            'warnings': profile.warnings,
                         }
                 else:
                     print(f"[TIER 4] To execute the transition state search manually, run:")
@@ -761,6 +794,8 @@ def main(argv=None):
                 static_cfi=static_cfi
             )
             covalent_summary['total_feasibility'] = {
+                'cfi_final': tot_feas.cfi_final,
+                'cfi_pre': tot_feas.cfi_pre,
                 'cfi_total': tot_feas.cfi_total,
                 'percentage': tot_feas.percentage,
                 'tier': tot_feas.tier,
@@ -770,6 +805,9 @@ def main(argv=None):
                 'docking_score': tot_feas.docking_score,
                 'p_nac': tot_feas.p_nac,
                 'delta_g_ts': tot_feas.delta_g_ts,
+                'rgi_static': tot_feas.rgi_static,
+                'completeness': tot_feas.completeness,
+                'missing_components': tot_feas.missing_components,
                 'weights': tot_feas.weights,
                 'summary': tot_feas.summary,
             }
@@ -950,12 +988,50 @@ def main(argv=None):
                                 'softness_ev': desc.softness_ev,
                             }
 
+        from .core.analysis_result import SharKAnalysisResult
+        out_dir = out_file.parent
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+        req_wf = 'simple_gold_standard' if args.simple_gold_standard else ('full_gold_standard' if args.full_gold_standard else ('fast_analysis' if args.fast_analysis else 'custom'))
+        analysis_result = SharKAnalysisResult(
+            analysis_id=str(session.project_name),
+            workflow={
+                'requested': req_wf,
+                'executed': req_wf,
+                'status': 'completed',
+                'degraded': False,
+                'degradation_reason': None,
+            },
+            binding={
+                'docking_score': d_score if 'd_score' in locals() else None,
+                'affinity_score': tot_feas.affinity_score if 'tot_feas' in locals() else None,
+            },
+            static_reactive_geometry={
+                'rgi_static': tot_feas.rgi_static if 'tot_feas' in locals() else None,
+                'best_contact': all_contacts[0] if 'all_contacts' in locals() and all_contacts else None,
+            },
+            dynamics=clustering_info if 'clustering_info' in locals() and clustering_info else {},
+            cluster_qm=c_qm_dict if 'c_qm_dict' in locals() and c_qm_dict else {},
+            transition_state=covalent_summary.get('transition_state', {}) if covalent_summary else {},
+            adduct=covalent_summary.get('adduct_qm', {}) if covalent_summary else {},
+            feasibility=covalent_summary.get('total_feasibility', {}) if covalent_summary else {},
+            completeness=tot_feas.completeness if 'tot_feas' in locals() else {},
+            warnings=tot_feas.warnings if 'tot_feas' in locals() else [],
+            provenance={'project': session.project_name, 'work_dir': str(args.work_dir)},
+        )
+
+        try:
+            analysis_result.write_evidence_json(out_dir / 'evidence.json')
+            analysis_result.write_analysis_manifest(out_dir / 'analysis_manifest.json')
+        except Exception as e:
+            print(f"[NOTE] Could not write evidence JSON: {e}")
+
         generate_html_dossier(session.project_name, poses_data, out_file,
-                              qm_summary=qm_summary, covalent_summary=covalent_summary)
+                              qm_summary=qm_summary, covalent_summary=covalent_summary,
+                              result=analysis_result)
 
         # Consolidate structured machine-readable deliverables in job directory
         try:
-            out_dir = out_file.parent
             if covalent_summary:
                 (out_dir / 'covalent_feasibility.json').write_text(
                     json.dumps(covalent_summary, indent=2, default=str) + '\n', encoding='utf-8')
