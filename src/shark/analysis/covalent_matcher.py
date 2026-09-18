@@ -456,6 +456,14 @@ def extract_pocket_nucleophiles(
     if not ligand_coords:
         return []
 
+    # Normalize ligand coordinates if passed as (idx, elem, coords) tuples
+    clean_coords = []
+    for c in ligand_coords:
+        if isinstance(c, (list, tuple)) and len(c) == 3 and isinstance(c[2], (list, tuple)):
+            clean_coords.append(c[2])
+        else:
+            clean_coords.append(c)
+
     target_res_filter = None
     target_num_filter = None
     if target_residue:
@@ -484,7 +492,7 @@ def extract_pocket_nucleophiles(
 
         # Compute minimum distance to ligand
         nucl_crd = at["coords"]
-        min_d = min(_euclidean_distance(nucl_crd, lig_crd) for lig_crd in ligand_coords)
+        min_d = min(_euclidean_distance(nucl_crd, lig_crd) for lig_crd in clean_coords)
 
         if min_d <= pocket_cutoff:
             pocket_nucleophiles.append(PocketNucleophile(

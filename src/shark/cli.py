@@ -42,6 +42,210 @@ def interactive_session_picker() -> Path | None:
     return Path(choice).expanduser()
 
 
+def _safe_float(val) -> Optional[float]:
+    if val is None:
+        return None
+    try:
+        f = float(val)
+        return f if math.isfinite(f) else None
+    except (TypeError, ValueError):
+        return None
+
+
+def interactive_receptor_picker(session) -> Optional[str]:
+    """Interactively select a target receptor from the session."""
+    receptors = sorted(set(p.receptor_id for p in session.poses)) if session.poses else sorted(session.receptors.keys())
+    if not receptors:
+        return None
+    if len(receptors) == 1:
+        print(f"\n[Receptor] Target receptor detected: {receptors[0]}")
+        return receptors[0]
+
+    print("\nAvailable Receptors / Targets in Session:")
+    for idx, rec in enumerate(receptors, 1):
+        c_count = len(set(p.ligand_id for p in session.poses if p.receptor_id == rec))
+        p_count = sum(1 for p in session.poses if p.receptor_id == rec)
+        count_str = f"({c_count} compounds, {p_count} poses)" if p_count > 0 else ""
+        print(f"  [{idx:2d}] {rec:<24} {count_str}")
+
+    choice = input(f"Select receptor [1-{len(receptors)}, default: 1] > ").strip()
+    if not choice:
+        return receptors[0]
+    if choice.isdigit() and 1 <= int(choice) <= len(receptors):
+        return receptors[int(choice) - 1]
+    for rec in receptors:
+        if rec.casefold() == choice.casefold():
+            return rec
+    return receptors[0]
+
+
+def interactive_compound_picker(session, receptor_id: Optional[str] = None) -> Optional[str]:
+    """Interactively select a ligand/compound ordered by top ranking."""
+    compounds = []
+    seen = set()
+
+    # 1. Try ranking_df if available
+    if session.ranking_df is not None and not session.ranking_df.empty:
+        df = session.ranking_df
+        if receptor_id and 'receptor' in df.columns:
+            m = df['receptor'].astype(str).str.casefold() == receptor_id.casefold()
+            if not m.any():
+                stem = receptor_id.split('~')[0].casefold()
+                m = df['receptor'].astype(str).str.casefold() == stem
+            if m.any():
+                df = df[m]
+
+        for rank, row in enumerate(df.to_dict('records'), 1):
+            c_name = str(row.get('compound') or row.get('name') or row.get('ligand'))
+            if not c_name or c_name.casefold() in seen:
+                continue
+            seen.add(c_name.casefold())
+            dock = _safe_float(row.get('best_dock', row.get('score')))
+            le = _safe_float(row.get('LE', row.get('efficiency')))
+            eff = _safe_float(row.get('effectiveness_pct', row.get('efficiency_pct')))
+            compounds.append({
+                'rank': rank,
+                'name': c_name,
+                'vina': dock,
+                'le': le,
+                'eff': eff,
+            })
+
+    # 2. Fallback to poses if ranking_df not available or empty
+    if not compounds and session.poses:
+        subset = [p for p in session.poses if receptor_id is None or p.receptor_id == receptor_id]
+        grouped = {}
+        for p in subset:
+            grouped.setdefault(p.ligand_id, []).append(p)
+
+        sorted_groups = sorted(
+            grouped.items(),
+            key=lambda item: min((p.score for p in item[1] if math.isfinite(p.score)), default=math.inf)
+        )
+        for rank, (c_name, p_list) in enumerate(sorted_groups, 1):
+            best_p = min(p_list, key=lambda p: p.score if math.isfinite(p.score) else math.inf)
+            eff = _safe_float(best_p.metadata.get('effectiveness_pct', best_p.metadata.get('efficiency')))
+            compounds.append({
+                'rank': rank,
+                'name': c_name,
+                'vina': best_p.score if math.isfinite(best_p.score) else None,
+                'le': _safe_float(best_p.efficiency),
+                'eff': eff,
+            })
+
+    if not compounds:
+        return None
+
+    print(f"\nRanked Compounds for {receptor_id or 'all targets'} (Ordered by Top Ranking):")
+    display_limit = min(len(compounds), 20)
+    for c in compounds[:display_limit]:
+        vina_str = f"Vina: {c['vina']:.2f} kcal/mol" if c['vina'] is not None else "Vina: N/A"
+        le_str = f"LE: {c['le']:.2f}" if c['le'] is not None else "LE: N/A"
+        eff_str = f"Eficiencia: {c['eff']:.1f}%" if c['eff'] is not None else "Eficiencia: N/A"
+        print(f"  [{c['rank']:2d}] {c['name']:<28} (Top {c['rank']:2d} | {vina_str} | {le_str} | {eff_str})")
+
+    if len(compounds) > display_limit:
+        print(f"  ... ({len(compounds) - display_limit} additional compounds available by index or name)")
+
+    choice = input(f"Select compound [1-{len(compounds)}, exact name, or Enter for Top 1] > ").strip()
+    if not choice:
+        return compounds[0]['name']
+    if choice.isdigit() and 1 <= int(choice) <= len(compounds):
+        return compounds[int(choice) - 1]['name']
+    for c in compounds:
+        if c['name'].casefold() == choice.casefold():
+            return c['name']
+    return choice
+
+
+def interactive_pose_picker(session, compound_id: str, receptor_id: Optional[str] = None) -> Optional[int]:
+    """Interactively select a pose for the chosen compound and receptor."""
+    if not session.poses:
+        return None
+    matching = [p for p in session.poses if p.ligand_id.casefold() == compound_id.casefold()
+                and (receptor_id is None or p.receptor_id == receptor_id)]
+    if not matching:
+        return None
+
+    matching.sort(key=lambda p: (p.pose_idx, p.score if math.isfinite(p.score) else math.inf))
+
+    if len(matching) == 1:
+        p = matching[0]
+        vina_str = f"{p.score:.2f} kcal/mol" if math.isfinite(p.score) else "N/A"
+        le_val = _safe_float(p.efficiency or p.metadata.get('LE'))
+        le_str = f"{le_val:.2f}" if le_val is not None else "N/A"
+        eff_val = _safe_float(p.metadata.get('effectiveness_pct', p.metadata.get('efficiency')))
+        eff_str = f"{eff_val:.1f}%" if eff_val is not None else "N/A"
+        print(f"\n[Pose] Single docking pose: Pose #{p.pose_idx} (Vina: {vina_str} | LE: {le_str} | Eficiencia general: {eff_str})")
+        return p.pose_idx
+
+    print(f"\nAvailable Poses for '{compound_id}' in {receptor_id or 'target'}:")
+    for idx, p in enumerate(matching, 1):
+        vina_str = f"Vina: {p.score:.2f} kcal/mol" if math.isfinite(p.score) else "Vina: N/A"
+        le_val = _safe_float(p.efficiency or p.metadata.get('LE'))
+        le_str = f"LE: {le_val:.2f}" if le_val is not None else "LE: N/A"
+        eff_val = _safe_float(p.metadata.get('effectiveness_pct', p.metadata.get('efficiency')))
+        eff_str = f"Eficiencia general: {eff_val:.1f}%" if eff_val is not None else "Eficiencia general: N/A"
+        tag = " [Ranked Best / Default]" if p.pose_idx == 1 else ""
+        print(f"  [{idx:2d}] Pose #{p.pose_idx:<2d} ({vina_str} | {le_str} | {eff_str}){tag}")
+
+    choice = input(f"Select pose [1-{len(matching)}, default: 1] > ").strip()
+    if not choice:
+        return matching[0].pose_idx
+    if choice.isdigit() and 1 <= int(choice) <= len(matching):
+        return matching[int(choice) - 1].pose_idx
+    return matching[0].pose_idx
+
+
+def interactive_nucleophile_picker(
+    session,
+    compound_id: str,
+    receptor_id: Optional[str] = None,
+    pose_idx: int = 1
+) -> Optional[str]:
+    """Interactively select a target nucleophile residue from a detected list."""
+    detected = []
+    if receptor_id:
+        try:
+            from .analysis.covalent_matcher import parse_ligand_pose_coordinates, extract_pocket_nucleophiles
+            rec_pdb = session.receptor_for(receptor_id)
+            pose = session.get_pose(compound_id, pose_idx=pose_idx, receptor_id=receptor_id)
+            if pose and pose.pose_file and Path(pose.pose_file).is_file() and rec_pdb and Path(rec_pdb).is_file():
+                coords = parse_ligand_pose_coordinates(pose.pose_file)
+                detected = extract_pocket_nucleophiles(rec_pdb, coords, pocket_cutoff=6.5)
+        except Exception:
+            detected = []
+
+    if detected:
+        print(f"\nDetected Pocket Nucleophiles in {receptor_id} (within 6.5 Å of {compound_id} pose #{pose_idx}):")
+        print("  [ 1] All pocket nucleophiles (automatic multi-target scan) [Recommended]")
+        seen_res = set()
+        unique_nucls = []
+        for n in detected:
+            key = (n.residue_name, n.residue_number)
+            if key not in seen_res:
+                seen_res.add(key)
+                unique_nucls.append(n)
+
+        for idx, n in enumerate(unique_nucls, 2):
+            print(f"  [{idx:2d}] {n.residue_label:<10} ({n.atom_name}, min distance: {n.min_distance_to_ligand:.2f} Å)")
+        print("  [ C] Custom residue (enter manually)")
+
+        choice = input(f"Select target nucleophile [1-{len(unique_nucls) + 1}, or C, default: 1 (All)] > ").strip()
+        if not choice or choice == '1':
+            return None
+        if choice.isdigit() and 2 <= int(choice) <= len(unique_nucls) + 1:
+            picked = unique_nucls[int(choice) - 2]
+            return f"{picked.residue_name}{picked.residue_number}"
+        if choice.upper() == 'C':
+            custom = input("Enter target residue name/number (e.g., THR309, CYS145) > ").strip()
+            return custom if custom else None
+        return choice
+
+    res = input("Target nucleophile residue (e.g., THR309, CYS145) [all pocket nucleophiles] > ").strip()
+    return res if res else None
+
+
 def print_banner():
     print('=' * 80)
     print('SharK: Covalent Reactivity & Molecular Dynamics Analysis Suite')
@@ -53,6 +257,26 @@ def run_interactive():
     session = interactive_session_picker()
     if session is None:
         return 0
+
+    parsed_session = None
+    if session and Path(session).is_file():
+        try:
+            parsed_session = read_poliscreen_session(session)
+            print(f"\n[SharK] Session '{parsed_session.project_name}' loaded ({len(parsed_session.poses)} poses indexed).")
+        except Exception:
+            parsed_session = None
+
+    def _prompt_covalent_targets(default_res=""):
+        if parsed_session is not None:
+            rec = interactive_receptor_picker(parsed_session)
+            comp = interactive_compound_picker(parsed_session, rec)
+            pose = interactive_pose_picker(parsed_session, comp, rec) if comp else 1
+            res = interactive_nucleophile_picker(parsed_session, comp, rec, pose or 1) if comp else None
+            return rec, comp, pose, res
+        else:
+            comp = input('Exact compound name [leave blank for ranked top 1] > ').strip() or None
+            res = input(f'Target nucleophile residue (e.g., THR309, CYS145) [{default_res or "all pocket nucleophiles"}] > ').strip() or (default_res or None)
+            return None, comp, None, res
 
     print('\nAvailable Workflow Combos:')
     print('  [1] Fast Analysis (Docking-Based)')
@@ -107,10 +331,13 @@ def run_interactive():
 
     if choice == '1':
         argv += ['--fast-analysis']
-        compound = input('Exact compound name [leave blank for ranked top 1] > ').strip()
-        if compound:
-            argv += ['--compound', compound]
-        target_res = input('Target nucleophile residue (e.g., THR309, CYS145) [all pocket nucleophiles] > ').strip()
+        rec, comp, pose, target_res = _prompt_covalent_targets()
+        if rec:
+            argv += ['--target', rec]
+        if comp:
+            argv += ['--compound', comp]
+        if pose:
+            argv += ['--pose', str(pose)]
         if target_res:
             argv += ['--target-residue', target_res]
         dft_dir = input('Directory with existing ORCA DFT outputs (.out) [optional, press enter to skip] > ').strip()
@@ -129,10 +356,13 @@ def run_interactive():
             xtc = input('Path to MD trajectory (.xtc) > ').strip()
         argv += ['--topology', str(Path(gro).expanduser()), '--trajectory', str(Path(xtc).expanduser())]
 
-        compound = input('Exact compound name [leave blank for ranked top 1] > ').strip()
-        if compound:
-            argv += ['--compound', compound]
-        target_res = input('Target nucleophile residue (e.g., THR309, CYS145) [all pocket nucleophiles] > ').strip()
+        rec, comp, pose, target_res = _prompt_covalent_targets()
+        if rec:
+            argv += ['--target', rec]
+        if comp:
+            argv += ['--compound', comp]
+        if pose:
+            argv += ['--pose', str(pose)]
         if target_res:
             argv += ['--target-residue', target_res]
         cutoff = input('Daura RMSD clustering cutoff in Angstroms [1.5] > ').strip()
@@ -149,10 +379,13 @@ def run_interactive():
         argv += ['--full-gold-standard']
         sim_time = input('Simulation length in nanoseconds [10.0] > ').strip() or '10.0'
         argv += ['--time-ns', sim_time]
-        compound = input('Exact compound name [leave blank for ranked top 1] > ').strip()
-        if compound:
-            argv += ['--compound', compound]
-        target_res = input('Target nucleophile residue (e.g., THR309, CYS145) [all pocket nucleophiles] > ').strip()
+        rec, comp, pose, target_res = _prompt_covalent_targets()
+        if rec:
+            argv += ['--target', rec]
+        if comp:
+            argv += ['--compound', comp]
+        if pose:
+            argv += ['--pose', str(pose)]
         if target_res:
             argv += ['--target-residue', target_res]
         exec_now = input('Launch GROMACS simulation immediately? [Y/n] > ').strip().lower()
@@ -174,10 +407,13 @@ def run_interactive():
                 argv += ['--qm-model', 'extended']
             else:
                 argv += ['--qm-model', 'minimal']
-            compound = input('Exact compound name [leave blank for ranked top 1] > ').strip()
-            if compound:
-                argv += ['--compound', compound]
-            target_res = input('Target nucleophile residue (e.g., THR309, CYS145) [default: THR309] > ').strip()
+            rec, comp, pose, target_res = _prompt_covalent_targets(default_res="THR309")
+            if rec:
+                argv += ['--target', rec]
+            if comp:
+                argv += ['--compound', comp]
+            if pose:
+                argv += ['--pose', str(pose)]
             if target_res:
                 argv += ['--target-residue', target_res]
             exec_now = input('Launch ORCA TS workflow immediately? [Y/n] > ').strip().lower()
@@ -213,10 +449,13 @@ def run_interactive():
                     argv += ['--execute']
             elif action == '4':
                 argv += ['--covalent']
-                compound = input('Exact compound name [ranked selection] > ').strip()
-                if compound:
-                    argv += ['--compound', compound]
-                target_res = input('Target nucleophile residue (e.g. THR309) > ').strip()
+                rec, comp, pose, target_res = _prompt_covalent_targets()
+                if rec:
+                    argv += ['--target', rec]
+                if comp:
+                    argv += ['--compound', comp]
+                if pose:
+                    argv += ['--pose', str(pose)]
                 if target_res:
                     argv += ['--target-residue', target_res]
 
@@ -299,6 +538,7 @@ def main(argv=None):
     parser.add_argument('--interactive', action='store_true')
     parser.add_argument('--session', help='PoliScreen session archive')
     parser.add_argument('--top', type=int, default=1, help='Unique ligands for DFT; poses for reports')
+    parser.add_argument('--pose', type=int, default=None, help='Specific pose index to evaluate (e.g. 1, 2)')
     parser.add_argument('--target', help='Exact target or target~pocket identifier')
     parser.add_argument('--compound', action='append', help='Exact compound name; may be repeated')
     parser.add_argument('--pareto', action='store_true', help='Select recorded Pareto leaders')
@@ -432,11 +672,16 @@ def main(argv=None):
                     matched = [p for p in session.poses if p.ligand_id.casefold() == c.casefold()
                                and (args.target is None or p.receptor_id == args.target)]
                     if matched:
+                        if args.pose is not None:
+                            matched = [p for p in matched if p.pose_idx == args.pose]
                         matched.sort(key=lambda p: (p.score if math.isfinite(p.score) else math.inf, p.pose_idx))
                         selected.extend(matched[:args.top])
                 if selected:
                     return selected
-            return session.list_top_poses(args.top)
+            poses = session.list_top_poses(args.top)
+            if args.pose is not None:
+                poses = [p for p in poses if p.pose_idx == args.pose]
+            return poses
 
         if args.run_md:
             from .workflows.md_pipeline import run_md_from_session
