@@ -409,7 +409,12 @@ def run_interactive():
         dft_dir = input('Directory with existing ORCA DFT outputs (.out) [optional, press enter to skip] > ').strip()
         if dft_dir:
             argv += ['--dft-dir', dft_dir]
-        exec_now = input('Launch GROMACS simulation immediately? [Y/n] > ').strip().lower()
+        qm_choice = input('Post-MD ab initio ORCA quantum calculation on solvated medoid [1: Active-Site Cluster QM Single-Point (HOMO/LUMO + CUBE orbitals, ~1-3 min) [Recommended], 2: Full Transition State (TS) Reaction Coordinate Scan & Activation Barrier (ΔG‡, ~30-60 min), 3: Skip QM step (Classical MD & Pre-reactive only)] [default: 1] > ').strip() or '1'
+        if qm_choice == '1':
+            argv += ['--orca-cluster-sp']
+        elif qm_choice == '2':
+            argv += ['--tier-4-ts']
+        exec_now = input('Launch GROMACS and ORCA simulation immediately? [Y/n] > ').strip().lower()
         if exec_now != 'n':
             argv += ['--execute']
 
@@ -428,6 +433,30 @@ def run_interactive():
                 argv += ['--qm-model', 'extended']
             else:
                 argv += ['--qm-model', 'minimal']
+
+            src_choice = input('Input structure source [1: Solvated medoid snapshot from previous MD job (Recommended), 2: Docking pose from PoliScreen session] [default: 1] > ').strip() or '1'
+            if src_choice == '1':
+                md_path = input('Path to MD job directory [default: auto-detect latest job] > ').strip()
+                cand_dir = None
+                if md_path:
+                    p_c = Path(md_path).expanduser()
+                    if p_c.is_dir():
+                        cand_dir = p_c
+                    elif p_c.is_file():
+                        cand_dir = p_c.parent
+                else:
+                    jobs_dir = Path.cwd() / 'shark_jobs'
+                    if jobs_dir.is_dir():
+                        subdirs = sorted([d for d in jobs_dir.iterdir() if d.is_dir()], key=lambda d: d.stat().st_mtime, reverse=True)
+                        if subdirs:
+                            cand_dir = subdirs[0]
+                if cand_dir:
+                    snap_rec = cand_dir / 'snapshots' / 'representative_snapshot_receptor.pdb'
+                    snap_lig = cand_dir / 'snapshots' / 'representative_snapshot_ligand.pdb'
+                    if snap_rec.is_file() and snap_lig.is_file():
+                        argv += ['--work-dir', str(cand_dir)]
+                        print(f"[TIER 4] Staged solvated medoid snapshot from: {cand_dir}")
+
             rec, comp, pose, target_res = _prompt_covalent_targets(default_res="THR309")
             if rec:
                 argv += ['--target', rec]
@@ -886,6 +915,10 @@ def main(argv=None):
                 rec_path = cluster_rep.snapshot_receptor_pdb
                 lig_pose = cluster_rep.snapshot_ligand_pdb
                 print(f"[TIER 4] Using solvated medoid snapshot from MD at {cluster_rep.medoid_time_ns:.2f} ns...")
+            elif args.work_dir and (Path(args.work_dir) / 'snapshots' / 'representative_snapshot_receptor.pdb').is_file() and (Path(args.work_dir) / 'snapshots' / 'representative_snapshot_ligand.pdb').is_file():
+                rec_path = Path(args.work_dir) / 'snapshots' / 'representative_snapshot_receptor.pdb'
+                lig_pose = Path(args.work_dir) / 'snapshots' / 'representative_snapshot_ligand.pdb'
+                print(f"[TIER 4] Using solvated medoid snapshot from job directory: {args.work_dir}...")
             else:
                 rec_path = session.receptor_for(p.receptor_id, raw=False)
                 lig_pose = p.pose_file
