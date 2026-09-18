@@ -422,9 +422,9 @@ def generate_html_dossier(project_name: str, poses_data: list[dict], out_html: s
                     """)
 
         plots_grid_html = ''
-        if plot_items:
+        if not dash_html and plot_items:
             plots_grid_html = f"""
-            <h3 style="margin:24px 0 12px;font-size:16px;color:var(--ink);">Detailed Trajectory Metrics</h3>
+            <h3 style="margin:24px 0 12px;font-size:16px;color:var(--ink);">Trajectory Diagnostic Plots</h3>
             <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(380px, 1fr));gap:18px;">
               {''.join(plot_items)}
             </div>
@@ -783,13 +783,9 @@ def generate_html_dossier(project_name: str, poses_data: list[dict], out_html: s
             )
 
         scatter_3d_html = (
-            '<div id="covalent-3d-plot" style="display:none;" role="img" aria-label="3D Pocket and Near-Attack Conformation"></div>'
-            if adduct_viewer_block else
-            (
-                '<h3>Interactive 3D Binding Pocket &amp; Near-Attack Geometry</h3>'
-                '<p>3D visualization of the docked ligand, surrounding pocket nucleophiles, and the reactive attack trajectory vector. Drag to rotate in 3D, scroll to zoom.</p>'
-                '<div id="covalent-3d-plot" style="height:500px;background:#fff;border:1px solid var(--line);border-radius:8px;" role="img" aria-label="3D Pocket and Near-Attack Conformation"></div>'
-            )
+            '<h3>Interactive 3D Binding Pocket &amp; Near-Attack Geometry (Plotly 3D)</h3>'
+            '<p>Physical 3D coordinate model of the active-site binding pocket and docked ligand rendered with the high-precision Plotly 3D engine (same visualizer package used in Section 01). Drag to rotate in 3D, scroll to zoom, hover for coordinates and attack trajectory.</p>'
+            '<div id="covalent-3d-plot" style="height:540px;background:#fff;border:1px solid var(--line);border-radius:10px;margin-bottom:20px;" role="img" aria-label="3D Pocket and Near-Attack Conformation"></div>'
         )
 
         covalent_plots = (

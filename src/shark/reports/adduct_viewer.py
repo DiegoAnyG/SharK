@@ -484,7 +484,7 @@ def generate_adduct_viewer_html(
       }}));
       fmoShapes.push(viewer.addCylinder({{
         start: {{ x: elCrd[0] - 0.35 * ux, y: elCrd[1] - 0.35 * uy, z: elCrd[2] - 0.35 * uz }},
-        end: {{ x: elCrd[0] - 0.90 * ux, y: elCrd[1] - 0.90 * uz }},
+        end: {{ x: elCrd[0] - 0.90 * ux, y: elCrd[1] - 0.90 * uy, z: elCrd[2] - 0.90 * uz }},
         radius: 0.40, color: '#38bdf8', alpha: 0.52
       }}));
       fmoShapes.push(viewer.addSphere({{
@@ -576,7 +576,7 @@ def generate_adduct_viewer_html(
     }} else if (homoVol) {{
       showOrbital('homo');
     }} else {{
-      showOrbital('fmo');
+      showOrbital('none');
     }}
 
     // Button event listeners
