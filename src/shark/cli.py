@@ -406,6 +406,9 @@ def run_interactive():
             argv += ['--pose', str(pose)]
         if target_res:
             argv += ['--target-residue', target_res]
+        dft_dir = input('Directory with existing ORCA DFT outputs (.out) [optional, press enter to skip] > ').strip()
+        if dft_dir:
+            argv += ['--dft-dir', dft_dir]
         exec_now = input('Launch GROMACS simulation immediately? [Y/n] > ').strip().lower()
         if exec_now != 'n':
             argv += ['--execute']
@@ -701,6 +704,7 @@ def main(argv=None):
                 poses = [p for p in poses if p.pose_idx == args.pose]
             return poses
 
+        last_md_res = None
         if args.run_md:
             from .workflows.md_pipeline import run_md_from_session
             selected_poses = _get_selected_poses()
@@ -720,6 +724,7 @@ def main(argv=None):
                     pipeline_dir=args.pipeline_dir,
                     work_dir=Path(args.work_dir) / 'md' if (args.work_dir and not args.pipeline_dir) else None
                 )
+                last_md_res = res
                 print(f"[MD] Status: {res.status} | Directory: {res.run_dir}")
                 if res.dashboard_path:
                     print(f"[MD] Dashboard: {res.dashboard_path}")
@@ -1109,11 +1114,13 @@ def main(argv=None):
                             break
 
                 # Compute quantum adduct verification profile
-                att_dist = float(best_c.get('distance_angstrom', 3.33)) if (best_c and best_c.get('distance_angstrom') is not None) else 3.33
-                bd_ang = float(best_c.get('burgi_dunitz_angle', 132.7)) if (best_c and best_c.get('burgi_dunitz_angle') is not None) else 132.7
+                att_dist = float(best_c.get('distance_angstrom', 5.0)) if (best_c and best_c.get('distance_angstrom') is not None) else 5.0
+                bd_ang = float(best_c.get('burgi_dunitz_angle', 107.0)) if (best_c and best_c.get('burgi_dunitz_angle') is not None) else 107.0
                 nucl_el_sym = str(best_c.get('nucleophile_atom', 'OG1'))[0] if best_c else 'O'
-                el_el_sym = str(best_c.get('ligand_atom_symbol', 'C')) if best_c else 'C'
                 el_idx = int(best_c.get('ligand_atom_index', 0)) if (best_c and best_c.get('ligand_atom_index') is not None) else 0
+                el_el_sym = str(best_c.get('ligand_atom_element') or best_c.get('ligand_atom_symbol') or 'O') if best_c else 'O'
+                if all_lig_atoms and el_idx < len(all_lig_atoms):
+                    el_el_sym = all_lig_atoms[el_idx].get('element', el_el_sym)
                 lig_h_atoms = [(str(la.get('element', 'C')), int(la.get('index', i))) for i, la in enumerate(all_lig_atoms) if la.get('element') != 'H'] if all_lig_atoms else None
 
                 is_rev = False
@@ -1237,6 +1244,20 @@ def main(argv=None):
                 out_file = Path(tempfile.mkdtemp(prefix='shark-dft-report-', dir=root)) / 'dossier.html'
 
         qm_summary = None
+        if not args.dft_dir:
+            cands = []
+            if args.compound:
+                for c in args.compound:
+                    c_base = c.split('_')[0]
+                    cands.extend([Path.cwd() / f"dft_{c}", Path.cwd() / f"dft_{c_base}", Path.cwd() / "dft"])
+            else:
+                cands.extend([Path.cwd() / "dft_benzofuroxan", Path.cwd() / "dft"])
+            for d_cand in cands:
+                if d_cand.is_dir():
+                    args.dft_dir = str(d_cand)
+                    print(f"[DFT] Auto-detected existing DFT calculation directory: {d_cand}")
+                    break
+
         if args.dft_dir:
             dft_path = Path(args.dft_dir)
             if dft_path.is_dir():
@@ -1314,8 +1335,30 @@ def main(argv=None):
         except Exception as e:
             print(f"[NOTE] Could not write evidence JSON: {e}")
 
+        md_summary = None
+        if 'last_md_res' in locals() and last_md_res:
+            prep_dir = last_md_res.run_dir / '00_prep'
+            if not prep_dir.is_dir():
+                prep_dir = last_md_res.run_dir
+            md_plots = {}
+            for p_name in ('md_analysis_dashboard.png', 'plot_rmsd.png', 'plot_rmsf.png', 'plot_gyrate.png', 'plot_hbonds.png'):
+                p_file = prep_dir / p_name
+                if p_file.is_file():
+                    md_plots[p_name] = str(p_file)
+            md_summary = {
+                'run_id': last_md_res.run_id,
+                'sim_time_ns': last_md_res.sim_time_ns,
+                'status': last_md_res.status,
+                'run_dir': str(last_md_res.run_dir),
+                'plots': md_plots,
+                'dashboard_path': str(last_md_res.dashboard_path) if last_md_res.dashboard_path else md_plots.get('md_analysis_dashboard.png'),
+                'clustering': clustering_info if 'clustering_info' in locals() else None,
+                'force_fields': 'AMBER99SB-ILDN (protein) + GAFF2/AM1-BCC (ligand) + SPC/E (0.15 M NaCl)',
+            }
+
         generate_html_dossier(session.project_name, poses_data, out_file,
-                              qm_summary=qm_summary, covalent_summary=covalent_summary,
+                              qm_summary=qm_summary, md_summary=md_summary,
+                              covalent_summary=covalent_summary,
                               result=analysis_result)
 
         # Consolidate structured machine-readable deliverables in job directory

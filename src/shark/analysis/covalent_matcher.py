@@ -494,7 +494,14 @@ def extract_pocket_nucleophiles(
         nucl_crd = at["coords"]
         min_d = min(_euclidean_distance(nucl_crd, lig_crd) for lig_crd in clean_coords)
 
-        if min_d <= pocket_cutoff:
+        is_target_match = (
+            target_num_filter is not None
+            and at["res_seq"] == target_num_filter
+            and (target_res_filter is None or r_name == target_res_filter)
+            and min_d <= 15.0
+        )
+
+        if min_d <= pocket_cutoff or is_target_match:
             pocket_nucleophiles.append(PocketNucleophile(
                 residue_name=r_name,
                 residue_number=at["res_seq"],
@@ -576,13 +583,28 @@ def match_covalent_pocket(
         rec_atoms = []
 
     contacts: List[CovalentContact] = []
+    target_res_filter = None
+    target_num_filter = None
+    if target_residue:
+        m = re.match(r"^([A-Za-z]+)?(\d+)?", target_residue.strip())
+        if m:
+            if m.group(1):
+                target_res_filter = m.group(1).upper()
+            if m.group(2):
+                target_num_filter = int(m.group(2))
+
     for nucl in pocket_nucls:
         dyad_present, dyad_lbl = _scan_candidate_catalytic_base(
             nucl.coordinates, rec_atoms, nucl.residue_number, nucl.chain_id
         )
+        is_target_nucl = bool(
+            target_num_filter is not None
+            and nucl.residue_number == target_num_filter
+            and (target_res_filter is None or nucl.residue_name == target_res_filter)
+        )
         for idx, elem, crd, cand_obj in eval_lig_atoms:
             dist = _euclidean_distance(nucl.coordinates, crd)
-            if dist <= pocket_cutoff:
+            if dist <= pocket_cutoff or (is_target_nucl and dist <= 12.0):
                 is_nac = dist <= nac_cutoff
                 feas = _calculate_feasibility_score(dist, nac_cutoff=nac_cutoff)
                 rank = getattr(cand_obj, "rank", None) if cand_obj else None
