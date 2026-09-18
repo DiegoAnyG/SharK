@@ -101,32 +101,63 @@ def _embedded_viewer(job, report_dir):
 def generate_html_dossier(project_name: str, poses_data: list[dict], out_html: str | Path,
                           qm_summary: dict | None = None, md_summary: dict | None = None,
                           orbital_mesh: dict | None = None, notes: str = '',
-                          covalent_summary: dict | None = None) -> Path:
+                          covalent_summary: dict | None = None,
+                          result: Any = None) -> Path:
     """Bundle recorded data and local viewer exports into one transportable HTML file.
 
     ``viewer_link`` is resolved relative to the output dossier at generation time;
     no viewer path is used by the resulting document. Existing call sites remain valid.
     """
     out_path = Path(out_html)
+
+    # If a structured SharKAnalysisResult is passed, adapt it for the dossier
+    if result is not None:
+        r_dict = result.to_dict() if hasattr(result, 'to_dict') else result
+        project_name = r_dict.get('analysis_id') or project_name
+        if covalent_summary is None:
+            covalent_summary = {}
+            feas = r_dict.get('feasibility', {})
+            covalent_summary['total_feasibility'] = {
+                'cfi_pre': feas.get('cfi_pre', {}).get('value') if isinstance(feas.get('cfi_pre'), dict) else feas.get('cfi_pre'),
+                'cfi_final': feas.get('cfi_final', {}).get('value') if isinstance(feas.get('cfi_final'), dict) else feas.get('cfi_final'),
+                'cfi_total': feas.get('cfi_total', {}).get('value') if isinstance(feas.get('cfi_total'), dict) else feas.get('cfi_total'),
+                'tier': feas.get('tier', {}).get('value') if isinstance(feas.get('tier'), dict) else feas.get('tier', 'Evaluated'),
+                'affinity_score': feas.get('affinity_score', {}).get('value') if isinstance(feas.get('affinity_score'), dict) else feas.get('affinity_score'),
+                'nac_score': feas.get('nac_score', {}).get('value') if isinstance(feas.get('nac_score'), dict) else feas.get('nac_score'),
+                'ts_score': feas.get('ts_score', {}).get('value') if isinstance(feas.get('ts_score'), dict) else feas.get('ts_score'),
+                'percentage': feas.get('percentage', {}).get('value') if isinstance(feas.get('percentage'), dict) else feas.get('percentage'),
+                'summary': feas.get('summary', {}).get('value') if isinstance(feas.get('summary'), dict) else feas.get('summary'),
+            }
+            if 'adduct' in r_dict and r_dict['adduct']:
+                covalent_summary['adduct_qm'] = r_dict['adduct']
+            if 'cluster_qm' in r_dict and r_dict['cluster_qm']:
+                covalent_summary['cluster_qm'] = r_dict['cluster_qm']
+            if 'transition_state' in r_dict and r_dict['transition_state']:
+                covalent_summary['transition_state'] = r_dict['transition_state']
+            if 'dynamics' in r_dict and r_dict['dynamics']:
+                covalent_summary['clustering'] = r_dict['dynamics']
+            if 'static_reactive_geometry' in r_dict and r_dict['static_reactive_geometry']:
+                covalent_summary['contacts'] = [{'composite_feasibility': r_dict['static_reactive_geometry'].get('rgi_static', {}).get('value') if isinstance(r_dict['static_reactive_geometry'].get('rgi_static'), dict) else r_dict['static_reactive_geometry'].get('rgi_static')}]
+
     jobs = (qm_summary or {}).get('jobs', [])
     rows, viewers, levels, methods = [], [], [], []
     for index, job in enumerate(jobs):
-        result = job.get('results') or {}
+        result_item = job.get('results') or {}
         params = job.get('parameters', {})
         ligand = str(job.get('selection', {}).get('ligand_id', 'Unnamed ligand'))
         seed = params.get('seed')
         label = f'{ligand} / seed {seed}' if seed is not None else f'{ligand} / job {index + 1}'
         status = escape(str(job.get('status', 'unknown')))
-        modes = result.get('frequencies_cm1')
-        imaginary = result.get('imaginary_frequencies_cm1')
+        modes = result_item.get('frequencies_cm1')
+        imaginary = result_item.get('imaginary_frequencies_cm1')
         minimum = ('Not checked' if not modes else
                    'Imaginary modes present' if imaginary else
-                   'Local minimum supported' if result.get('optimization_converged') else 'Optimization not verified')
-        frontier = result.get('orbitals', {})
+                   'Local minimum supported' if result_item.get('optimization_converged') else 'Optimization not verified')
+        frontier = result_item.get('orbitals', {})
         for spin, values in (frontier or {'—': {}}).items():
             h, l = values.get('homo', {}), values.get('lumo', {})
             rows.append('<tr>' + ''.join(f'<td>{v}</td>' for v in [escape(label), status,
-                        _number(result.get('electronic_energy_hartree'), 10), escape(str(spin)),
+                        _number(result_item.get('electronic_energy_hartree'), 10), escape(str(spin)),
                         _number(h.get('energy_eV')), _number(l.get('energy_eV')),
                         _number(values.get('gap_ev')), escape(minimum)]) + '</tr>')
             if h and l:
@@ -138,7 +169,7 @@ def generate_html_dossier(project_name: str, poses_data: list[dict], out_html: s
                   ('Charge / multiplicity', f"{params.get('charge', 'N/A')} / {params.get('multiplicity', 'N/A')}"),
                   ('Initial geometry', job.get('source', {}).get('kind')),
                   ('Frequency check', minimum), ('Imaginary frequencies', len(imaginary) if imaginary is not None else 'Not calculated'),
-                  ('ORCA', result.get('orca_version')), ('Orbital grid convergence', job.get('orbital_export', {}).get('spatial_convergence', 'Not assessed'))]
+                  ('ORCA', result_item.get('orca_version')), ('Orbital grid convergence', job.get('orbital_export', {}).get('spatial_convergence', 'Not assessed'))]
         content = ''.join(f'<div><dt>{escape(k)}</dt><dd>{escape(str(v if v is not None else "Not calculated"))}</dd></div>' for k,v in fields)
         errors = [str(job['error'])] if job.get('error') else []
         if job.get('orbital_export', {}).get('status') == 'failed':
@@ -146,39 +177,69 @@ def generate_html_dossier(project_name: str, poses_data: list[dict], out_html: s
         methods.append(f'<article class="method"><h3>{escape(label)}</h3><dl>{content}</dl>'
                        + ''.join(f'<p class="notice">{escape(error)}</p>' for error in errors) + '</article>')
     valid_energies = []
+    has_gibbs_energies = False
     for job in jobs:
         res = job.get('results') or {}
         eh = res.get('electronic_energy_hartree')
+        g = res.get('gibbs_energy_hartree')
+        if g is not None and math.isfinite(g) and g != 0.0:
+            has_gibbs_energies = True
         if eh is not None and math.isfinite(eh):
             ligand = str(job.get('selection', {}).get('ligand_id', 'Unnamed ligand'))
-            valid_energies.append((ligand, eh, job))
+            valid_energies.append((ligand, eh, job, g))
 
     tautomers_data = []
     card1_title = 'Dominant Tautomer <span class="help-bubble" tabindex="0" data-tooltip="Tautomer or conformer with lowest electronic energy from solvent-optimized DFT.">?</span>'
     card1_main = "N/A"
     card1_sub = "No DFT calculations"
+    energy_basis = "gibbs" if has_gibbs_energies else "electronic"
     if valid_energies:
-        min_eh = min(e[1] for e in valid_energies)
-        rt = 1.98720425864083e-3 * 298.15  # 0.5925 kcal/mol at 298.15 K
-        for ligand, eh, job in valid_energies:
-            delta_e = (eh - min_eh) * 627.509474
-            res = job.get('results') or {}
-            orb = res.get('orbitals', {}).get('0', {})
-            h = orb.get('homo', {}).get('energy_eV')
-            l = orb.get('lumo', {}).get('energy_eV')
-            g = orb.get('gap_ev')
-            svg_data = _generate_molecule_svg(job, ligand)
-            tautomers_data.append({
-                'label': ligand,
-                'energy_eh': eh,
-                'delta_e_kcal': round(delta_e, 2),
-                'boltzmann_pct': None,
-                'homo_ev': h,
-                'lumo_ev': l,
-                'gap_ev': g if g is not None else ((l - h) if (h is not None and l is not None) else None),
-                'minimum': res.get('stationary_minimum_verified', False),
-                'svg': svg_data
-            })
+        if has_gibbs_energies:
+            min_energy = min(e[3] for e in valid_energies if e[3] is not None)
+            rt = 1.98720425864083e-3 * 298.15
+            for ligand, eh, job, g in valid_energies:
+                delta_e = (g - min_energy) * 627.509474 if g is not None else 0.0
+                res = job.get('results') or {}
+                orb = res.get('orbitals', {}).get('0', {})
+                h = orb.get('homo', {}).get('energy_eV')
+                l = orb.get('lumo', {}).get('energy_eV')
+                g_gap = orb.get('gap_ev')
+                svg_data = _generate_molecule_svg(job, ligand)
+                tautomers_data.append({
+                    'label': ligand,
+                    'energy_eh': g,
+                    'delta_e_kcal': round(delta_e, 2),
+                    'energy_basis': 'gibbs',
+                    'boltzmann_pct': None,
+                    'homo_ev': h,
+                    'lumo_ev': l,
+                    'gap_ev': g_gap if g_gap is not None else ((l - h) if (h is not None and l is not None) else None),
+                    'minimum': res.get('stationary_minimum_verified', False),
+                    'svg': svg_data
+                })
+        else:
+            min_eh = min(e[1] for e in valid_energies)
+            rt = 1.98720425864083e-3 * 298.15  # 0.5925 kcal/mol at 298.15 K
+            for ligand, eh, job, g in valid_energies:
+                delta_e = (eh - min_eh) * 627.509474
+                res = job.get('results') or {}
+                orb = res.get('orbitals', {}).get('0', {})
+                h = orb.get('homo', {}).get('energy_eV')
+                l = orb.get('lumo', {}).get('energy_eV')
+                gap_val = orb.get('gap_ev')
+                svg_data = _generate_molecule_svg(job, ligand)
+                tautomers_data.append({
+                    'label': ligand,
+                    'energy_eh': eh,
+                    'delta_e_kcal': round(delta_e, 2),
+                    'energy_basis': 'electronic',
+                    'boltzmann_pct': None,
+                    'homo_ev': h,
+                    'lumo_ev': l,
+                    'gap_ev': gap_val if gap_val is not None else ((l - h) if (h is not None and l is not None) else None),
+                    'minimum': res.get('stationary_minimum_verified', False),
+                    'svg': svg_data
+                })
 
         tautomers_data.sort(key=lambda x: x['delta_e_kcal'])
         if len(tautomers_data) > 1:
@@ -190,7 +251,10 @@ def generate_html_dossier(project_name: str, poses_data: list[dict], out_html: s
         dom = tautomers_data[0]
         card1_main = dom['label']
         if len(tautomers_data) > 1:
-            card1_sub = f"{dom.get('boltzmann_pct', 78.2):.1f}% Boltzmann population (ΔG = 0.00 kcal/mol)"
+            if has_gibbs_energies:
+                card1_sub = f"{dom.get('boltzmann_pct', 78.2):.1f}% Boltzmann population (ΔG = 0.00 kcal/mol)"
+            else:
+                card1_sub = f"{dom.get('boltzmann_pct', 78.2):.1f}% electronic population proxy (ΔE = 0.00 kcal/mol)"
         else:
             card1_sub = "Single supplied state; global minimum not established"
 
@@ -305,7 +369,7 @@ def generate_html_dossier(project_name: str, poses_data: list[dict], out_html: s
         contact_rows = []
         for c in contacts[:20]:
             is_nac = c.get('is_nac', False)
-            tag = '<strong style="color:#087b70">NAC</strong>' if is_nac else '<span>Proximal</span>'
+            tag = '<strong style="color:#087b70">NAC Observed</strong>' if is_nac else '<span>Proximal</span>'
             angle_val = f"{c.get('burgi_dunitz_angle'):.1f}°" if c.get('burgi_dunitz_angle') is not None else 'N/A'
             dyad_val = escape(str(c.get('catalytic_dyad_residue') or ('Dyad' if c.get('catalytic_dyad_present') else 'Isolated')))
             cfi_val = _number(c.get('composite_feasibility'), 2) if c.get('composite_feasibility') is not None else 'N/A'
@@ -349,16 +413,21 @@ def generate_html_dossier(project_name: str, poses_data: list[dict], out_html: s
 
             tf_items = [
                 ('Pillar 1: Reversible Recognition (S_bind)', f"{_number(s_bind_val, 3)} (docking: {_number(dock_sc, 2)} kcal/mol, w={w.get('binding', w.get('affinity', 0.20))})"),
-                ('Pillar 2: Dynamic Preorganization (P_NAC)', f"{_number(s_nac_val, 3)} (continuous trajectory score, w={w.get('nac', 0.40)})"),
-                ('Local Reactive Geometry (RGI)', f"{_number(rgi_val, 3)} (Bürgi-Dunitz angle & electrophilicity)"),
+                ('Pillar 2: Dynamic Preorganization (P_NAC)', f"{_number(s_nac_val, 3)} (continuous trajectory score, w={w.get('nac', 0.40)})" if s_nac_val is not None else "Not available (no MD trajectory evaluated)"),
+                ('Static Reactive Geometry (RGI_static)', f"{_number(rgi_val, 3)} (static pose geometry only)"),
             ]
             if d_ts is not None and cfi_final is not None:
                 tf_items.append(('Pillar 3: Chemical Kinetics (S_chem)', f"{_number(s_ts_val, 3)} (ΔG‡ = {_number(d_ts, 1)} kcal/mol, w={w.get('chem', w.get('ts', 0.40))})"))
                 tf_items.append(('Final Feasibility Index (CFI_final)', f"<strong>{_number(cfi_final, 3)}</strong> · <span class='badge' style='background:#ecfdf5;color:#065f46;'>{tier_val}</span>"))
-            else:
+            elif cfi_pre is not None:
                 tf_items.append(('Pillar 3: Chemical Kinetics (S_chem)', "Not evaluated (pending transition-state calculation)"))
                 tf_items.append(('Pre-reactive Index (CFI_pre)', f"<strong>{_number(cfi_pre, 3)}</strong> · <span class='badge' style='background:#f0fdf4;color:#166534;'>{tier_val}</span>"))
                 tf_items.append(('Status', "<span style='color:#b45309;font-weight:600;'>Pending transition-state calculation</span> (covalent bond formation not yet kinetically validated)"))
+            else:
+                tf_items.append(('Pillar 3: Chemical Kinetics (S_chem)', "Not evaluated (pending transition-state calculation)"))
+                tf_items.append(('Pre-reactive Index (CFI_pre)', "Not available (dynamic P_NAC missing)"))
+                tf_items.append(('Final Feasibility Index (CFI_final)', "Not available (dynamic trajectory and TS chemical barrier missing)"))
+                tf_items.append(('Status', "<span style='color:#b45309;font-weight:600;'>CFI_pre = Not available · CFI_final = Not available</span> (Requires MD trajectory for CFI_pre, and TS calculation for CFI_final)"))
 
             tot_feas_block = (
                 f'<div class="insight" style="margin:20px 0;background:#f8fafc;border-left:4px solid #087b70;padding:16px 20px;border-radius:0 10px 10px 0;">'
@@ -404,6 +473,33 @@ def generate_html_dossier(project_name: str, poses_data: list[dict], out_html: s
                 adduct_viewer_block = ''
 
         adduct_qm_cards_block = ""
+        cluster_qm_block = ""
+        cluster_qm = covalent_summary.get('cluster_qm')
+        if cluster_qm and cluster_qm.get('success'):
+            c_homo = cluster_qm.get('homo_ev')
+            c_lumo = cluster_qm.get('lumo_ev')
+            c_gap = cluster_qm.get('gap_ev')
+            c_en = cluster_qm.get('electronic_energy_hartree')
+            c_meth = cluster_qm.get('method', 'r2SCAN-3c')
+            c_atoms = cluster_qm.get('num_atoms', 'N/A')
+            cluster_qm_block = (
+                f'<div class="cluster-qm-section" style="margin:20px 0;background:#f0f9ff;border:1px solid #bae6fd;border-radius:10px;padding:16px;">'
+                f'<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">'
+                f'<h3 style="margin:0;font-size:15px;color:#0369a1;display:flex;align-items:center;gap:8px;">'
+                f'Active-Site Cluster Quantum Chemistry <span class="badge" style="background:#e0f2fe;color:#0369a1;border:1px solid #7dd3fc;">[Computed QM]</span>'
+                f'</h3>'
+                f'<span style="font-size:12px;color:#0284c7;font-weight:600;">{c_meth} · {c_atoms} atoms</span>'
+                f'</div>'
+                f'<p style="margin:0 0 10px;font-size:12px;color:#0369a1;">Real ab initio single point calculation on the extracted active-site cluster.</p>'
+                f'<dl style="margin:0;font-size:12.5px;display:grid;grid-template-columns:repeat(auto-fit, minmax(180px, 1fr));gap:10px;">'
+                f'<div style="background:#fff;padding:8px 12px;border-radius:6px;border:1px solid #e0f2fe;"><dt style="color:#64748b;">HOMO</dt><dd style="margin:0;font-weight:700;color:#0f172a;">{_number(c_homo, 2)} eV</dd></div>'
+                f'<div style="background:#fff;padding:8px 12px;border-radius:6px;border:1px solid #e0f2fe;"><dt style="color:#64748b;">LUMO</dt><dd style="margin:0;font-weight:700;color:#0f172a;">{_number(c_lumo, 2)} eV</dd></div>'
+                f'<div style="background:#fff;padding:8px 12px;border-radius:6px;border:1px solid #e0f2fe;"><dt style="color:#64748b;">HOMO-LUMO Gap</dt><dd style="margin:0;font-weight:700;color:#0f172a;">{_number(c_gap, 2)} eV</dd></div>'
+                f'<div style="background:#fff;padding:8px 12px;border-radius:6px;border:1px solid #e0f2fe;"><dt style="color:#64748b;">Electronic Energy</dt><dd style="margin:0;font-weight:700;color:#0f172a;">{_number(c_en, 6)} Eh</dd></div>'
+                f'</dl>'
+                f'</div>'
+            )
+
         adduct_qm = covalent_summary.get('adduct_qm')
         if adduct_qm:
             fmo = adduct_qm.get('fmo_symmetry', {})
@@ -413,99 +509,94 @@ def generate_html_dossier(project_name: str, poses_data: list[dict], out_html: s
 
             fmo_allowed = fmo.get('is_allowed', True)
             fmo_badge = (
-                '<span class="badge" style="background:#ecfdf5;color:#065f46;border:1px solid #a7f3d0;">Constructive Allowed</span>'
+                '<span class="badge" style="background:#e7f4f0;color:#086357;border:1px solid #bbf7d0;">Constructive Allowed [Model-Derived Proxy]</span>'
                 if fmo_allowed else
-                '<span class="badge" style="background:#fef2f2;color:#991b1b;border:1px solid #fecaca;">Symmetry Forbidden</span>'
+                '<span class="badge" style="background:#fee2e2;color:#991b1b;border:1px solid #fecaca;">Destructive Phase [Model-Derived Proxy]</span>'
             )
 
-            pol_stab = pol.get('stabilization_kcal_mol', -5.07)
+            pol_stab = pol.get('stabilization_kcal_mol', 0.0)
             reg_rank = reg.get('target_rank', 1)
             reg_atom = f"Atom #{reg.get('target_atom_index', 0)} ({reg.get('target_atom_symbol', 'C')})"
             is_pri = reg.get('is_primary_locus', True)
             reg_badge = (
-                '<span class="badge" style="background:#ecfdf5;color:#065f46;border:1px solid #a7f3d0;">Primary Locus Confirmed</span>'
-                if is_pri else
-                f'<span class="badge" style="background:#fef3c7;color:#92400e;border:1px solid #fde68a;">Rank #{reg_rank} Site</span>'
+                '<span class="badge" style="background:#fef3c7;color:#92400e;border:1px solid #fde68a;">[Model-Derived Proxy]</span>'
             )
 
-            w_bo = bond.get('wiberg_bond_order', 0.96)
-            covalency = bond.get('bond_covalency_percent', 96.0)
-            q_trans = bond.get('charge_transfer_e', -0.29)
-            is_rev = bond.get('is_reversible', False)
-            rev_badge = (
-                '<span class="badge" style="background:#f0fdf4;color:#15803d;border:1px solid #bbf7d0;">Reversible Warhead</span>'
-                if is_rev else
-                '<span class="badge" style="background:#eff6ff;color:#1e40af;border:1px solid #bfdbfe;">Irreversible Adduct</span>'
+            bond_is_calc = bond.get('is_calculated', False)
+            w_bo = bond.get('wiberg_bond_order')
+            w_bo_str = f"{_number(w_bo, 2)}" if (w_bo is not None and bond_is_calc) else "Not calculated"
+            prod_status_badge = (
+                '<span class="badge" style="background:#f1f5f9;color:#475569;border:1px solid #cbd5e1;">Status: NOT CALCULATED</span>'
             )
 
-            sym_type_esc = escape(str(fmo.get("symmetry_type", "sigma-type (A')")))
+            sym_type_esc = escape(str(fmo.get("symmetry_type", "Approach Trajectory (Model Heuristic)")))
             fmo_expl_esc = escape(str(fmo.get("explanation", "")))
             pol_expl_esc = escape(str(pol.get("explanation", "")))
             reg_atom_esc = escape(str(reg_atom))
             reg_expl_esc = escape(str(reg.get("explanation", "")))
-            bond_type_esc = escape(str(bond.get("bond_type", "Polar covalent sigma-bond")))
-            bond_expl_esc = escape(str(bond.get("explanation", "")))
+            bond_expl_esc = escape(str(bond.get("explanation", "Requires optimized covalent adduct calculation.")))
 
             adduct_qm_cards_block = (
                 f'<div class="adduct-qm-section" style="margin:24px 0;">'
+                f'{cluster_qm_block}'
                 f'<h3 style="margin:0 0 12px;font-size:16px;color:#16283f;display:flex;align-items:center;gap:8px;">'
                 f'Quantum Chemical Adduct Verification &amp; FMO Overlap Theory '
-                f'<span class="help-bubble" tabindex="0" data-tooltip="Rigorous 4-checkpoint evaluation of covalent bond feasibility: Woodward-Hoffmann/Fukui phase symmetry, pocket electrostatic polarization, local Fukui regiospecificity, and Wiberg covalent bond order.">?</span>'
+                f'<span class="help-bubble" tabindex="0" data-tooltip="Evaluation of pre-reactive active-site quantum descriptors and model-derived proxies. Model-derived proxies are geometric and empirical heuristics, not computed ab initio observables.">?</span>'
                 f'</h3>'
                 f'<div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(280px, 1fr));gap:16px;">'
                 f'<div style="background:#fff;border:1px solid #e2e8f0;border-radius:10px;padding:16px;box-shadow:0 1px 3px rgba(0,0,0,0.03);">'
                 f'<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">'
-                f'<h4 style="margin:0;font-size:13px;color:#0369a1;text-transform:uppercase;letter-spacing:0.5px;">1. FMO Phase Symmetry</h4>'
+                f'<h4 style="margin:0;font-size:13px;color:#0369a1;text-transform:uppercase;letter-spacing:0.5px;">1. FMO Phase Symmetry &amp; Orbital Alignment</h4>'
                 f'{fmo_badge}'
                 f'</div>'
-                f'<div style="font-size:12px;color:#475569;margin-bottom:10px;">Woodward-Hoffmann &amp; Fukui Frontier Orbital Theory</div>'
+                f'<div style="font-size:12px;color:#475569;margin-bottom:10px;">Bürgi-Dunitz Approach Geometry Proxy</div>'
                 f'<dl style="margin:0;font-size:12.5px;">'
-                f'<div style="display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid #f1f5f9;"><dt style="color:#64748b;">Overlap Type</dt><dd style="margin:0;font-weight:600;color:#0f172a;">{sym_type_esc}</dd></div>'
+                f'<div style="display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid #f1f5f9;"><dt style="color:#64748b;">Alignment Type</dt><dd style="margin:0;font-weight:600;color:#0f172a;">{sym_type_esc}</dd></div>'
                 f'<div style="display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid #f1f5f9;"><dt style="color:#64748b;">Frontier Gap (Δϵ_FMO)</dt><dd style="margin:0;font-weight:600;color:#0f172a;">{_number(fmo.get("fmo_energy_gap_ev"), 2)} eV</dd></div>'
-                f'<div style="display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid #f1f5f9;"><dt style="color:#64748b;">Estimated Overlap (S_eff)</dt><dd style="margin:0;font-weight:600;color:#0f172a;">{_number(fmo.get("overlap_integral_estimate"), 4)}</dd></div>'
+                f'<div style="display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid #f1f5f9;"><dt style="color:#64748b;">Alignment Score (heuristic)</dt><dd style="margin:0;font-weight:600;color:#0f172a;">{_number(fmo.get("overlap_integral_estimate"), 4)}</dd></div>'
                 f'<div style="display:flex;justify-content:space-between;padding:4px 0;"><dt style="color:#64748b;">Attack Angle (θ_BD)</dt><dd style="margin:0;font-weight:600;color:#0f172a;">{_number(fmo.get("burgi_dunitz_angle_deg"), 1)}°</dd></div>'
                 f'</dl>'
                 f'<p style="margin:10px 0 0;font-size:11.5px;color:#64748b;line-height:1.4;">{fmo_expl_esc}</p>'
                 f'</div>'
                 f'<div style="background:#fff;border:1px solid #e2e8f0;border-radius:10px;padding:16px;box-shadow:0 1px 3px rgba(0,0,0,0.03);">'
                 f'<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">'
-                f'<h4 style="margin:0;font-size:13px;color:#087b70;text-transform:uppercase;letter-spacing:0.5px;">2. Pocket Polarization</h4>'
-                f'<span class="badge" style="background:#ecfdf5;color:#065f46;border:1px solid #a7f3d0;">Electrophilicity Enhanced</span>'
+                f'<h4 style="margin:0;font-size:13px;color:#087b70;text-transform:uppercase;letter-spacing:0.5px;">2. Pocket Polarization Proxy</h4>'
+                f'<span class="badge" style="background:#fef3c7;color:#92400e;border:1px solid #fde68a;">[Model-Derived Proxy]</span>'
                 f'</div>'
-                f'<div style="font-size:12px;color:#475569;margin-bottom:10px;">Active-Site Electrostatic Field Modulation</div>'
+                f'<div style="font-size:12px;color:#475569;margin-bottom:10px;">Electrostatic Field Proxy</div>'
                 f'<dl style="margin:0;font-size:12.5px;">'
-                f'<div style="display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid #f1f5f9;"><dt style="color:#64748b;">LUMO Shift (Δϵ_LUMO)</dt><dd style="margin:0;font-weight:600;color:#0f172a;">{_number(pol.get("delta_lumo_ev"), 2)} eV</dd></div>'
-                f'<div style="display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid #f1f5f9;"><dt style="color:#64748b;">Electrophilicity (Δω)</dt><dd style="margin:0;font-weight:600;color:#0f172a;">{_number(pol.get("delta_electrophilicity_ev"), 2)} eV</dd></div>'
-                f'<div style="display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid #f1f5f9;"><dt style="color:#64748b;">Polarization Energy (E_pol)</dt><dd style="margin:0;font-weight:600;color:#0f172a;">{_number(pol_stab, 2)} kcal/mol</dd></div>'
-                f'<div style="display:flex;justify-content:space-between;padding:4px 0;"><dt style="color:#64748b;">Complex LUMO</dt><dd style="margin:0;font-weight:600;color:#0f172a;">{_number(pol.get("complex_lumo_ev"), 2)} eV</dd></div>'
+                f'<div style="display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid #f1f5f9;"><dt style="color:#64748b;">LUMO Shift Proxy (Δϵ_LUMO)</dt><dd style="margin:0;font-weight:600;color:#0f172a;">{_number(pol.get("delta_lumo_ev"), 2)} eV</dd></div>'
+                f'<div style="display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid #f1f5f9;"><dt style="color:#64748b;">Electrophilicity Shift (Δω)</dt><dd style="margin:0;font-weight:600;color:#0f172a;">{_number(pol.get("delta_electrophilicity_ev"), 2)} eV</dd></div>'
+                f'<div style="display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid #f1f5f9;"><dt style="color:#64748b;">Polarization Energy Proxy</dt><dd style="margin:0;font-weight:600;color:#0f172a;">{_number(pol_stab, 2)} kcal/mol</dd></div>'
+                f'<div style="display:flex;justify-content:space-between;padding:4px 0;"><dt style="color:#64748b;">Complex LUMO Proxy</dt><dd style="margin:0;font-weight:600;color:#0f172a;">{_number(pol.get("complex_lumo_ev"), 2)} eV</dd></div>'
                 f'</dl>'
                 f'<p style="margin:10px 0 0;font-size:11.5px;color:#64748b;line-height:1.4;">{pol_expl_esc}</p>'
                 f'</div>'
                 f'<div style="background:#fff;border:1px solid #e2e8f0;border-radius:10px;padding:16px;box-shadow:0 1px 3px rgba(0,0,0,0.03);">'
                 f'<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">'
-                f'<h4 style="margin:0;font-size:13px;color:#7c3aed;text-transform:uppercase;letter-spacing:0.5px;">3. Regiospecificity</h4>'
+                f'<h4 style="margin:0;font-size:13px;color:#7c3aed;text-transform:uppercase;letter-spacing:0.5px;">3. Regiospecificity &amp; Candidate Site Prior</h4>'
                 f'{reg_badge}'
                 f'</div>'
-                f'<div style="font-size:12px;color:#475569;margin-bottom:10px;">Local Electrophilic Fukui Function f_k^+ &amp; Softness</div>'
+                f'<div style="font-size:12px;color:#475569;margin-bottom:10px;">Target-Biased Site Ranking</div>'
                 f'<dl style="margin:0;font-size:12.5px;">'
                 f'<div style="display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid #f1f5f9;"><dt style="color:#64748b;">Target Reactive Atom</dt><dd style="margin:0;font-weight:600;color:#0f172a;">{reg_atom_esc}</dd></div>'
-                f'<div style="display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid #f1f5f9;"><dt style="color:#64748b;">Electrophilic Susceptibility (f_k^+)</dt><dd style="margin:0;font-weight:600;color:#0f172a;">{_number(reg.get("sites", [{}])[0].get("fukui_electrophilic", 0.231), 3)}</dd></div>'
-                f'<div style="display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid #f1f5f9;"><dt style="color:#64748b;">Local Softness (s_k^+)</dt><dd style="margin:0;font-weight:600;color:#0f172a;">{_number(reg.get("sites", [{}])[0].get("local_softness", 0.089), 3)}</dd></div>'
+                f'<div style="display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid #f1f5f9;"><dt style="color:#64748b;">Candidate Score (heuristic)</dt><dd style="margin:0;font-weight:600;color:#0f172a;">{_number(reg.get("candidate_site_score", reg.get("sites", [{}])[0].get("fukui_electrophilic", 0.231)), 3)}</dd></div>'
+                f'<div style="display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid #f1f5f9;"><dt style="color:#64748b;">Site Ranking</dt><dd style="margin:0;font-weight:600;color:#0f172a;">Rank #{reg_rank}</dd></div>'
                 f'<div style="display:flex;justify-content:space-between;padding:4px 0;"><dt style="color:#64748b;">Candidate Sites Evaluated</dt><dd style="margin:0;font-weight:600;color:#0f172a;">{reg.get("total_sites_evaluated", 13)}</dd></div>'
                 f'</dl>'
                 f'<p style="margin:10px 0 0;font-size:11.5px;color:#64748b;line-height:1.4;">{reg_expl_esc}</p>'
                 f'</div>'
                 f'<div style="background:#fff;border:1px solid #e2e8f0;border-radius:10px;padding:16px;box-shadow:0 1px 3px rgba(0,0,0,0.03);">'
                 f'<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">'
-                f'<h4 style="margin:0;font-size:13px;color:#b45309;text-transform:uppercase;letter-spacing:0.5px;">4. Formed Bond Nature</h4>'
-                f'{rev_badge}'
+                f'<h4 style="margin:0;font-size:13px;color:#b45309;text-transform:uppercase;letter-spacing:0.5px;">4. Formed Bond Nature &amp; Product Analysis</h4>'
+                f'{prod_status_badge}'
                 f'</div>'
-                f'<div style="font-size:12px;color:#475569;margin-bottom:10px;">Wiberg Bond Order &amp; Charge Transfer Analysis</div>'
+                f'<div style="font-size:12px;color:#475569;margin-bottom:10px;">Optimized Adduct Observable</div>'
                 f'<dl style="margin:0;font-size:12.5px;">'
-                f'<div style="display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid #f1f5f9;"><dt style="color:#64748b;">Bond Classification</dt><dd style="margin:0;font-weight:600;color:#0f172a;">{bond_type_esc}</dd></div>'
-                f'<div style="display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid #f1f5f9;"><dt style="color:#64748b;">Wiberg Bond Order (W_AB)</dt><dd style="margin:0;font-weight:600;color:#0f172a;">{_number(w_bo, 2)}</dd></div>'
-                f'<div style="display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid #f1f5f9;"><dt style="color:#64748b;">Bond Order Nature</dt><dd style="margin:0;font-weight:600;color:#0f172a;">Single covalent bond</dd></div>'
-                f'<div style="display:flex;justify-content:space-between;padding:4px 0;"><dt style="color:#64748b;">Net Charge Transfer (Δq)</dt><dd style="margin:0;font-weight:600;color:#0f172a;">{_number(q_trans, 2)} e</dd></div>'
+                f'<div style="display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid #f1f5f9;"><dt style="color:#64748b;">Status</dt><dd style="margin:0;font-weight:600;color:#b45309;">NOT CALCULATED</dd></div>'
+                f'<div style="display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid #f1f5f9;"><dt style="color:#64748b;">Wiberg Bond Order</dt><dd style="margin:0;font-weight:600;color:#0f172a;">{w_bo_str}</dd></div>'
+                f'<div style="display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid #f1f5f9;"><dt style="color:#64748b;">Net Charge Transfer (Δq)</dt><dd style="margin:0;font-weight:600;color:#0f172a;">Not calculated</dd></div>'
+                f'<div style="display:flex;justify-content:space-between;padding:4px 0;"><dt style="color:#64748b;">Covalent Adduct Geometry</dt><dd style="margin:0;font-weight:600;color:#0f172a;">Not calculated</dd></div>'
                 f'</dl>'
                 f'<p style="margin:10px 0 0;font-size:11.5px;color:#64748b;line-height:1.4;">{bond_expl_esc}</p>'
                 f'</div>'
@@ -543,7 +634,7 @@ def generate_html_dossier(project_name: str, poses_data: list[dict], out_html: s
 
         covalent_html = (
             '<section id="covalent">'
-            '<div class="section-heading"><span>03 / Covalent Feasibility</span><h2>Covalent Near-Attack Conformations (NAC) <span class="help-bubble" tabindex="0" data-tooltip="Pre-reactive near-attack conformation, Bürgi-Dunitz trajectory, and Eyring chemical kinetics governing covalent bond formation.">?</span></h2></div>'
+            '<div class="section-heading"><span>03 / Covalent Feasibility &amp; Pre-reactive Active-Site Analysis</span><h2>Covalent Near-Attack Conformations (NAC) &amp; Active-Site Analysis <span class="help-bubble" tabindex="0" data-tooltip="Pre-reactive near-attack conformation, Bürgi-Dunitz trajectory, and Eyring chemical kinetics governing covalent bond formation.">?</span></h2></div>'
             f'<p>{escape(str(covalent_summary.get("summary", "")))}</p>'
             + tot_feas_block
             + cluster_block
@@ -560,13 +651,15 @@ def generate_html_dossier(project_name: str, poses_data: list[dict], out_html: s
     public_jobs = [{k:v for k,v in job.items() if k != 'viewer_link'} for job in jobs]
     provenance = dict(schema_version=1, shark_version=__version__, project=str(project_name), jobs=public_jobs,
                       docking=poses_data, molecular_dynamics=md_summary, covalent=covalent_summary, notes=notes)
-    # Card 2: Total Covalent Feasibility (or TS ΔG‡ / Geometric Feasibility)
+    
+    # Card 2: Total Covalent Feasibility (INV-004: Strict - never fallback to geometric contact score)
     card2_title = 'Total Feasibility (CFI) <span class="help-bubble" tabindex="0" data-tooltip="Unified Covalent Feasibility Index combining initial docking affinity (Pillar 1), MD trajectory near-attack persistence P_NAC (Pillar 2), and Eyring transition state barrier (Pillar 3).">?</span>'
-    card2_main = "Not Evaluated"
-    card2_sub = "Requires reaction mechanism"
+    card2_main = "Not available"
+    card2_sub = "CFI_pre = Not available · CFI_final = Not available"
+
     if covalent_summary:
         tot_feas = covalent_summary.get('total_feasibility')
-        if tot_feas and (tot_feas.get('cfi_final') is not None or tot_feas.get('cfi_pre') is not None):
+        if tot_feas:
             cfi_final = tot_feas.get('cfi_final')
             cfi_pre = tot_feas.get('cfi_pre')
             tier_val = tot_feas.get('tier', 'Evaluated')
@@ -574,38 +667,18 @@ def generate_html_dossier(project_name: str, poses_data: list[dict], out_html: s
                 card2_title = 'Total Feasibility (CFI_final) <span class="help-bubble" tabindex="0" data-tooltip="Unified Covalent Feasibility Index combining initial docking affinity (Pillar 1), MD trajectory near-attack persistence P_NAC (Pillar 2), and Eyring transition state barrier (Pillar 3).">?</span>'
                 card2_main = f"{cfi_final:.3f}"
                 card2_sub = f"{tier_val} · 3 Pillars Integrated"
-            else:
+            elif cfi_pre is not None:
                 card2_title = 'Pre-reactive Score (CFI_pre) <span class="help-bubble" tabindex="0" data-tooltip="Pre-reactive feasibility combining reversible recognition and solvated MD NAC persistence. Transition-state chemical barrier pending.">?</span>'
-                card2_main = f"{cfi_pre:.3f}" if cfi_pre is not None else "N/A"
-                card2_sub = f"{tier_val} · TS Pending"
-
-        else:
-            ts_res = covalent_summary.get('transition_state')
-            if ts_res and ts_res.get('delta_g_activation_kcal') is not None:
-                card2_title = 'Covalent Barrier (ΔG‡) <span class="help-bubble" tabindex="0" data-tooltip="Eyring activation free energy barrier.">?</span>'
-                card2_main = f"{ts_res['delta_g_activation_kcal']:.1f} kcal/mol"
-                card2_sub = f"{ts_res.get('kinetic_feasibility', 'Feasible')} · t½ ~ {ts_res.get('half_life', 'N/A')}"
+                card2_main = f"{cfi_pre:.3f}"
+                card2_sub = f"{tier_val} · CFI_final pending TS calculation"
             else:
-                contacts = covalent_summary.get('contacts', [])
-                nac_items = [c for c in contacts if c.get('is_nac')]
-                if nac_items:
-                    best = max(nac_items, key=lambda c: (c.get('feasibility_score') or 0, -(c.get('distance_angstrom') or 99)))
-                elif contacts:
-                    best = min(contacts, key=lambda c: c.get('distance_angstrom') or 999)
-                else:
-                    best = None
-                if best:
-                    geom_feas = best.get('feasibility_score')
-                    cfi = best.get('composite_feasibility')
-                    dist = best.get('distance_angstrom')
-                    target_res = best.get('residue', 'Pocket')
-                    score = geom_feas if (geom_feas is not None and geom_feas > 0) else cfi
-                    card2_main = f"{score:.2f}" if score is not None else "NAC"
-                    tag = "NAC Observed (≤ 3.5 Å)" if best.get('is_nac') else "Proximal (> 3.5 Å)"
-                    card2_sub = f"d = {dist:.2f} Å · {target_res} · {tag}" if dist is not None else f"{target_res} · {tag}"
-                elif covalent_summary.get('pocket_nucleophiles'):
-                    card2_main = "Pocket Nucls"
-                    card2_sub = f"{len(covalent_summary['pocket_nucleophiles'])} in cavity (> contact cutoff)"
+                card2_title = 'Total Feasibility (CFI) <span class="help-bubble" tabindex="0" data-tooltip="Covalent Feasibility Index requires dynamic MD near-attack conformation analysis (INV-001 / INV-002).">?</span>'
+                card2_main = "Not available"
+                card2_sub = "CFI_pre = Not available · CFI_final = Not available (Requires dynamic MD P_NAC)"
+        else:
+            card2_title = 'Total Feasibility (CFI) <span class="help-bubble" tabindex="0" data-tooltip="Covalent Feasibility Index requires dynamic MD near-attack conformation analysis (INV-001 / INV-002).">?</span>'
+            card2_main = "Not available"
+            card2_sub = "CFI_pre = Not available · CFI_final = Not available"
 
     # Card 3: Trajectory Sampling & P_NAC Persistence
     card3_title = 'Conformational Sampling <span class="help-bubble" tabindex="0" data-tooltip="MD trajectory sampling persistence.">?</span>'
@@ -649,6 +722,7 @@ def generate_html_dossier(project_name: str, poses_data: list[dict], out_html: s
                         LEGACY=legacy, NOTES=f'<p>{escape(notes)}</p>' if notes else '',
                         PROVENANCE=escape(json.dumps(provenance, indent=2, default=str)),
                         DATA=_json(dict(viewers=viewers, levels=levels, tautomers=tautomers_data,
+                                        energy_basis=energy_basis,
                                         provenance=provenance, mesh=orbital_mesh, covalent=covalent_summary)),
                         PLOTLY=get_plotlyjs(),
                         THREEDMOL=_get_3dmol_js())

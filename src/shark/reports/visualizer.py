@@ -41,6 +41,18 @@ def plot_boltzmann_equilibrium(
 
     names = df["Name"].tolist()
     d_g = df["dG (kcal/mol)"].tolist()
+    has_gibbs = "dG (kcal/mol)" in df.columns and not df["dG (kcal/mol)"].isna().all()
+    if has_gibbs:
+        energies = [float(v) if v is not None and not pd.isna(v) else 0.0 for v in df["dG (kcal/mol)"]]
+        energy_title = r"Relative Free Energy ($\Delta G$)"
+        energy_ylabel = r"$\Delta G$ (kcal/mol)"
+        pop_title = r"Boltzmann Population ($P_i$)"
+    else:
+        energies = [float(v) if v is not None and not pd.isna(v) else 0.0 for v in df.get("dE_el (kcal/mol)", [0.0]*len(names))]
+        energy_title = r"Relative Electronic Energy ($\Delta E_{el}$)"
+        energy_ylabel = r"$\Delta E_{el}$ (kcal/mol)"
+        pop_title = r"Electronic Population Proxy ($P_i$)"
+
     pops = df["Population (%)"].tolist()
     x = np.arange(len(names))
     colors = [PALETTE[i % len(PALETTE)] for i in range(len(names))]
@@ -49,12 +61,17 @@ def plot_boltzmann_equilibrium(
     bars1 = ax1.bar(x, d_g, color=colors, alpha=0.85, edgecolor="black", width=0.55)
     ax1.set_title(r"Relative Free Energy ($\Delta G$)", fontsize=12, fontweight="bold", pad=12)
     ax1.set_ylabel(r"$\Delta G$ (kcal/mol)", fontsize=11)
+    # Left: Energy (kcal/mol)
+    bars1 = ax1.bar(x, energies, color=colors, alpha=0.85, edgecolor="black", width=0.55)
+    ax1.set_title(energy_title, fontsize=12, fontweight="bold", pad=12)
+    ax1.set_ylabel(energy_ylabel, fontsize=11)
     ax1.set_xticks(x)
     ax1.set_xticklabels(names, rotation=15, ha="right", fontsize=10)
     ax1.grid(axis="y", linestyle="--", alpha=0.5)
-    ax1.set_ylim(0, max(max(d_g) * 1.35, 1.0))
+    max_e = max(energies) if energies else 1.0
+    ax1.set_ylim(0, max(max_e * 1.35, 1.0))
 
-    for bar, val in zip(bars1, d_g):
+    for bar, val in zip(bars1, energies):
         ax1.text(
             bar.get_x() + bar.get_width() / 2,
             bar.get_height() + 0.05,
@@ -67,7 +84,7 @@ def plot_boltzmann_equilibrium(
 
     # Right: Population (%)
     bars2 = ax2.bar(x, pops, color=colors, alpha=0.85, edgecolor="black", width=0.55)
-    ax2.set_title(r"Boltzmann Population ($P_i$)", fontsize=12, fontweight="bold", pad=12)
+    ax2.set_title(pop_title, fontsize=12, fontweight="bold", pad=12)
     ax2.set_ylabel("Population (%)", fontsize=11)
     ax2.set_xticks(x)
     ax2.set_xticklabels(names, rotation=15, ha="right", fontsize=10)

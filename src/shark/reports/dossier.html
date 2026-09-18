@@ -46,13 +46,18 @@ if(data.viewers&&data.viewers.length){
 addEventListener('message',event=>{if(event.source===frame?.contentWindow&&event.data?.type==='shark-viewer-size'&&Number.isFinite(event.data.height))frame.style.height=Math.min(12000,Math.max(520,event.data.height+16))+'px';});
 
 const structContainer=document.getElementById('tautomer-structures');
+const isElectronic = data.energy_basis === 'electronic';
+const energySym = isElectronic ? 'ΔE' : 'ΔG';
+const energyTitle = isElectronic ? 'Relative Electronic Energy (ΔE)' : 'Relative Free Energy (ΔG)';
+const popTitle = isElectronic ? 'Electronic Population Proxy (P<sub>i</sub>)' : 'Boltzmann Population (P<sub>i</sub>)';
+
 if(structContainer && data.tautomers && data.tautomers.length>1){
  structContainer.innerHTML=data.tautomers.map((item,idx)=>{
   const isDom=idx===0;
   const pillClass=isDom?'dominant':'minor';
   const pct=(typeof item.boltzmann_pct==='number')?`${item.boltzmann_pct.toFixed(1)}% population`:'populations not inferred';
   const dE=item.delta_e_kcal===0?'0.00':(item.delta_e_kcal>0?'+':'')+item.delta_e_kcal.toFixed(2);
-  const pillText=`${pct} · ΔG = ${dE} kcal/mol`;
+  const pillText=`${pct} · ${energySym} = ${dE} kcal/mol`;
   const svg=item.svg||'';
   return `<div class="tautomer-card"><div style="height:100px;display:flex;align-items:center;justify-content:center;">${svg}</div><h4>${item.label}</h4><span class="status-pill ${pillClass}">${pillText}</span></div>`;
  }).join('');
@@ -77,7 +82,7 @@ if(eqPlotEl && data.tautomers && data.tautomers.length>1){
   xaxis:'x',
   yaxis:'y',
   showlegend:false,
-  hovertemplate:'%{x}<br>ΔG: %{y:.2f} kcal/mol<extra></extra>'
+  hovertemplate:`%{x}<br>${energySym}: %{y:.2f} kcal/mol<extra></extra>`
  };
 
  const tracePop={
@@ -95,7 +100,7 @@ if(eqPlotEl && data.tautomers && data.tautomers.length>1){
 
  const layout={
   title:{
-   text:'<b>Tautomeric Thermodynamic Equilibrium (298.15 K)</b>',
+   text: `<b>Tautomeric Equilibrium (${isElectronic ? 'Electronic Energy Proxy' : 'Gibbs Free Energy'})</b>`,
    font:{size:15,color:'#16283f'},
    x:0.5,
    xanchor:'center'
@@ -107,7 +112,7 @@ if(eqPlotEl && data.tautomers && data.tautomers.length>1){
    tickfont:{size:11,color:'#16283f'}
   },
   yaxis:{
-   title:{text:'ΔG (kcal/mol)',font:{size:12,color:'#16283f'}},
+   title:{text:`${energySym} (kcal/mol)`,font:{size:12,color:'#16283f'}},
    range:[0,maxDg*1.35],
    gridcolor:'#e2e8f0',
    gridwidth:1,
@@ -129,12 +134,12 @@ if(eqPlotEl && data.tautomers && data.tautomers.length>1){
   },
   annotations:[
    {
-    text:'<b>Relative Free Energy (ΔG)</b>',
+    text:`<b>${energyTitle}</b>`,
     x:0.23,y:1.10,xref:'paper',yref:'paper',
     showarrow:false,font:{size:13,color:'#16283f'}
    },
    {
-    text:'<b>Boltzmann Population (P<sub>i</sub>)</b>',
+    text:`<b>${popTitle}</b>`,
     x:0.77,y:1.10,xref:'paper',yref:'paper',
     showarrow:false,font:{size:13,color:'#16283f'}
    }
