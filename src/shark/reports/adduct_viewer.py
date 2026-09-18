@@ -570,14 +570,8 @@ def generate_adduct_viewer_html(
       viewer.render();
     }}
 
-    // Default active orbital mode
-    if (lumoVol) {{
-      showOrbital('lumo');
-    }} else if (homoVol) {{
-      showOrbital('homo');
-    }} else {{
-      showOrbital('none');
-    }}
+    // Default active orbital mode: start clean in Structure Only view
+    showOrbital('none');
 
     // Button event listeners
     const lumoBtn = document.getElementById('{widget_id}_lumo_btn');

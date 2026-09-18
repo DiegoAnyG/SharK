@@ -678,6 +678,30 @@ def generate_html_dossier(project_name: str, poses_data: list[dict], out_html: s
             c_en = cluster_qm.get('electronic_energy_hartree')
             c_meth = cluster_qm.get('method', 'r2SCAN-3c')
             c_atoms = cluster_qm.get('num_atoms') or cluster_qm.get('n_atoms', 'N/A')
+            plotly_frame_html = ""
+            p_rel = cluster_qm.get('plotly_rel') or covalent_summary.get('cluster_plotly_rel')
+            p_html = cluster_qm.get('plotly_html') or covalent_summary.get('cluster_plotly_html')
+            if p_html:
+                plotly_frame_html = (
+                    f'<div style="margin-top:16px;background:#fff;border:1px solid #bae6fd;border-radius:8px;overflow:hidden;">'
+                    f'<div style="background:#e0f2fe;padding:10px 14px;border-bottom:1px solid #bae6fd;display:flex;justify-content:space-between;align-items:center;">'
+                    f'<strong style="font-size:13px;color:#0369a1;">Active-Site Cluster Frontier Orbitals (Plotly 3D Marching Cubes Engine)</strong>'
+                    f'<span style="font-size:11px;color:#0284c7;">Interactive High-Definition 3D Meshes</span>'
+                    f'</div>'
+                    f'<iframe srcdoc="{escape(p_html, quote=True)}" style="width:100%;height:680px;border:none;" title="Cluster Plotly Orbitals"></iframe>'
+                    f'</div>'
+                )
+            elif p_rel:
+                plotly_frame_html = (
+                    f'<div style="margin-top:16px;background:#fff;border:1px solid #bae6fd;border-radius:8px;overflow:hidden;">'
+                    f'<div style="background:#e0f2fe;padding:10px 14px;border-bottom:1px solid #bae6fd;display:flex;justify-content:space-between;align-items:center;">'
+                    f'<strong style="font-size:13px;color:#0369a1;">Active-Site Cluster Frontier Orbitals (Plotly 3D Marching Cubes Engine)</strong>'
+                    f'<span style="font-size:11px;color:#0284c7;">Interactive High-Definition 3D Meshes</span>'
+                    f'</div>'
+                    f'<iframe src="{escape(str(p_rel))}" style="width:100%;height:680px;border:none;" title="Cluster Plotly Orbitals"></iframe>'
+                    f'</div>'
+                )
+
             cluster_qm_block = (
                 f'<div class="cluster-qm-section" style="margin:20px 0;background:#f0f9ff;border:1px solid #bae6fd;border-radius:10px;padding:16px;">'
                 f'<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">'
@@ -693,6 +717,7 @@ def generate_html_dossier(project_name: str, poses_data: list[dict], out_html: s
                 f'<div style="background:#fff;padding:8px 12px;border-radius:6px;border:1px solid #e0f2fe;"><dt style="color:#64748b;">HOMO-LUMO Gap</dt><dd style="margin:0;font-weight:700;color:#0f172a;">{_number(c_gap, 2)} eV</dd></div>'
                 f'<div style="background:#fff;padding:8px 12px;border-radius:6px;border:1px solid #e0f2fe;"><dt style="color:#64748b;">Electronic Energy</dt><dd style="margin:0;font-weight:700;color:#0f172a;">{_number(c_en, 6)} Eh</dd></div>'
                 f'</dl>'
+                f'{plotly_frame_html}'
                 f'</div>'
             )
 
