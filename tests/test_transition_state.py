@@ -81,11 +81,12 @@ def test_extract_qm_cluster_minimal(mock_active_site):
         target_residue="THR309",
     )
     assert cluster.n_atoms > 0
-    # Ligand (4 atoms) + THR309 (11 atoms) + 2 capping H = 17 atoms
-    assert cluster.n_atoms == 17
+    # Ligand (4 atoms) + THR309 (11 input atoms + 3 reconstructed methyl H) + 2 capping H = 20 atoms
+    assert cluster.n_atoms == 20
     assert cluster.model_type == "minimal"
     assert cluster.charge == 0
     assert cluster.multiplicity == 1
+    assert cluster.effective_multiplicity == 1
 
     # Nucleophile should be THR309 OG1
     assert cluster.nucleophile_idx is not None

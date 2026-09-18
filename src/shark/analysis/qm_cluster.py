@@ -22,6 +22,36 @@ from .covalent_matcher import (
     REACTIVE_NUCLEOPHILES,
 )
 
+# Complete atomic number mapping for standard elements and bioinorganic centers (Z = 1 to 86)
+PERIODIC_TABLE_Z = {
+    "H": 1, "HE": 2, "LI": 3, "BE": 4, "B": 5, "C": 6, "N": 7, "O": 8, "F": 9, "NE": 10,
+    "NA": 11, "MG": 12, "AL": 13, "SI": 14, "P": 15, "S": 16, "CL": 17, "AR": 18,
+    "K": 19, "CA": 20, "SC": 21, "TI": 22, "V": 23, "CR": 24, "MN": 25, "FE": 26,
+    "CO": 27, "NI": 28, "CU": 29, "ZN": 30, "GA": 31, "GE": 32, "AS": 33, "SE": 34,
+    "BR": 35, "KR": 36, "RB": 37, "SR": 38, "Y": 39, "ZR": 40, "NB": 41, "MO": 42,
+    "TC": 43, "RU": 44, "RH": 45, "PD": 46, "AG": 47, "CD": 48, "IN": 49, "SN": 50,
+    "SB": 51, "TE": 52, "I": 53, "XE": 54, "CS": 55, "BA": 56, "LA": 57, "CE": 58,
+    "PR": 59, "ND": 60, "PM": 61, "SM": 62, "EU": 63, "GD": 64, "TB": 65, "DY": 66,
+    "HO": 67, "ER": 68, "TM": 69, "YB": 70, "LU": 71, "HF": 72, "TA": 73, "W": 74,
+    "RE": 75, "OS": 76, "IR": 77, "PT": 78, "AU": 79, "HG": 80, "TL": 81, "PB": 82,
+    "BI": 83, "PO": 84, "AT": 85, "RN": 86,
+}
+
+
+def get_atomic_number(symbol: str) -> int:
+    """Returns the atomic number Z for a chemical element symbol.
+
+    Raises
+    ------
+    ValueError
+        If the element symbol is unrecognized. Never defaults or guesses carbon (Z=6).
+    """
+    clean = symbol.strip().upper()
+    z = PERIODIC_TABLE_Z.get(clean)
+    if z is None:
+        raise ValueError(f"Unknown element symbol: '{symbol}'")
+    return z
+
 
 @dataclass
 class ClusterAtom:
@@ -75,25 +105,46 @@ class QMCluster:
         return [idx for idx, a in enumerate(self.atoms) if a.is_frozen]
 
     @property
-    def effective_multiplicity(self) -> int:
-        """Determines physically valid spin multiplicity matching electron parity."""
-        periodic_z = {
-            "H": 1, "HE": 2, "LI": 3, "BE": 4, "B": 5, "C": 6, "N": 7, "O": 8, "F": 9, "NE": 10,
-            "NA": 11, "MG": 12, "AL": 13, "SI": 14, "P": 15, "S": 16, "CL": 17, "AR": 18,
-            "K": 19, "CA": 20, "BR": 35, "I": 53
-        }
-        total_z = sum(periodic_z.get(a.element.strip().upper(), 6) for a in self.atoms)
-        n_electrons = total_z - self.charge
+    def total_electrons(self) -> int:
+        """Total number of electrons in the cluster taking charge into account."""
+        total_z = sum(get_atomic_number(a.element) for a in self.atoms)
+        return total_z - self.charge
+
+    def validate_multiplicity(self) -> int:
+        """Validates that cluster multiplicity is physically compatible with electron parity.
+
+        Raises
+        ------
+        ValueError
+            If multiplicity is physically impossible (e.g. singlet with odd electron count,
+            doublet with even electron count, or multiplicity requires more unpaired electrons
+            than total electrons). Never guesses or silently mutates spin multiplicity.
+        """
+        n_elec = self.total_electrons
         mult = self.multiplicity
-        if n_electrons % 2 != 0 and mult % 2 != 0:
-            return 2 if mult == 1 else mult + 1
-        elif n_electrons % 2 == 0 and mult % 2 == 0:
-            return 1 if mult == 2 else mult - 1
+        if mult < 1:
+            raise ValueError(f"Spin multiplicity must be >= 1, got {mult}")
+        if (n_elec % 2) != ((mult - 1) % 2):
+            expected = "even (doublet, quartet, ...)" if (n_elec % 2 != 0) else "odd (singlet, triplet, ...)"
+            raise ValueError(
+                f"Spin multiplicity {mult} is incompatible with {n_elec} electrons "
+                f"(charge={self.charge}). For {n_elec} electrons, multiplicity must be {expected}."
+            )
+        if mult - 1 > n_elec:
+            raise ValueError(
+                f"Spin multiplicity {mult} requires at least {mult - 1} unpaired electrons, "
+                f"but cluster only has {n_elec} total electrons."
+            )
         return mult
+
+    @property
+    def effective_multiplicity(self) -> int:
+        """Authoritative validated spin multiplicity matching electron parity."""
+        return self.validate_multiplicity()
 
     def to_xyz(self) -> str:
         """Serializes the cluster to standard XYZ format."""
-        lines = [f"{len(self.atoms)}", f"{self.name} | Model: {self.model_type} | Charge: {self.charge} Mult: {self.multiplicity}"]
+        lines = [f"{len(self.atoms)}", f"{self.name} | Model: {self.model_type} | Charge: {self.charge} Mult: {self.effective_multiplicity}"]
         for a in self.atoms:
             lines.append(f"{a.element:<2} {a.coords[0]:12.6f} {a.coords[1]:12.6f} {a.coords[2]:12.6f}")
         return "\n".join(lines) + "\n"
@@ -351,9 +402,6 @@ def _reconstruct_target_residue_hydrogens(
     """
     res = res_name.upper()
     existing = {k.upper() for k in target_atoms_dict.keys()}
-    has_h = any(at.get("element", "").upper() == "H" for at in target_atoms_dict.values())
-    if has_h:
-        return [], 0
 
     new_atoms = []
     charge = 0
@@ -914,6 +962,7 @@ def run_cluster_single_point(
     import time
     from .qm_covalent import extract_orbital_summary
     from ..core.parser import parse_orca_output
+    from ..core.runner import run_orca_process, find_orca
 
     w_path = Path(work_dir).expanduser().resolve()
     w_path.mkdir(parents=True, exist_ok=True)
@@ -925,23 +974,18 @@ def run_cluster_single_point(
     out_path = w_path / "cluster.out"
     gbw_path = w_path / "cluster.gbw"
 
-    orca_bin = _find_orca_executable()
+    orca_bin = find_orca(allow_none=True) or _find_orca_executable()
     if not orca_bin:
         return ClusterQMResult(
             cluster_name=cluster.name,
             n_atoms=cluster.n_atoms,
             charge=cluster.charge,
-            multiplicity=cluster.multiplicity,
+            multiplicity=cluster.effective_multiplicity,
             method=method,
             solvent=solvent,
             success=False,
             error_message="ORCA binary not found in environment or PATH.",
         )
-
-    # Prepare environment ensuring OpenMPI mpirun finds ORCA in PATH
-    env = os.environ.copy()
-    orca_dir = str(orca_bin.parent)
-    env["PATH"] = f"{orca_dir}:{env.get('PATH', '')}"
 
     start_t = time.time()
 
@@ -962,26 +1006,24 @@ def run_cluster_single_point(
         )
         inp_path.write_text(inp_content, encoding="utf-8")
 
-        with open(out_path, "w", encoding="utf-8") as out_f:
-            p_orca = subprocess.run(
-                [str(orca_bin), "cluster.inp"],
-                cwd=w_path,
-                env=env,
-                stdout=out_f,
-                stderr=subprocess.STDOUT,
-                check=False,
-            )
-        if p_orca.returncode != 0:
+        proc_res = run_orca_process(
+            executable=orca_bin,
+            input_file="cluster.inp",
+            output_file="cluster.out",
+            cwd=w_path,
+            check_normal_termination=True,
+        )
+        if not proc_res.terminated_normally or proc_res.returncode != 0:
             return ClusterQMResult(
                 cluster_name=cluster.name,
                 n_atoms=cluster.n_atoms,
                 charge=cluster.charge,
-                multiplicity=cluster.multiplicity,
+                multiplicity=cluster.effective_multiplicity,
                 method=method,
                 solvent=solvent,
-                execution_time_s=time.time() - start_t,
+                execution_time_s=proc_res.execution_time_s,
                 success=False,
-                error_message=f"ORCA single-point execution failed with returncode {p_orca.returncode}.",
+                error_message=proc_res.error or f"ORCA single-point execution failed with returncode {proc_res.returncode}.",
             )
 
     # Parse orbital energies and total energy
@@ -1014,17 +1056,15 @@ def run_cluster_single_point(
             if orca_plot_bin.is_file():
                 plot_cmd = f"4\n{grid}\n5\n7\n2\n{homo_idx}\n3\n0\n11\n2\n{lumo_idx}\n3\n0\n11\n12\n"
                 (w_path / "plot_mo.txt").write_text(plot_cmd, encoding="utf-8")
-                with open(w_path / "plot_mo.log", "w", encoding="utf-8") as plot_log:
-                    subprocess.run(
-                        [str(orca_plot_bin), "cluster.gbw", "-i"],
-                        input=plot_cmd,
-                        text=True,
-                        cwd=w_path,
-                        env=env,
-                        stdout=plot_log,
-                        stderr=subprocess.STDOUT,
-                        check=False,
-                    )
+                run_orca_process(
+                    executable=orca_plot_bin,
+                    input_file="cluster.gbw",
+                    output_file="plot_mo.log",
+                    cwd=w_path,
+                    extra_args=["-i"],
+                    stdin_content=plot_cmd,
+                    check_normal_termination=False,
+                )
 
         if h_cube_file.is_file():
             homo_cube_data = h_cube_file.read_text(encoding="utf-8", errors="replace")

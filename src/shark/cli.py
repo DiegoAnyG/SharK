@@ -12,7 +12,7 @@ import sys
 import zipfile
 
 from .core.session import read_poliscreen_session
-from .core.runner import run_orca_job
+from .core.runner import run_orca_job, run_orca_process, find_orca
 from .reports.dossier import generate_html_dossier
 from .workflows.ligand_qm import prepare_ligand_jobs
 
@@ -954,21 +954,23 @@ def main(argv=None):
                 print(f"[TIER 4] Runner script: {wf['run_script']}")
 
                 if args.execute:
-                    orca_bin = shutil.which('orca')
-                    orca_bin = os.environ.get('SHARK_ORCA') or orca_bin
-                    if orca_bin and Path(orca_bin).is_dir():
-                        orca_bin = str(Path(orca_bin) / 'orca')
+                    orca_bin = find_orca(allow_none=True)
                     if not orca_bin:
                         print("[ERROR] ORCA executable not found in PATH or standard location", file=sys.stderr)
                         return 1
 
-                    orca_real = os.path.realpath(orca_bin)
+                    orca_real = str(orca_bin)
                     print(f"[TIER 4] [Step 1/3] Executing ORCA relaxed coordinate scan with {orca_real}...")
-                    with open(ts_work_dir / '01_scan.out', 'w') as out_f:
-                        p_scan = subprocess.run([orca_real, '01_scan.inp'], cwd=ts_work_dir, stdout=out_f, stderr=subprocess.STDOUT)
-                    if p_scan.returncode != 0:
-                        print(f"[ERROR] Coordinate scan failed with code {p_scan.returncode}", file=sys.stderr)
-                        return p_scan.returncode
+                    p_scan = run_orca_process(
+                        executable=orca_real,
+                        input_file='01_scan.inp',
+                        output_file='01_scan.out',
+                        cwd=ts_work_dir,
+                        check_normal_termination=True,
+                    )
+                    if not p_scan.terminated_normally or p_scan.returncode != 0:
+                        print(f"[ERROR] Coordinate scan failed: {p_scan.error or f'code {p_scan.returncode}'}", file=sys.stderr)
+                        return p_scan.returncode if p_scan.returncode != 0 else 1
 
                     print("[TIER 4] [Step 2/3] Analyzing scan trajectory and locating Transition State guess...")
                     scan_res = parse_orca_scan_output(ts_work_dir / '01_scan.out', work_dir=ts_work_dir)
@@ -979,17 +981,22 @@ def main(argv=None):
                         tmpl = (ts_work_dir / '02_optts_template.inp').read_text(encoding='utf-8')
                         header = tmpl.split('* xyz')[0]
                         coords_str = '\n'.join(['  ' + ln for ln in xyz_lines if ln.strip()])
-                        new_inp = f"{header}* xyz {cluster.charge} {cluster.multiplicity}\n{coords_str}\n*\n"
+                        new_inp = f"{header}* xyz {cluster.charge} {cluster.effective_multiplicity}\n{coords_str}\n*\n"
                         (ts_work_dir / '02_optts.inp').write_text(new_inp, encoding='utf-8')
                     else:
                         shutil.copyfile(ts_work_dir / '02_optts_template.inp', ts_work_dir / '02_optts.inp')
 
                     print(f"[TIER 4] [Step 3/3] Running Saddle Point Optimization & Frequency Verification (! OptTS Freq)...")
-                    with open(ts_work_dir / '02_optts.out', 'w') as out_f:
-                        p_ts = subprocess.run([orca_real, '02_optts.inp'], cwd=ts_work_dir, stdout=out_f, stderr=subprocess.STDOUT)
-                    if p_ts.returncode != 0:
-                        print(f"[ERROR] OptTS failed with code {p_ts.returncode}", file=sys.stderr)
-                        return p_ts.returncode
+                    p_ts = run_orca_process(
+                        executable=orca_real,
+                        input_file='02_optts.inp',
+                        output_file='02_optts.out',
+                        cwd=ts_work_dir,
+                        check_normal_termination=True,
+                    )
+                    if not p_ts.terminated_normally or p_ts.returncode != 0:
+                        print(f"[ERROR] OptTS failed: {p_ts.error or f'code {p_ts.returncode}'}", file=sys.stderr)
+                        return p_ts.returncode if p_ts.returncode != 0 else 1
 
                     ts_verif = parse_orca_ts_output(ts_work_dir / '02_optts.out', property_file_path=ts_work_dir / '02_optts.property.txt')
                     print(f"[TIER 4] Verification: {ts_verif.transition_vector_summary}")
