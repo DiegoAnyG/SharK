@@ -589,6 +589,9 @@ def generate_html_dossier(project_name: str, poses_data: list[dict], out_html: s
             ]
             if d_ts is not None and cfi_final is not None:
                 tf_items.append(('Pillar 3: Chemical Kinetics (S_chem)', f"{_number(s_ts_val, 3)} (ΔG‡ = {_number(d_ts, 1)} kcal/mol, w={w.get('chem', w.get('ts', 0.40))})"))
+                k_chem_val = tot_feas.get('k_chem')
+                if k_chem_val is not None and k_chem_val > 0:
+                    tf_items.append(('Intrinsic Chemical Rate (k_chem)', f"{k_chem_val:.2e} s⁻¹ (Eyring TST at 310.15 K)"))
                 tf_items.append(('Final Feasibility Index (CFI_final)', f"<strong>{_number(cfi_final, 3)}</strong> · <span class='badge' style='background:#ecfdf5;color:#065f46;'>{tier_val}</span>"))
             elif cfi_pre is not None:
                 tf_items.append(('Pillar 3: Chemical Kinetics (S_chem)', "Not evaluated (pending transition-state calculation)"))

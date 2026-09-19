@@ -296,25 +296,92 @@ def parse_orca_scan_output(
                     xyz_path=step_xyz
                 ))
 
-    # If scan block was not found, fallback to parsing step lines in stdout
+    # If scan block was not found in stdout, check for allxyz/xyzall trajectory or parse step blocks
     if not points:
-        step_pattern = re.compile(r"RELAXED SURFACE SCAN STEP\s+(\d+).*?FINAL SINGLE POINT ENERGY\s+([-\d.]+)", re.DOTALL)
-        matches = step_pattern.findall(content)
-        initial_e = None
-        for m in matches:
-            s_num = int(m[0])
-            s_eh = float(m[1])
-            if initial_e is None:
-                initial_e = s_eh
-            points.append(ScanPoint(
-                step=s_num,
-                coordinate_value=0.0,
-                energy_hartree=s_eh,
-                relative_energy_kcal=(s_eh - initial_e) * HARTREE_TO_KCAL
-            ))
+        allxyz_file = directory / f"{base_stem}.allxyz"
+        if not allxyz_file.exists():
+            allxyz_file = directory / f"{base_stem}.xyzall"
+
+        if allxyz_file.exists():
+            try:
+                lines = allxyz_file.read_text(encoding="utf-8", errors="replace").splitlines()
+                i = 0
+                while i < len(lines):
+                    line = lines[i].strip()
+                    if line.isdigit():
+                        n_atoms = int(line)
+                        if i + 1 < len(lines):
+                            hdr = lines[i + 1]
+                            m_e = re.search(r"E\s+([-\d.]+)", hdr)
+                            m_step = re.search(r"Step\s+(\d+)", hdr)
+                            step_idx = int(m_step.group(1)) if m_step else (len(points) + 1)
+                            energy_eh = float(m_e.group(1)) if m_e else None
+
+                            coords: List[List[float]] = []
+                            for k in range(n_atoms):
+                                if i + 2 + k < len(lines):
+                                    parts = lines[i + 2 + k].split()
+                                    if len(parts) >= 4:
+                                        coords.append([float(x) for x in parts[1:4]])
+
+                            step_xyz = directory / f"{base_stem}.{step_idx:03d}.xyz"
+                            if not step_xyz.exists():
+                                step_xyz_alt = list(directory.glob(f"*.{step_idx:03d}.xyz"))
+                                step_xyz = step_xyz_alt[0] if step_xyz_alt else None
+
+                            coord_val = 0.0
+                            if len(coords) >= 32:
+                                c1 = coords[31]
+                                c2 = coords[10]
+                                coord_val = round(math.sqrt(sum((a - b) ** 2 for a, b in zip(c1, c2))), 3)
+
+                            if energy_eh is not None:
+                                points.append(ScanPoint(
+                                    step=step_idx,
+                                    coordinate_value=coord_val,
+                                    energy_hartree=energy_eh,
+                                    relative_energy_kcal=0.0,
+                                    xyz_path=step_xyz
+                                ))
+                        i += 2 + n_atoms
+                    else:
+                        i += 1
+            except Exception:
+                points = []
+
+    # If still not found, fallback to parsing step blocks in stdout
+    if not points:
+        steps_raw = re.split(r"RELAXED SURFACE SCAN STEP\s+(\d+)", content)
+        for idx in range(1, len(steps_raw), 2):
+            s_num = int(steps_raw[idx])
+            block = steps_raw[idx + 1]
+
+            m_bond = re.search(r"Bond\s*\(\s*\d+,\s*\d+\)\s*:\s*([-\d.]+)", block)
+            coord_val = round(float(m_bond.group(1)), 3) if m_bond else 0.0
+
+            energies = re.findall(r"FINAL SINGLE POINT ENERGY\s+([-\d.]+)", block)
+            if energies:
+                final_e = float(energies[-1])
+                step_xyz = directory / f"{base_stem}.{s_num:03d}.xyz"
+                if not step_xyz.exists():
+                    step_xyz_alt = list(directory.glob(f"*.{s_num:03d}.xyz"))
+                    step_xyz = step_xyz_alt[0] if step_xyz_alt else None
+
+                points.append(ScanPoint(
+                    step=s_num,
+                    coordinate_value=coord_val,
+                    energy_hartree=final_e,
+                    relative_energy_kcal=0.0,
+                    xyz_path=step_xyz
+                ))
 
     if not points:
         return ScanResult(converged=False, raw_output=content[:500])
+
+    # Recompute relative energies with respect to first point
+    e0 = points[0].energy_hartree
+    for pt in points:
+        pt.relative_energy_kcal = (pt.energy_hartree - e0) * HARTREE_TO_KCAL
 
     # Find maximum energy point (TS guess)
     max_pt = max(points, key=lambda pt: pt.energy_hartree)
