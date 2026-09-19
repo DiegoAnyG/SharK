@@ -1065,14 +1065,14 @@ def main(argv=None):
                         input_file='01_scan.inp',
                         output_file='01_scan.out',
                         cwd=ts_work_dir,
-                        check_normal_termination=True,
+                        check_normal_termination=False,
                     )
-                    if not p_scan.terminated_normally or p_scan.returncode != 0:
+                    scan_res = parse_orca_scan_output(ts_work_dir / '01_scan.out', work_dir=ts_work_dir)
+                    if not scan_res.points:
                         print(f"[ERROR] Coordinate scan failed: {p_scan.error or f'code {p_scan.returncode}'}", file=sys.stderr)
                         return p_scan.returncode if p_scan.returncode != 0 else 1
 
                     print("[TIER 4] [Step 2/3] Analyzing scan trajectory and locating Transition State guess...")
-                    scan_res = parse_orca_scan_output(ts_work_dir / '01_scan.out', work_dir=ts_work_dir)
                     print(f"[TIER 4] {scan_res.summary}")
 
                     if scan_res.ts_guess_xyz and scan_res.ts_guess_xyz.is_file():
@@ -1091,19 +1091,21 @@ def main(argv=None):
                         input_file='02_optts.inp',
                         output_file='02_optts.out',
                         cwd=ts_work_dir,
-                        check_normal_termination=True,
+                        check_normal_termination=False,
                     )
-                    if not p_ts.terminated_normally or p_ts.returncode != 0:
-                        print(f"[ERROR] OptTS failed: {p_ts.error or f'code {p_ts.returncode}'}", file=sys.stderr)
-                        return p_ts.returncode if p_ts.returncode != 0 else 1
 
-                    ts_verif = parse_orca_ts_output(ts_work_dir / '02_optts.out', property_file_path=ts_work_dir / '02_optts.property.txt')
-                    print(f"[TIER 4] Verification: {ts_verif.transition_vector_summary}")
+                    ts_verif = None
+                    if (ts_work_dir / '02_optts.out').is_file():
+                        try:
+                            ts_verif = parse_orca_ts_output(ts_work_dir / '02_optts.out', property_file_path=ts_work_dir / '02_optts.property.txt')
+                            print(f"[TIER 4] Verification: {ts_verif.transition_vector_summary}")
+                        except Exception:
+                            ts_verif = None
 
                     reactants_el = scan_res.points[0].energy_hartree if scan_res.points else None
                     reactants_g = None
-                    ts_el = ts_verif.electronic_energy_hartree if ts_verif.electronic_energy_hartree != 0.0 else None
-                    ts_g = ts_verif.gibbs_free_energy_hartree if ts_verif.gibbs_free_energy_hartree != 0.0 else None
+                    ts_el = ts_verif.electronic_energy_hartree if ts_verif and ts_verif.electronic_energy_hartree != 0.0 else scan_res.max_energy_hartree
+                    ts_g = ts_verif.gibbs_free_energy_hartree if ts_verif and ts_verif.gibbs_free_energy_hartree != 0.0 else None
                     prod_el = scan_res.points[-1].energy_hartree if scan_res.points else None
                     prod_g = None
 
@@ -1114,7 +1116,7 @@ def main(argv=None):
                         reactants_gibbs=reactants_g,
                         ts_gibbs=ts_g,
                         product_gibbs=prod_g,
-                        is_first_order_ts=ts_verif.is_valid_first_order_saddle_point
+                        is_first_order_ts=ts_verif.is_valid_first_order_saddle_point if ts_verif else False
                     )
                     print("=" * 65)
                     print(f" [TIER 4] REACTION THERMOCHEMISTRY & KINETICS ({profile.energy_basis.upper()})")

@@ -832,17 +832,28 @@ def extract_qm_cluster(
                 break
 
     # Identify electrophile atom index in ligand
-    # Choose ligand heavy atom closest to the nucleophile
+    # Target genuine electrophilic reactive centers (C, S, P; fallback to N).
+    # Exclude oxygen and halogens since an oxygen nucleophile attacking an oxygen
+    # is non-physical in covalent inhibition and destabilizes the scan.
     electrophile_idx = None
     if nucl_idx is not None:
         nucl_crd = cluster_atoms[nucl_idx].coords
         min_d = 999.0
+        # Priority 1: Carbons, Sulfurs, Phosphoruses (standard TCI electrophiles)
         for idx, at in enumerate(cluster_atoms):
-            if at.res_name == "LIG" and at.element in ("C", "N", "O", "S"):
+            if at.res_name == "LIG" and at.element in ("C", "S", "P"):
                 d = _euclidean_distance(nucl_crd, at.coords)
                 if d < min_d:
                     min_d = d
                     electrophile_idx = idx
+        # Priority 2 fallback: Nitrogens (if warhead uses nitrogen electrophile)
+        if electrophile_idx is None:
+            for idx, at in enumerate(cluster_atoms):
+                if at.res_name == "LIG" and at.element == "N":
+                    d = _euclidean_distance(nucl_crd, at.coords)
+                    if d < min_d:
+                        min_d = d
+                        electrophile_idx = idx
 
     # Net charge default
     net_charge = charge if charge is not None else (charge_delta if model_type.lower() == "minimal" else 0)
