@@ -389,9 +389,17 @@ def run_interactive():
         stride = input('Frame stride for clustering [5] > ').strip()
         if stride:
             argv += ['--cluster-stride', stride]
-        dft_dir = input('Directory with existing ORCA DFT outputs (.out) [optional, press enter to skip] > ').strip()
-        if dft_dir:
-            argv += ['--dft-dir', dft_dir]
+        include_ts = input('Include Active-Site Cluster QM & Tier 4 Transition State (ORCA)? [Y/n] > ').strip().lower()
+        if include_ts != 'n':
+            argv += ['--orca-cluster-sp', '--tier-4-ts']
+            qm_model = input('Active site QM model [1: Minimal Capped Residue (recommended/fast), 2: Extended Pocket Cluster] [default: 1] > ').strip() or '1'
+            if qm_model == '2' or qm_model.lower().startswith('ext'):
+                argv += ['--qm-model', 'extended']
+            else:
+                argv += ['--qm-model', 'minimal']
+            exec_now = input('Launch complete pipeline (Trajectory Analysis + ORCA TS) immediately? [Y/n] > ').strip().lower()
+            if exec_now != 'n':
+                argv += ['--execute']
 
     elif choice == '3':
         argv += ['--full-gold-standard']
@@ -486,13 +494,13 @@ def run_interactive():
                 argv += ['--execute']
 
     elif choice in ('5', '6'):
-        action_or_gro = input('[1] Prepare ligand DFT  [2] Execute ligand DFT  [3] Session report  [4] Custom Covalent Matcher > ').strip()
+        action_or_gro = input('[1] Prepare ligand DFT  [2] Execute ligand DFT  [3] Session report  [4] Custom Covalent Matcher (or path to .gro/.pdb for trajectory contacts) > ').strip()
         if action_or_gro.lower().endswith(('.gro', '.pdb', '.tpr', '.xtc')):
             gro = action_or_gro
             xtc = input('XTC trajectory > ').strip()
             lig = input('Exact ligand atom selection (for example: resname UNL and not name H*) > ').strip()
             cutoff = input('Contact cutoff in angstrom [4.0] > ').strip() or '4.0'
-            argv = ['--analyze-md', '--topology', gro, '--trajectory', xtc,
+            argv = ['--analyze-md', '--topology', str(Path(gro).expanduser()), '--trajectory', str(Path(xtc).expanduser()),
                     '--ligand-selection', lig, '--contact-cutoff', cutoff]
         else:
             action = action_or_gro
