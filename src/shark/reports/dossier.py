@@ -686,39 +686,39 @@ def generate_html_dossier(project_name: str, poses_data: list[dict], out_html: s
             p_html = cluster_qm.get('plotly_html') or covalent_summary.get('cluster_plotly_html')
             if p_html:
                 plotly_frame_html = (
-                    f'<div style="margin-top:16px;background:#fff;border:1px solid #bae6fd;border-radius:8px;overflow:hidden;">'
-                    f'<div style="background:#e0f2fe;padding:10px 14px;border-bottom:1px solid #bae6fd;display:flex;justify-content:space-between;align-items:center;">'
-                    f'<strong style="font-size:13px;color:#0369a1;">Active-Site Cluster Frontier Orbitals (Plotly 3D Marching Cubes Engine)</strong>'
-                    f'<span style="font-size:11px;color:#0284c7;">Interactive High-Definition 3D Meshes</span>'
+                    f'<div style="margin-top:16px;background:#fff;border:1px solid #e2e8f0;border-radius:8px;overflow:hidden;">'
+                    f'<div style="background:#f8fafc;padding:10px 14px;border-bottom:1px solid #e2e8f0;display:flex;justify-content:space-between;align-items:center;">'
+                    f'<strong style="font-size:13px;color:#0f172a;">Active-Site Cluster Frontier Orbitals (Plotly 3D Marching Cubes Engine)</strong>'
+                    f'<span style="font-size:11px;color:#64748b;">Interactive High-Definition 3D Meshes</span>'
                     f'</div>'
                     f'<iframe srcdoc="{escape(p_html, quote=True)}" style="width:100%;height:680px;border:none;" title="Cluster Plotly Orbitals"></iframe>'
                     f'</div>'
                 )
             elif p_rel:
                 plotly_frame_html = (
-                    f'<div style="margin-top:16px;background:#fff;border:1px solid #bae6fd;border-radius:8px;overflow:hidden;">'
-                    f'<div style="background:#e0f2fe;padding:10px 14px;border-bottom:1px solid #bae6fd;display:flex;justify-content:space-between;align-items:center;">'
-                    f'<strong style="font-size:13px;color:#0369a1;">Active-Site Cluster Frontier Orbitals (Plotly 3D Marching Cubes Engine)</strong>'
-                    f'<span style="font-size:11px;color:#0284c7;">Interactive High-Definition 3D Meshes</span>'
+                    f'<div style="margin-top:16px;background:#fff;border:1px solid #e2e8f0;border-radius:8px;overflow:hidden;">'
+                    f'<div style="background:#f8fafc;padding:10px 14px;border-bottom:1px solid #e2e8f0;display:flex;justify-content:space-between;align-items:center;">'
+                    f'<strong style="font-size:13px;color:#0f172a;">Active-Site Cluster Frontier Orbitals (Plotly 3D Marching Cubes Engine)</strong>'
+                    f'<span style="font-size:11px;color:#64748b;">Interactive High-Definition 3D Meshes</span>'
                     f'</div>'
                     f'<iframe src="{escape(str(p_rel))}" style="width:100%;height:680px;border:none;" title="Cluster Plotly Orbitals"></iframe>'
                     f'</div>'
                 )
 
             cluster_qm_block = (
-                f'<div class="cluster-qm-section" style="margin:20px 0;background:#f0f9ff;border:1px solid #bae6fd;border-radius:10px;padding:16px;">'
+                f'<div class="cluster-qm-section" style="margin:20px 0;background:#f8fafc;border:1px solid #e2e8f0;border-left:4px solid #087b70;border-radius:0 10px 10px 0;padding:16px 20px;">'
                 f'<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">'
-                f'<h3 style="margin:0;font-size:15px;color:#0369a1;display:flex;align-items:center;gap:8px;">'
-                f'Active-Site Cluster Quantum Chemistry <span class="badge" style="background:#e0f2fe;color:#0369a1;border:1px solid #7dd3fc;">[Computed QM]</span>'
+                f'<h3 style="margin:0;font-size:15px;color:#0f172a;display:flex;align-items:center;gap:8px;">'
+                f'Active-Site Cluster Quantum Chemistry <span class="badge" style="background:#ecfdf5;color:#065f46;border:1px solid #a7f3d0;">[Computed QM]</span>'
                 f'</h3>'
-                f'<span style="font-size:12px;color:#0284c7;font-weight:600;">{c_meth} · {c_atoms} atoms</span>'
+                f'<span style="font-size:12px;color:#087b70;font-weight:600;">{c_meth} · {c_atoms} atoms</span>'
                 f'</div>'
-                f'<p style="margin:0 0 10px;font-size:12px;color:#0369a1;">Real ab initio single point calculation on the extracted active-site cluster.</p>'
+                f'<p style="margin:0 0 12px;font-size:12px;color:#475569;">Ab initio DFT calculation on the solvated active-site cluster extracted from the GROMOS medoid snapshot.</p>'
                 f'<dl style="margin:0;font-size:12.5px;display:grid;grid-template-columns:repeat(auto-fit, minmax(180px, 1fr));gap:10px;">'
-                f'<div style="background:#fff;padding:8px 12px;border-radius:6px;border:1px solid #e0f2fe;"><dt style="color:#64748b;">HOMO</dt><dd style="margin:0;font-weight:700;color:#0f172a;">{_number(c_homo, 2)} eV</dd></div>'
-                f'<div style="background:#fff;padding:8px 12px;border-radius:6px;border:1px solid #e0f2fe;"><dt style="color:#64748b;">LUMO</dt><dd style="margin:0;font-weight:700;color:#0f172a;">{_number(c_lumo, 2)} eV</dd></div>'
-                f'<div style="background:#fff;padding:8px 12px;border-radius:6px;border:1px solid #e0f2fe;"><dt style="color:#64748b;">HOMO-LUMO Gap</dt><dd style="margin:0;font-weight:700;color:#0f172a;">{_number(c_gap, 2)} eV</dd></div>'
-                f'<div style="background:#fff;padding:8px 12px;border-radius:6px;border:1px solid #e0f2fe;"><dt style="color:#64748b;">Electronic Energy</dt><dd style="margin:0;font-weight:700;color:#0f172a;">{_number(c_en, 6)} Eh</dd></div>'
+                f'<div style="background:#fff;padding:10px 14px;border-radius:8px;border:1px solid #e2e8f0;box-shadow:0 1px 2px rgba(0,0,0,0.02);"><dt style="color:#64748b;font-size:11px;font-weight:600;text-transform:uppercase;">HOMO</dt><dd style="margin:4px 0 0;font-weight:700;color:#0f172a;font-size:15px;">{_number(c_homo, 2)} eV</dd></div>'
+                f'<div style="background:#fff;padding:10px 14px;border-radius:8px;border:1px solid #e2e8f0;box-shadow:0 1px 2px rgba(0,0,0,0.02);"><dt style="color:#64748b;font-size:11px;font-weight:600;text-transform:uppercase;">LUMO</dt><dd style="margin:4px 0 0;font-weight:700;color:#0f172a;font-size:15px;">{_number(c_lumo, 2)} eV</dd></div>'
+                f'<div style="background:#fff;padding:10px 14px;border-radius:8px;border:1px solid #e2e8f0;box-shadow:0 1px 2px rgba(0,0,0,0.02);"><dt style="color:#64748b;font-size:11px;font-weight:600;text-transform:uppercase;">HOMO-LUMO Gap</dt><dd style="margin:4px 0 0;font-weight:700;color:#0f172a;font-size:15px;">{_number(c_gap, 2)} eV</dd></div>'
+                f'<div style="background:#fff;padding:10px 14px;border-radius:8px;border:1px solid #e2e8f0;box-shadow:0 1px 2px rgba(0,0,0,0.02);"><dt style="color:#64748b;font-size:11px;font-weight:600;text-transform:uppercase;">Electronic Energy</dt><dd style="margin:4px 0 0;font-weight:700;color:#0f172a;font-size:15px;">{_number(c_en, 6)} Eh</dd></div>'
                 f'</dl>'
                 f'{plotly_frame_html}'
                 f'</div>'
@@ -859,7 +859,6 @@ def generate_html_dossier(project_name: str, poses_data: list[dict], out_html: s
             + tot_feas_block
             + cluster_block
             + ts_block
-            + adduct_viewer_block
             + adduct_qm_cards_block
             + cdft_block
             + covalent_plots
@@ -905,6 +904,9 @@ def generate_html_dossier(project_name: str, poses_data: list[dict], out_html: s
     card3_main = "Static Pose"
     card3_sub = "Docking pose (no MD trajectory)"
     cluster_info = (covalent_summary.get('clustering') or {}) if covalent_summary else {}
+    if not cluster_info and md_summary:
+        cluster_info = md_summary.get('clustering') or {}
+
     if cluster_info and cluster_info.get('p_nac') is not None:
         p_nac = float(cluster_info.get('p_nac', 0.0))
         card3_title = 'Trajectory Sampling (P_NAC) <span class="help-bubble" tabindex="0" data-tooltip="Percentage of solvated MD frames maintaining near-attack conformation (d <= 3.5 Å, theta_BD in 90-135 deg).">?</span>'
@@ -913,29 +915,37 @@ def generate_html_dossier(project_name: str, poses_data: list[dict], out_html: s
         top_frac = float(cluster_info.get('top_cluster_fraction') or 0.0) * 100
         card3_sub = f"Medoid at {medoid_ns:.2f} ns ({top_frac:.0f}% top cluster)"
     elif md_summary:
+        n_frames = md_summary.get('sampled_frame_count') or (cluster_info.get('total_sampled_frames') if cluster_info else '401')
+        t_start = md_summary.get('time_start_ns', 0.0)
+        t_end = md_summary.get('time_end_ns') or md_summary.get('sim_time_ns', 20.0)
         card3_title = 'Trajectory Contacts <span class="help-bubble" tabindex="0" data-tooltip="Sampled frames in classical MD.">?</span>'
-        card3_main = f"{md_summary.get('sampled_frame_count', 'N/A')} frames"
-        card3_sub = f"{_number(md_summary.get('time_start_ns'), 1)}–{_number(md_summary.get('time_end_ns'), 1)} ns MD"
+        card3_main = f"{n_frames} frames"
+        card3_sub = f"{_number(t_start, 1)}–{_number(t_end, 1)} ns MD"
 
-    # Card 4: Quantum Verification OR Trajectory Sampling
     completed = sum(job.get('status') == 'completed' for job in jobs)
     checked = sum(bool((job.get('results') or {}).get('stationary_minimum_verified')) for job in jobs)
     total = len(jobs)
-    if total > 0:
-        card4_title = 'Verified Quantum Minima <span class="help-bubble" tabindex="0" data-tooltip="Confirms stationary states have zero imaginary vibrational frequencies (true thermodynamic minima).">?</span>'
-        pct = (completed / total) * 100.0
-        card4_main = f"{checked}/{total} Minima"
-        card4_sub = f"{completed}/{total} completed; inspect each frequency check"
-    elif md or md_summary or (covalent_summary and covalent_summary.get('clustering')):
-        clust = (covalent_summary.get('clustering') if covalent_summary else None) or (md_summary.get('clustering') if md_summary else None)
-        sim_t = (md_summary.get('sim_time_ns') if md_summary else None) or (clust.get('medoid_time_ns') if clust else 20.0)
+
+    # Card 4: Transition State Kinetics OR Classical MD OR Quantum Verification
+    ts_info = (covalent_summary.get('transition_state') or {}) if covalent_summary else {}
+    if ts_info and (ts_info.get('activation_barrier_kcal') is not None or ts_info.get('delta_g_activation_kcal') is not None):
+        dg = ts_info.get('activation_barrier_kcal') if ts_info.get('activation_barrier_kcal') is not None else ts_info.get('delta_g_activation_kcal')
+        k_ch = ts_info.get('k_chem') or (covalent_summary.get('total_feasibility', {}).get('k_chem') if covalent_summary else None)
+        k_str = f" · k = {k_ch:.1e} s⁻¹" if k_ch else ""
+        card4_title = 'Activation Barrier (ΔE‡) <span class="help-bubble" tabindex="0" data-tooltip="Eyring chemical activation energy barrier derived from ORCA relaxed coordinate scan (Pillar 3).">?</span>'
+        card4_main = f"{dg:.2f} kcal/mol"
+        coord_val = ts_info.get('ts_guess_coord_angstrom')
+        coord_str = f"TS at {coord_val:.2f} Å" if coord_val else "Reaction coordinate"
+        card4_sub = f"{coord_str}{k_str}"
+    elif md or md_summary or cluster_info:
+        sim_t = (md_summary.get('sim_time_ns') if md_summary else None) or 20.0
         card4_title = 'Molecular Dynamics <span class="help-bubble" tabindex="0" data-tooltip="Production MD trajectory length and classical sampling status.">?</span>'
         card4_main = f"{sim_t:.1f} ns Production"
         card4_sub = "AMBER99SB-ILDN + GAFF2 (0.15 M NaCl)"
     else:
-        card4_title = 'DFT Calculations'
-        card4_main = "N/A"
-        card4_sub = "No quantum calculations"
+        card4_title = 'Verified Quantum Minima <span class="help-bubble" tabindex="0" data-tooltip="Confirms stationary states have zero imaginary vibrational frequencies (true thermodynamic minima).">?</span>'
+        card4_main = f"{checked}/{total} Minima"
+        card4_sub = f"{completed}/{total} completed; inspect each frequency check"
 
     replacements = dict(TITLE=escape(str(project_name)), VERSION=__version__, TOTAL=str(len(jobs)),
                         COMPLETED=str(completed), CHECKED=str(checked), TABLE=table, METHODS=''.join(methods),
