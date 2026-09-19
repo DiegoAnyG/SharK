@@ -16,6 +16,19 @@ from pathlib import Path
 from typing import List, Optional, Tuple, Sequence
 import numpy as np
 
+try:
+    from tqdm import tqdm
+except ImportError:
+    def tqdm(iterable=None, *args, **kwargs):
+        if iterable is not None:
+            return iterable
+        class _DummyPbar:
+            def __enter__(self): return self
+            def __exit__(self, *a): pass
+            def update(self, *a, **k): pass
+            def close(self): pass
+        return _DummyPbar()
+
 STANDARD_RESIDUES_SET = {
     "ALA", "ARG", "ASN", "ASP", "CYS", "GLN", "GLU", "GLY", "HIS", "ILE",
     "LEU", "LYS", "MET", "PHE", "PRO", "SER", "THR", "TRP", "TYR", "VAL",
@@ -393,41 +406,47 @@ def cluster_trajectory(
     if ref_ca_pos is None:
         raise ValueError(f"No trajectory frames found in time interval [{start_ns}, {stop_ns}] ns.")
 
-    for ts in universe.trajectory[::stride]:
-        if ts.time < start_ps:
-            continue
-        if ts.time > stop_ps:
-            break
+    sampled_slice = universe.trajectory[::stride]
+    total_sampled = len(sampled_slice) if hasattr(sampled_slice, "__len__") else None
 
-        # Align protein CA to ref_ca_pos using rigid-body Kabsch transformation
-        R, mobile_center, ref_center = rigid_body_superposition(protein_ca.positions, ref_ca_pos)
-        aligned_lig = apply_rigid_body_transformation(ligand_atoms.positions, mobile_center, R, ref_center)
+    with tqdm(total=total_sampled, desc="[CLUSTERING 1/3] Sampling & aligning frames", unit="frame") as pbar:
+        for ts in sampled_slice:
+            if ts.time < start_ps:
+                pbar.update(1)
+                continue
+            if ts.time > stop_ps:
+                break
 
-        sampled_coords.append(aligned_lig)
-        frame_indices.append(ts.frame)
-        frame_times.append(ts.time)
+            # Align protein CA to ref_ca_pos using rigid-body Kabsch transformation
+            R, mobile_center, ref_center = rigid_body_superposition(protein_ca.positions, ref_ca_pos)
+            aligned_lig = apply_rigid_body_transformation(ligand_atoms.positions, mobile_center, R, ref_center)
 
-        # Evaluate Near-Attack Conformation on fixed atom identities
-        if nucl_atom_idx is not None and el_atom_idx is not None:
-            nucl_pos = universe.atoms[nucl_atom_idx].position
-            el_pos = universe.atoms[el_atom_idx].position
-            adj_pos = universe.atoms[adj_atom_idx].position if adj_atom_idx is not None else None
+            sampled_coords.append(aligned_lig)
+            frame_indices.append(ts.frame)
+            frame_times.append(ts.time)
 
-            frame_score, f_d, f_theta, theta_deg = compute_frame_nac_score(
-                nucl_coord=nucl_pos,
-                el_coord=el_pos,
-                adj_coord=adj_pos,
-                d0=3.5,
-                sigma_d=0.5,
-                theta0=107.0,
-                sigma_theta=14.0,
-            )
-            dist_scores.append(f_d)
-            if frame_score is not None:
-                nac_scores.append(frame_score)
-                d_val = float(np.linalg.norm(nucl_pos - el_pos))
-                if d_val <= 3.5 and theta_deg is not None and (90.0 <= theta_deg <= 135.0):
-                    nac_frame_count += 1
+            # Evaluate Near-Attack Conformation on fixed atom identities
+            if nucl_atom_idx is not None and el_atom_idx is not None:
+                nucl_pos = universe.atoms[nucl_atom_idx].position
+                el_pos = universe.atoms[el_atom_idx].position
+                adj_pos = universe.atoms[adj_atom_idx].position if adj_atom_idx is not None else None
+
+                frame_score, f_d, f_theta, theta_deg = compute_frame_nac_score(
+                    nucl_coord=nucl_pos,
+                    el_coord=el_pos,
+                    adj_coord=adj_pos,
+                    d0=3.5,
+                    sigma_d=0.5,
+                    theta0=107.0,
+                    sigma_theta=14.0,
+                )
+                dist_scores.append(f_d)
+                if frame_score is not None:
+                    nac_scores.append(frame_score)
+                    d_val = float(np.linalg.norm(nucl_pos - el_pos))
+                    if d_val <= 3.5 and theta_deg is not None and (90.0 <= theta_deg <= 135.0):
+                        nac_frame_count += 1
+            pbar.update(1)
 
     n_samples = len(sampled_coords)
     if n_samples == 0:
@@ -446,7 +465,7 @@ def cluster_trajectory(
     # Compute pairwise RMSD matrix for sampled ligand configurations
     sampled_coords = np.array(sampled_coords)
     dist_matrix = np.zeros((n_samples, n_samples))
-    for i in range(n_samples):
+    for i in tqdm(range(n_samples), desc="[CLUSTERING 2/3] Computing RMSD matrix", unit="frame", leave=False):
         for j in range(i + 1, n_samples):
             diff = sampled_coords[i] - sampled_coords[j]
             r = np.sqrt(np.mean(np.sum(diff ** 2, axis=1)))
@@ -457,30 +476,32 @@ def cluster_trajectory(
     remaining = set(range(n_samples))
     clusters = []
 
-    while remaining:
-        # For each remaining frame, count neighbors within cutoff
-        best_center = None
-        best_neighbors = []
+    with tqdm(total=n_samples, desc="[CLUSTERING 3/3] GROMOS frame partitioning", unit="frame", leave=False) as pbar:
+        while remaining:
+            # For each remaining frame, count neighbors within cutoff
+            best_center = None
+            best_neighbors = []
 
-        for candidate in remaining:
-            # Neighbors include itself and all remaining frames within cutoff
-            neigh = [other for other in remaining if dist_matrix[candidate, other] <= cutoff_angstrom]
-            if len(neigh) > len(best_neighbors):
-                best_neighbors = neigh
-                best_center = candidate
+            for candidate in remaining:
+                # Neighbors include itself and all remaining frames within cutoff
+                neigh = [other for other in remaining if dist_matrix[candidate, other] <= cutoff_angstrom]
+                if len(neigh) > len(best_neighbors):
+                    best_neighbors = neigh
+                    best_center = candidate
 
-        if not best_neighbors:
-            break
+            if not best_neighbors:
+                break
 
-        clusters.append({
-            "center": best_center,
-            "members": best_neighbors,
-            "size": len(best_neighbors)
-        })
+            clusters.append({
+                "center": best_center,
+                "members": best_neighbors,
+                "size": len(best_neighbors)
+            })
 
-        # Remove clustered members from pool
-        for member in best_neighbors:
-            remaining.remove(member)
+            # Remove clustered members from pool
+            for member in best_neighbors:
+                remaining.remove(member)
+            pbar.update(len(best_neighbors))
 
     if not clusters:
         raise RuntimeError("Clustering algorithm failed to partition frames.")

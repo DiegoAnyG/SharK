@@ -6,6 +6,12 @@ import math
 import numpy as np
 from ..core.frontier import file_hash
 
+try:
+    from tqdm import tqdm
+except ImportError:
+    def tqdm(iterable=None, *args, **kwargs):
+        return iterable
+
 
 def analyze_contacts(topology, trajectory, *, ligand_selection, protein_selection='protein and not name H*',
                      cutoff_angstrom=4.0, stride=1, start_ns=0.0, stop_ns=None):
@@ -66,7 +72,9 @@ def analyze_contacts(topology, trajectory, *, ligand_selection, protein_selectio
         pair_frame = np.full(pair_min.shape, -1, dtype=int)
         pair_time = np.full(pair_min.shape, np.nan)
         times, frames = [], []
-        for ts in universe.trajectory[::stride]:
+        sampled_slice = universe.trajectory[::stride]
+        total_frames = len(sampled_slice) if hasattr(sampled_slice, "__len__") else None
+        for ts in tqdm(sampled_slice, total=total_frames, desc="[MD Contacts] Sampling trajectory frames", unit="frame"):
             time_ns = float(ts.time) / 1000
             if time_ns < start_ns or (stop_ns is not None and time_ns > stop_ns):
                 continue

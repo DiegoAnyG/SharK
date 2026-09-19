@@ -39,7 +39,29 @@ def interactive_session_picker() -> Path | None:
         return None
     if choice.isdigit() and 1 <= int(choice) <= len(recent):
         return recent[int(choice) - 1]
-    return Path(choice).expanduser()
+    return _clean_user_path(choice)
+
+
+def _clean_user_path(raw: Optional[str]) -> Optional[Path]:
+    """Sanitize user-provided file or directory paths across OS/shell formats.
+
+    Handles Windows backslashes (\ -> /), surrounding quotes, home directories,
+    and missing leading root slashes.
+    """
+    if not raw:
+        return None
+    cleaned = raw.strip().strip("'\"").replace('\\', '/')
+    if not cleaned:
+        return None
+    cand = Path(cleaned).expanduser()
+    if cand.exists():
+        return cand
+    if not cleaned.startswith('/') and Path('/' + cleaned).exists():
+        return Path('/' + cleaned)
+    stripped = cleaned.lstrip('/')
+    if Path('/' + stripped).exists():
+        return Path('/' + stripped)
+    return cand
 
 
 def _safe_float(val) -> Optional[float]:
@@ -364,15 +386,21 @@ def run_interactive():
 
     elif choice == '2':
         argv += ['--simple-gold-standard']
-        gro = input('Path to MD topology (.gro or .pdb) > ').strip()
-        while not gro or not Path(gro).expanduser().is_file():
-            print(f'File not found: {gro}', file=sys.stderr)
-            gro = input('Path to MD topology (.gro or .pdb) > ').strip()
-        xtc = input('Path to MD trajectory (.xtc) > ').strip()
-        while not xtc or not Path(xtc).expanduser().is_file():
-            print(f'File not found: {xtc}', file=sys.stderr)
-            xtc = input('Path to MD trajectory (.xtc) > ').strip()
-        argv += ['--topology', str(Path(gro).expanduser()), '--trajectory', str(Path(xtc).expanduser())]
+        gro_raw = input('Path to MD topology (.gro or .pdb) > ')
+        gro_p = _clean_user_path(gro_raw)
+        while not gro_p or not gro_p.is_file():
+            print(f'File not found: {gro_raw.strip()}', file=sys.stderr)
+            gro_raw = input('Path to MD topology (.gro or .pdb) > ')
+            gro_p = _clean_user_path(gro_raw)
+
+        xtc_raw = input('Path to MD trajectory (.xtc) > ')
+        xtc_p = _clean_user_path(xtc_raw)
+        while not xtc_p or not xtc_p.is_file():
+            print(f'File not found: {xtc_raw.strip()}', file=sys.stderr)
+            xtc_raw = input('Path to MD trajectory (.xtc) > ')
+            xtc_p = _clean_user_path(xtc_raw)
+
+        argv += ['--topology', str(gro_p), '--trajectory', str(xtc_p)]
 
         rec, comp, pose, target_res = _prompt_covalent_targets()
         if rec:
@@ -416,7 +444,9 @@ def run_interactive():
             argv += ['--target-residue', target_res]
         dft_dir = input('Directory with existing ORCA DFT outputs (.out) [optional, press enter to skip] > ').strip()
         if dft_dir:
-            argv += ['--dft-dir', dft_dir]
+            dft_p = _clean_user_path(dft_dir)
+            if dft_p:
+                argv += ['--dft-dir', str(dft_p)]
         # Tier 3 Full Gold Standard chains MD -> Clustering -> Medoid Snapshot -> Active-Site Cluster QM & TS Reaction Coordinate Scan
         argv += ['--orca-cluster-sp', '--tier-4-ts']
         qm_model = input('Active site QM model [1: Minimal Capped Residue (recommended/fast), 2: Extended Pocket Cluster] [default: 1] > ').strip() or '1'
@@ -430,12 +460,14 @@ def run_interactive():
 
     elif choice == '4':
         first_input = input('Active site QM model [1: Minimal Capped Residue (recommended/fast), 2: Extended Pocket Cluster] > ').strip()
-        if first_input.lower().endswith(('.gro', '.pdb', '.tpr', '.xtc')):
-            gro = first_input
-            xtc = input('XTC trajectory > ').strip()
+        cleaned_first = _clean_user_path(first_input)
+        if first_input.lower().endswith(('.gro', '.pdb', '.tpr', '.xtc')) or (cleaned_first and str(cleaned_first).lower().endswith(('.gro', '.pdb', '.tpr', '.xtc'))):
+            gro_p = cleaned_first or Path(first_input)
+            xtc_raw = input('XTC trajectory > ').strip()
+            xtc_p = _clean_user_path(xtc_raw) or Path(xtc_raw)
             lig = input('Exact ligand atom selection (for example: resname UNL and not name H*) > ').strip()
             cutoff = input('Contact cutoff in angstrom [4.0] > ').strip() or '4.0'
-            argv = ['--analyze-md', '--topology', gro, '--trajectory', xtc,
+            argv = ['--analyze-md', '--topology', str(gro_p), '--trajectory', str(xtc_p),
                     '--ligand-selection', lig, '--contact-cutoff', cutoff]
         else:
             argv += ['--tier-4-ts']
@@ -449,10 +481,10 @@ def run_interactive():
                 md_path = input('Path to MD job directory [default: auto-detect latest job] > ').strip()
                 cand_dir = None
                 if md_path:
-                    p_c = Path(md_path).expanduser()
-                    if p_c.is_dir():
+                    p_c = _clean_user_path(md_path)
+                    if p_c and p_c.is_dir():
                         cand_dir = p_c
-                    elif p_c.is_file():
+                    elif p_c and p_c.is_file():
                         cand_dir = p_c.parent
                 else:
                     jobs_dir = Path.cwd() / 'shark_jobs'
@@ -495,12 +527,14 @@ def run_interactive():
 
     elif choice in ('5', '6'):
         action_or_gro = input('[1] Prepare ligand DFT  [2] Execute ligand DFT  [3] Session report  [4] Custom Covalent Matcher (or path to .gro/.pdb for trajectory contacts) > ').strip()
-        if action_or_gro.lower().endswith(('.gro', '.pdb', '.tpr', '.xtc')):
-            gro = action_or_gro
-            xtc = input('XTC trajectory > ').strip()
+        cleaned_action = _clean_user_path(action_or_gro)
+        if action_or_gro.lower().endswith(('.gro', '.pdb', '.tpr', '.xtc')) or (cleaned_action and str(cleaned_action).lower().endswith(('.gro', '.pdb', '.tpr', '.xtc'))):
+            gro_p = cleaned_action or Path(action_or_gro)
+            xtc_raw = input('XTC trajectory > ').strip()
+            xtc_p = _clean_user_path(xtc_raw) or Path(xtc_raw)
             lig = input('Exact ligand atom selection (for example: resname UNL and not name H*) > ').strip()
             cutoff = input('Contact cutoff in angstrom [4.0] > ').strip() or '4.0'
-            argv = ['--analyze-md', '--topology', str(Path(gro).expanduser()), '--trajectory', str(Path(xtc).expanduser()),
+            argv = ['--analyze-md', '--topology', str(gro_p), '--trajectory', str(xtc_p),
                     '--ligand-selection', lig, '--contact-cutoff', cutoff]
         else:
             action = action_or_gro
@@ -534,7 +568,9 @@ def run_interactive():
 
     output = input('Output directory [leave blank for default reports/ directory] > ').strip()
     if output:
-        argv += ['--work-dir', output]
+        out_p = _clean_user_path(output)
+        if out_p:
+            argv += ['--work-dir', str(out_p)]
     return main(argv)
 
 
