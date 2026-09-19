@@ -19,7 +19,7 @@ import shutil
 import subprocess
 from typing import List, Optional, Sequence, Tuple, Union
 
-from .qm_cluster import QMCluster, extract_qm_cluster
+from .qm_cluster import QMCluster, extract_qm_cluster, _euclidean_distance
 from ..core.parser import parse_orca_results, CalculationResult
 
 HARTREE_TO_KCAL = 627.509474
@@ -678,7 +678,7 @@ def prepare_ts_workflow_directory(
     output_dir: Union[str, Path],
     method: str = "r2SCAN-3c",
     solvent: Optional[str] = "Water",
-    scan_start: float = 3.30,
+    scan_start: Optional[float] = None,
     scan_end: float = 1.45,
     scan_steps: int = 18,
     nprocs: int = 4,
@@ -687,6 +687,14 @@ def prepare_ts_workflow_directory(
     """Creates directory structure, ORCA scan input, and runner scripts for Tier 4 TS modeling."""
     out_path = Path(output_dir)
     out_path.mkdir(parents=True, exist_ok=True)
+
+    if scan_start is None:
+        if cluster.nucleophile_idx is not None and cluster.electrophile_idx is not None:
+            p1 = cluster.atoms[cluster.nucleophile_idx].coords
+            p2 = cluster.atoms[cluster.electrophile_idx].coords
+            scan_start = round(_euclidean_distance(p1, p2), 2)
+        else:
+            scan_start = 3.30
 
     # 1. Write initial cluster geometry
     xyz_path = cluster.write_xyz(out_path / "00_initial_cluster.xyz")

@@ -684,7 +684,7 @@ def main(argv=None):
     parser.add_argument('--cluster-start-ns', type=float, default=0.0, help='Simulation time in ns to start clustering (default: 0.0)')
     parser.add_argument('--tier-4-ts', '--ts', dest='tier_4_ts', action='store_true', help='Execute Tier 4: Transition State modeling & Eyring activation free energy barrier')
     parser.add_argument('--qm-model', choices=['minimal', 'extended'], default='minimal', help='Active site QM cluster model: minimal (capped residue, ~35 atoms) or extended (pocket, ~120 atoms)')
-    parser.add_argument('--scan-start', type=float, default=3.30, help='Starting distance in Angstroms for coordinate scan (default: 3.30)')
+    parser.add_argument('--scan-start', type=float, default=None, help='Starting distance in Angstroms for coordinate scan (default: auto-detected from cluster geometry)')
     parser.add_argument('--scan-end', type=float, default=1.45, help='Ending distance in Angstroms for coordinate scan (default: 1.45)')
     parser.add_argument('--scan-steps', type=int, default=18, help='Number of scan steps along reaction coordinate (default: 18)')
     parser.add_argument('--ph', type=float, default=7.4, help='Solution pH for residue protonation and microstate assignment (default: 7.4)')
@@ -1046,7 +1046,7 @@ def main(argv=None):
                     scan_start=args.scan_start,
                     scan_end=args.scan_end,
                     scan_steps=args.scan_steps,
-                    nprocs=args.nprocs or 4,
+                    nprocs=args.nprocs or (min(8, os.cpu_count() or 4)),
                 )
                 print(f"[TIER 4] Workflow prepared at: {ts_work_dir}")
                 print(f"[TIER 4] Scan input: {wf['scan_inp']}")
@@ -1144,7 +1144,7 @@ def main(argv=None):
                             'half_life': profile.estimated_half_life_str,
                             'model_type': cluster.model_type,
                             'summary': profile.summary,
-                            'is_first_order_ts': ts_verif.is_valid_first_order_saddle_point,
+                            'is_first_order_ts': ts_verif.is_valid_first_order_saddle_point if ts_verif else False,
                             'warnings': profile.warnings,
                         }
                 else:
