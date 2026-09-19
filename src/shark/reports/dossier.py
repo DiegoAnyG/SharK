@@ -691,7 +691,7 @@ def generate_html_dossier(project_name: str, poses_data: list[dict], out_html: s
                     f'<strong style="font-size:13px;color:#0f172a;">Active-Site Cluster Frontier Orbitals (Plotly 3D Marching Cubes Engine)</strong>'
                     f'<span style="font-size:11px;color:#64748b;">Interactive High-Definition 3D Meshes</span>'
                     f'</div>'
-                    f'<iframe srcdoc="{escape(p_html, quote=True)}" style="width:100%;height:680px;border:none;" title="Cluster Plotly Orbitals"></iframe>'
+                    f'<iframe srcdoc="{escape(p_html, quote=True)}" style="width:100%;height:750px;border:none;overflow:hidden;display:block;" scrolling="no" title="Cluster Plotly Orbitals"></iframe>'
                     f'</div>'
                 )
             elif p_rel:
@@ -701,7 +701,7 @@ def generate_html_dossier(project_name: str, poses_data: list[dict], out_html: s
                     f'<strong style="font-size:13px;color:#0f172a;">Active-Site Cluster Frontier Orbitals (Plotly 3D Marching Cubes Engine)</strong>'
                     f'<span style="font-size:11px;color:#64748b;">Interactive High-Definition 3D Meshes</span>'
                     f'</div>'
-                    f'<iframe src="{escape(str(p_rel))}" style="width:100%;height:680px;border:none;" title="Cluster Plotly Orbitals"></iframe>'
+                    f'<iframe src="{escape(str(p_rel))}" style="width:100%;height:750px;border:none;overflow:hidden;display:block;" scrolling="no" title="Cluster Plotly Orbitals"></iframe>'
                     f'</div>'
                 )
 
