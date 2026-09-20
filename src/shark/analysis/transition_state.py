@@ -683,6 +683,7 @@ def prepare_ts_workflow_directory(
     scan_steps: int = 18,
     nprocs: int = 4,
     maxcore_mb: int = 2000,
+    recalc_hess: int = 25,
 ) -> dict:
     """Creates directory structure, ORCA scan input, and runner scripts for Tier 4 TS modeling."""
     out_path = Path(output_dir)
@@ -720,10 +721,22 @@ def prepare_ts_workflow_directory(
         solvent=solvent,
         nprocs=nprocs,
         maxcore_mb=maxcore_mb,
+        recalc_hess=recalc_hess,
     )
     optts_template_path.write_text(optts_template_content, encoding="utf-8")
 
-    # 4. Write bash execution script for automated execution
+    # 4. Write template Adduct Optimization input (to be filled with product coordinates after scan)
+    adduct_template_path = out_path / "03_adduct_opt_template.inp"
+    adduct_template_content = cluster.to_orca_input(
+        job_type="opt",
+        method=method,
+        solvent=solvent,
+        nprocs=nprocs,
+        maxcore_mb=maxcore_mb,
+    )
+    adduct_template_path.write_text(adduct_template_content, encoding="utf-8")
+
+    # 5. Write bash execution script for automated execution
     run_sh_path = out_path / "run_tier4_ts.sh"
     run_script = f"""#!/usr/bin/env bash
 set -e
@@ -748,10 +761,10 @@ fi
 # Resolve symlink to realpath for ORCA 6
 ORCA_REAL=$(readlink -f "$ORCA_BIN")
 
-echo "[Step 1/3] Running Relaxed Coordinate Scan..."
+echo "[Step 1/4] Running Relaxed Coordinate Scan..."
 "$ORCA_REAL" 01_scan.inp > 01_scan.out
 
-echo "[Step 2/3] Analyzing Scan Trajectory and Extracting TS Guess..."
+echo "[Step 2/4] Analyzing Scan Trajectory and Extracting TS Guess..."
 # SharK python hook extracts TS guess and creates 02_optts.inp
 python3 -c "
 from shark.analysis.transition_state import parse_orca_scan_output
@@ -763,20 +776,40 @@ if res.ts_guess_xyz and res.ts_guess_xyz.exists():
     print(f'Using TS guess from: {{res.ts_guess_xyz}}')
     xyz_lines = res.ts_guess_xyz.read_text().splitlines()[2:]
     tmpl = Path('02_optts_template.inp').read_text()
-    # Replace coordinates
     header = tmpl.split('* xyz')[0]
-    coords_str = '\n'.join(['  ' + ln for ln in xyz_lines if ln.strip()])
-    new_inp = f'{{header}}* xyz {cluster.charge} {cluster.effective_multiplicity}\n{{coords_str}}\n*'
+    coords_str = '\\n'.join(['  ' + ln for ln in xyz_lines if ln.strip()])
+    new_inp = f'{{header}}* xyz {cluster.charge} {cluster.effective_multiplicity}\\n{{coords_str}}\\n*'
     Path('02_optts.inp').write_text(new_inp)
 else:
     print('Warning: Specific step XYZ not found, using template coordinates')
     Path('02_optts.inp').write_text(Path('02_optts_template.inp').read_text())
 "
 
-echo "[Step 3/3] Running Saddle Point Optimization & Frequency Calculation (! OptTS Freq)..."
+echo "[Step 3/4] Running Saddle Point Optimization & Frequency Calculation (! OptTS Freq)..."
 "$ORCA_REAL" 02_optts.inp > 02_optts.out
 
-echo "Transition state workflow completed successfully."
+echo "[Step 4/4] Preparing and Running Covalent Product Adduct Optimization..."
+python3 -c "
+from shark.analysis.transition_state import parse_orca_scan_output
+from pathlib import Path
+res = parse_orca_scan_output('01_scan.out', work_dir='.')
+if res.points:
+    last_pt = res.points[-1]
+    if last_pt.xyz_path and last_pt.xyz_path.exists():
+        xyz_lines = last_pt.xyz_path.read_text().splitlines()[2:]
+        tmpl = Path('03_adduct_opt_template.inp').read_text()
+        header = tmpl.split('* xyz')[0]
+        coords_str = '\\n'.join(['  ' + ln for ln in xyz_lines if ln.strip()])
+        new_inp = f'{{header}}* xyz {cluster.charge} {cluster.effective_multiplicity}\\n{{coords_str}}\\n*'
+        Path('03_adduct_opt.inp').write_text(new_inp)
+        print(f'Adduct product input prepared from step #{{last_pt.step}} (d={{last_pt.coordinate_value:.2f}} A)')
+"
+
+if [ -f 03_adduct_opt.inp ]; then
+    "$ORCA_REAL" 03_adduct_opt.inp > 03_adduct_opt.out
+fi
+
+echo "Tier 4 workflow (Scan, TS, and Adduct) completed successfully."
 """
     run_sh_path.write_text(run_script, encoding="utf-8")
     run_sh_path.chmod(0o755)

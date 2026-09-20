@@ -166,6 +166,7 @@ class QMCluster:
         scan_steps: int = 18,
         nprocs: int = 4,
         maxcore_mb: int = 2000,
+        recalc_hess: int = 25,
     ) -> str:
         """Generates an ORCA 6 input file for reaction scanning or TS optimization.
 
@@ -185,6 +186,8 @@ class QMCluster:
             Ending distance in Angstroms for coordinate scan.
         scan_steps : int
             Number of scan intervals.
+        recalc_hess : int
+            Frequency of exact Hessian recalculation during OptTS (default 25).
         """
         lines = []
 
@@ -215,7 +218,7 @@ class QMCluster:
         elif job_type.lower() == "optts":
             has_geom = True
             geom_lines.append("   Calc_Hess true")
-            geom_lines.append("   Recalc_Hess 5")
+            geom_lines.append(f"   Recalc_Hess {recalc_hess}")
 
         frozen = self.frozen_indices
         if frozen:
@@ -564,10 +567,12 @@ def _prepare_ligand_atoms(
                     conf = mol_h.GetConformer()
                     for at in mol_h.GetAtoms():
                         pos = conf.GetAtomPosition(at.GetIdx())
+                        pdb_info = at.GetPDBResidueInfo()
+                        at_name = pdb_info.GetName().strip() if pdb_info and pdb_info.GetName().strip() else f"{at.GetSymbol()}{at.GetIdx()+1}"
                         atoms.append(ClusterAtom(
                             element=at.GetSymbol().capitalize(),
                             coords=(pos.x, pos.y, pos.z),
-                            atom_name=f"{at.GetSymbol()}{at.GetIdx()+1}",
+                            atom_name=at_name,
                             res_name="LIG",
                             res_seq=1
                         ))
@@ -586,10 +591,12 @@ def _prepare_ligand_atoms(
                     atoms = []
                     for at in mol_h.GetAtoms():
                         pos = conf.GetAtomPosition(at.GetIdx())
+                        pdb_info = at.GetPDBResidueInfo()
+                        at_name = pdb_info.GetName().strip() if pdb_info and pdb_info.GetName().strip() else f"{at.GetSymbol()}{at.GetIdx()+1}"
                         atoms.append(ClusterAtom(
                             element=at.GetSymbol().capitalize(),
                             coords=(pos.x, pos.y, pos.z),
-                            atom_name=f"{at.GetSymbol()}{at.GetIdx()+1}",
+                            atom_name=at_name,
                             res_name="LIG",
                             res_seq=1
                         ))
@@ -626,6 +633,7 @@ def extract_qm_cluster(
     freeze_backbone: bool = True,
     cluster_name: Optional[str] = None,
     ph: float = 7.4,
+    electrophile_atom: Optional[str] = None,
 ) -> QMCluster:
     """Extracts an active-site QM cluster with appropriate hydrogen valence capping.
 
@@ -837,23 +845,30 @@ def extract_qm_cluster(
     # is non-physical in covalent inhibition and destabilizes the scan.
     electrophile_idx = None
     if nucl_idx is not None:
-        nucl_crd = cluster_atoms[nucl_idx].coords
-        min_d = 999.0
-        # Priority 1: Carbons, Sulfurs, Phosphoruses (standard TCI electrophiles)
-        for idx, at in enumerate(cluster_atoms):
-            if at.res_name == "LIG" and at.element in ("C", "S", "P"):
-                d = _euclidean_distance(nucl_crd, at.coords)
-                if d < min_d:
-                    min_d = d
-                    electrophile_idx = idx
-        # Priority 2 fallback: Nitrogens (if warhead uses nitrogen electrophile)
-        if electrophile_idx is None:
+        if electrophile_atom:
             for idx, at in enumerate(cluster_atoms):
-                if at.res_name == "LIG" and at.element == "N":
+                if at.res_name == "LIG" and at.atom_name.strip().upper() == electrophile_atom.strip().upper():
+                    electrophile_idx = idx
+                    break
+
+        if electrophile_idx is None:
+            nucl_crd = cluster_atoms[nucl_idx].coords
+            min_d = 999.0
+            # Priority 1: Carbons, Sulfurs, Phosphoruses, Borons (standard TCI electrophiles)
+            for idx, at in enumerate(cluster_atoms):
+                if at.res_name == "LIG" and at.element in ("C", "S", "P", "B"):
                     d = _euclidean_distance(nucl_crd, at.coords)
                     if d < min_d:
                         min_d = d
                         electrophile_idx = idx
+            # Priority 2 fallback: Nitrogens (if warhead uses nitrogen electrophile)
+            if electrophile_idx is None:
+                for idx, at in enumerate(cluster_atoms):
+                    if at.res_name == "LIG" and at.element == "N":
+                        d = _euclidean_distance(nucl_crd, at.coords)
+                        if d < min_d:
+                            min_d = d
+                            electrophile_idx = idx
 
     # Net charge default
     net_charge = charge if charge is not None else (charge_delta if model_type.lower() == "minimal" else 0)

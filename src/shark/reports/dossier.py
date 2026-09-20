@@ -43,8 +43,15 @@ def _find_md_plots(md_summary: dict | None, covalent_summary: dict | None, repor
             plots['md_analysis_dashboard.png'] = p
 
     search_dirs = [report_dir, report_dir / 'md']
+    if md_summary and md_summary.get('run_dir'):
+        search_dirs.append(Path(md_summary['run_dir']))
     if covalent_summary and covalent_summary.get('clustering'):
-        snap_pdb = covalent_summary['clustering'].get('snapshot_complex_pdb')
+        clust = covalent_summary['clustering']
+        if clust.get('run_dir'):
+            search_dirs.append(Path(clust['run_dir']))
+        if clust.get('trajectory_file'):
+            search_dirs.append(Path(clust['trajectory_file']).parent)
+        snap_pdb = clust.get('snapshot_complex_pdb')
         if snap_pdb:
             snap_parent = Path(snap_pdb).parent
             search_dirs.extend([snap_parent.parent / 'md', snap_parent.parent])
@@ -348,14 +355,31 @@ def generate_html_dossier(project_name: str, poses_data: list[dict], out_html: s
 
     md = ''
     if md_summary or md_plots or clustering:
-        sim_time = (md_summary.get('sim_time_ns') if md_summary else None) or (clustering.get('medoid_time_ns', 10.0) if clustering else 10.0)
+        sim_time = (
+            (md_summary.get('sim_time_ns') if md_summary else None)
+            or (clustering.get('sim_time_ns') if clustering else None)
+            or (clustering.get('total_sim_time_ns') if clustering else None)
+            or 20.0
+        )
         ff_str = (md_summary.get('force_fields') if md_summary else None) or "AMBER99SB-ILDN (protein) + GAFF2/AM1-BCC (ligand) + SPC/E (0.15 M NaCl)"
         n_frames = clustering.get('total_sampled_frames', 401) if clustering else 401
         top_pop = f"{clustering.get('top_cluster_fraction', 0.95) * 100:.1f}%" if clustering and clustering.get('top_cluster_fraction') else "Dominant cluster"
         medoid_t = f"{clustering.get('medoid_time_ns'):.2f} ns" if clustering and clustering.get('medoid_time_ns') else "Solvated medoid"
 
+        rxn_card = ''
+        if clustering and clustering.get('reactive_medoid_time_ns') is not None:
+            rxn_t = f"{clustering.get('reactive_medoid_time_ns'):.2f} ns"
+            rxn_pop = f"{float(clustering.get('reactive_frame_fraction', 0.0))*100:.1f}%"
+            rxn_card = f"""
+          <div style="background:#fff;border:1px solid #087b70;border-radius:10px;padding:16px;">
+            <small style="color:#087b70;text-transform:uppercase;font-size:11px;font-weight:700;">Reactive Subensemble</small>
+            <strong style="display:block;font-size:20px;color:#087b70;margin:4px 0;">{rxn_pop} Sampled</strong>
+            <small style="color:var(--muted);">Reactive medoid at {rxn_t}</small>
+          </div>
+            """
+
         md_cards = f"""
-        <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(220px, 1fr));gap:14px;margin:18px 0 24px;">
+        <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(200px, 1fr));gap:14px;margin:18px 0 24px;">
           <div style="background:#fff;border:1px solid var(--line);border-radius:10px;padding:16px;">
             <small style="color:var(--muted);text-transform:uppercase;font-size:11px;font-weight:700;">Trajectory Duration</small>
             <strong style="display:block;font-size:20px;color:var(--ink);margin:4px 0;">{sim_time:.1f} ns Production</strong>
@@ -372,10 +396,11 @@ def generate_html_dossier(project_name: str, poses_data: list[dict], out_html: s
             <small style="color:var(--muted);">Physiological ionic strength</small>
           </div>
           <div style="background:#fff;border:1px solid var(--line);border-radius:10px;padding:16px;">
-            <small style="color:var(--muted);text-transform:uppercase;font-size:11px;font-weight:700;">GROMOS Daura Clustering</small>
+            <small style="color:var(--muted);text-transform:uppercase;font-size:11px;font-weight:700;">Conformational Clustering</small>
             <strong style="display:block;font-size:20px;color:#087b70;margin:4px 0;">{top_pop} Population</strong>
-            <small style="color:var(--muted);">Medoid extracted at {medoid_t}</small>
+            <small style="color:var(--muted);">Global medoid at {medoid_t}</small>
           </div>
+          {rxn_card}
         </div>
         """
 
@@ -487,32 +512,76 @@ def generate_html_dossier(project_name: str, poses_data: list[dict], out_html: s
             p_nac_c = cluster_info.get('p_nac')
             p_nac_str = f"{float(p_nac_c)*100:.1f}%" if p_nac_c is not None else "N/A"
 
-            c_items = [
-                ('Sampling frames', f"{cluster_info.get('total_sampled_frames', 'N/A')} frames"),
-                ('Top cluster population', f"{cluster_info.get('top_cluster_size', 'N/A')} frames{top_frac_str}"),
-                ('Medoid snapshot time', f"{med_time_str} (Frame #{cluster_info.get('medoid_frame_index', 'N/A')})"),
-                ('Legacy distance-contact fraction', p_nac_str),
+            rxn_frame_cnt = cluster_info.get('reactive_frame_count', 0)
+            rxn_frac = cluster_info.get('reactive_frame_fraction')
+            rxn_frac_str = f"{float(rxn_frac)*100:.1f}%" if rxn_frac is not None else "0.0%"
+            rxn_med_time = cluster_info.get('reactive_medoid_time_ns')
+            rxn_med_time_str = f"{float(rxn_med_time):.2f} ns" if rxn_med_time is not None else "N/A"
+            rxn_med_frame = cluster_info.get('reactive_medoid_frame_index', 'N/A')
+            rxn_d = cluster_info.get('reactive_medoid_distance_angstrom')
+            rxn_d_str = f"{float(rxn_d):.2f} Å" if rxn_d is not None else "N/A"
+            rxn_theta = cluster_info.get('reactive_medoid_angle_deg')
+            rxn_theta_str = f"{float(rxn_theta):.1f}°" if rxn_theta is not None else "N/A"
+            rxn_nac = cluster_info.get('reactive_medoid_nac_score')
+            rxn_nac_str = f"{float(rxn_nac):.2f}" if rxn_nac is not None else "N/A"
+
+            conf_items = [
+                ('Sampled frames', f"{cluster_info.get('total_sampled_frames', 'N/A')} frames"),
+                ('Dominant cluster', f"{cluster_info.get('top_cluster_size', 'N/A')} frames{top_frac_str}"),
+                ('Conformational medoid', f"Frame #{cluster_info.get('medoid_frame_index', 'N/A')} at {med_time_str}"),
+                ('Continuous ensemble P_NAC', p_nac_str),
             ]
+
+            rxn_items = [
+                ('Reactive subensemble', f"{rxn_frame_cnt} frames ({rxn_frac_str})"),
+                ('Reactive medoid', f"Frame #{rxn_med_frame} at {rxn_med_time_str}"),
+                ('Nu–E contact distance', rxn_d_str),
+                ('Attack angle (Bürgi-Dunitz)', rxn_theta_str),
+                ('Reactive medoid NAC score', rxn_nac_str),
+            ]
+
             cluster_block = (
                 '<div class="insight" style="margin: 16px 0;">'
-                '<h3>MD Representative Snapshot (GROMOS Medoid)</h3>'
+                '<h3>MD Representative Conformational & Reactive Snapshot Selection</h3>'
                 f'<p>{escape(str(cluster_info.get("summary", "")))}</p>'
-                '<dl style="margin-top:10px;">'
-                + ''.join(f'<div><dt>{k}</dt><dd>{v}</dd></div>' for k, v in c_items)
-                + '</dl></div>'
+                '<div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(280px, 1fr));gap:14px;margin-top:12px;">'
+                '  <div style="background:#fff;border:1px solid var(--line);border-radius:8px;padding:12px;">'
+                '    <strong style="color:var(--ink);display:block;margin-bottom:6px;font-size:13px;border-bottom:1px solid var(--line);padding-bottom:4px;">Dominant Conformational Medoid (Ground-State Basin)</strong>'
+                '    <dl style="margin:0;">'
+                + ''.join(f'<div><dt>{k}</dt><dd>{v}</dd></div>' for k, v in conf_items)
+                + '    </dl>'
+                '  </div>'
+                '  <div style="background:#fff;border:1px solid var(--line);border-radius:8px;padding:12px;">'
+                '    <strong style="color:#087b70;display:block;margin-bottom:6px;font-size:13px;border-bottom:1px solid var(--line);padding-bottom:4px;">Reactive Subensemble Medoid (Tier 4 Input)</strong>'
+                '    <dl style="margin:0;">'
+                + ''.join(f'<div><dt>{k}</dt><dd>{v}</dd></div>' for k, v in rxn_items)
+                + '    </dl>'
+                '  </div>'
+                '</div></div>'
             )
 
         ts_info = covalent_summary.get('transition_state', {})
         ts_block = ''
         if ts_info:
-            dg_act = ts_info.get('delta_g_activation_kcal')
-            dg_act_str = f"{float(dg_act):.2f} kcal/mol" if dg_act is not None else "N/A"
-            dg_rxn = ts_info.get('delta_g_reaction_kcal')
-            dg_rxn_str = f"{float(dg_rxn):.2f} kcal/mol" if dg_rxn is not None else "N/A"
+            barrier_sym = ts_info.get('barrier_symbol', 'ΔG‡')
+            rxn_sym = ts_info.get('reaction_energy_symbol', 'ΔG_rxn')
+            act_val = ts_info.get('delta_g_activation_kcal') if ts_info.get('delta_g_activation_kcal') is not None else ts_info.get('activation_barrier_kcal')
+            if act_val is None:
+                act_val = ts_info.get('delta_e_activation_kcal')
+            act_str = f"{float(act_val):.2f} kcal/mol" if act_val is not None else "N/A"
+
+            rxn_val = ts_info.get('delta_g_reaction_kcal') if ts_info.get('delta_g_reaction_kcal') is not None else ts_info.get('reaction_energy_kcal')
+            if rxn_val is None:
+                rxn_val = ts_info.get('delta_e_reaction_kcal')
+            rxn_str = f"{float(rxn_val):.2f} kcal/mol" if rxn_val is not None else "N/A"
+
+            prov = ts_info.get('structure_provenance', {})
+            prov_src = prov.get('structure_source', 'N/A')
 
             ts_items = [
-                ('Activation barrier (ΔG‡)', dg_act_str),
-                ('Reaction energy (ΔG_rxn)', dg_rxn_str),
+                ('Starting structure source', str(prov_src)),
+                (f'Activation barrier ({barrier_sym})', act_str),
+                (f'Reaction energy ({rxn_sym})', rxn_str),
                 ('Kinetic feasibility', str(ts_info.get('kinetic_feasibility', 'N/A'))),
                 ('Estimated half-life (t1/2)', str(ts_info.get('half_life', 'N/A'))),
                 ('Active site model', f"{str(ts_info.get('model_type', 'minimal')).capitalize()} Model"),

@@ -112,6 +112,7 @@ class CovalentMatchReport:
     summary: str = ""
     ligand_atoms: List[Tuple[int, str, Tuple[float, float, float]]] = field(default_factory=list)
     pocket_residue_atoms: List[dict] = field(default_factory=list)
+    target_residue_atoms: List[dict] = field(default_factory=list)
 
 
 def _euclidean_distance(p1: Tuple[float, float, float], p2: Tuple[float, float, float]) -> float:
@@ -690,6 +691,34 @@ def match_covalent_pocket(
             if len(pocket_res_atoms) >= 160:
                 break
 
+    target_res_atoms = []
+    target_seq = None
+    target_resname = None
+    if target_residue:
+        m = re.match(r"([A-Za-z]+)?(\d+)", target_residue)
+        if m:
+            target_resname = m.group(1).upper() if m.group(1) else None
+            target_seq = int(m.group(2))
+    elif best_match:
+        target_seq = best_match.nucleophile.residue_number
+        target_resname = best_match.nucleophile.residue_name.upper()
+
+    if target_seq is not None and rec_atoms:
+        for a in rec_atoms:
+            if a.get("res_seq") == target_seq:
+                if target_resname is None or a.get("res_name", "").upper() == target_resname:
+                    rname_clean = a.get("res_name", "").upper()
+                    target_res_atoms.append({
+                        "residue": f"{a.get('res_name', '')}{a.get('res_seq', '')}",
+                        "atom": a["atom_name"],
+                        "element": a.get("element") or a["atom_name"][0],
+                        "x": a["coords"][0],
+                        "y": a["coords"][1],
+                        "z": a["coords"][2],
+                        "is_nucleophile": (a["atom_name"].upper() in REACTIVE_NUCLEOPHILES.get(rname_clean, [])),
+                        "is_cap": False,
+                    })
+
     return CovalentMatchReport(
         receptor_name=rec_lbl,
         ligand_name=lig_lbl,
@@ -700,7 +729,8 @@ def match_covalent_pocket(
         best_match=best_match,
         summary=summary,
         ligand_atoms=lig_atoms,
-        pocket_residue_atoms=pocket_res_atoms
+        pocket_residue_atoms=pocket_res_atoms,
+        target_residue_atoms=target_res_atoms,
     )
 
 

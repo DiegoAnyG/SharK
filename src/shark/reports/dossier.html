@@ -210,45 +210,77 @@ if(eqPlotEl && data.tautomers && data.tautomers.length>1){
     }
     traces3d.push({type:'scatter3d',mode:'markers',x:lx,y:ly,z:lz,text:lt,hoverinfo:'text',marker:{size:7.5,color:lc,line:{color:'#0f172a',width:1}},name:'Ligand ('+(cov.ligand_name||'Pose')+')'});
    }
-   const nucls=cov.pocket_nucleophile_atoms||[];
-   if(nucls.length>0){
-    const nx=nucls.map(n=>n.x),ny=nucls.map(n=>n.y),nz=nucls.map(n=>n.z);
-    const nt=nucls.map(n=>n.residue+' ('+n.atom+')<br>Coords: ('+n.x.toFixed(2)+', '+n.y.toFixed(2)+', '+n.z.toFixed(2)+')');
-    traces3d.push({type:'scatter3d',mode:'markers+text',x:nx,y:ny,z:nz,text:nucls.map(n=>n.residue+':'+n.atom),textposition:'top left',textfont:{size:10,color:'#065f46'},hoverinfo:'text',hovertext:nt,marker:{size:9,color:'#059669',symbol:'diamond',line:{color:'#064e3b',width:1.5}},name:'Pocket Nucleophiles'});
-   }
-   const contacts=cov.contacts||[];
-   if(contacts.length>0){
-    const best=contacts[0];
-    const targetNucl=nucls.find(n=>n.residue===best.residue&&n.atom===best.nucleophile_atom);
-    const targetLig=ligAtoms.find(a=>a.index===best.ligand_atom_index)||ligAtoms[0];
-    if(targetNucl&&targetLig){
-     traces3d.push({
-      type:'scatter3d',
-      mode:'lines',
-      x:[targetLig.x,targetNucl.x],
-      y:[targetLig.y,targetNucl.y],
-      z:[targetLig.z,targetNucl.z],
-      line:{color:best.is_nac?'#dc2626':'#d97706',width:6,dash:'dash'},
-      hovertemplate:'Attack Vector: '+best.distance_angstrom.toFixed(2)+' Å<br>Distance score: '+best.feasibility_score.toFixed(2)+'<extra></extra>',
-      name:'Near-Attack Vector ('+best.distance_angstrom.toFixed(2)+' Å)'
-     });
-     const midX=(targetLig.x+targetNucl.x)/2;
-     const midY=(targetLig.y+targetNucl.y)/2;
-     const midZ=(targetLig.z+targetNucl.z)/2;
-     traces3d.push({
-      type:'scatter3d',
-      mode:'text',
-      x:[midX],
-      y:[midY],
-      z:[midZ+0.35],
-      text:['d = '+best.distance_angstrom.toFixed(2)+' Å ('+(best.is_nac?'NAC':'Proximal')+')'],
-      textposition:'top center',
-      textfont:{size:11,color:best.is_nac?'#b91c1c':'#b45309'},
-      hoverinfo:'skip',
-      showlegend:false
-     });
+    const targetResAtoms=cov.target_residue_atoms||[];
+    if(targetResAtoms.length>0){
+     const resElemColors={C:'#475569',O:'#ef4444',N:'#3b82f6',S:'#eab308',H:'#94a3b8',P:'#f97316'};
+     const tx=targetResAtoms.map(a=>a.x),ty=targetResAtoms.map(a=>a.y),tz=targetResAtoms.map(a=>a.z);
+     const tc=targetResAtoms.map(a=>resElemColors[(a.element||'').toUpperCase()]||'#6b7280');
+     const tsize=targetResAtoms.map(a=>a.is_nucleophile?12:(a.element==='H'?4.5:7.5));
+     const tsym=targetResAtoms.map(a=>a.is_nucleophile?'square':'circle');
+     const tlineColor=targetResAtoms.map(a=>a.is_nucleophile?'#b91c1c':'#0f172a');
+     const tlineWidth=targetResAtoms.map(a=>a.is_nucleophile?2.5:1);
+     const tlbl=targetResAtoms.map(a=>a.is_nucleophile?(a.atom+' (Nu)'):a.atom);
+     const thov=targetResAtoms.map(a=>a.residue+':'+a.atom+(a.is_cap?' [CAP]':'')+(a.is_nucleophile?' [Nucleophile]':'')+'<br>Coords: ('+a.x.toFixed(2)+', '+a.y.toFixed(2)+', '+a.z.toFixed(2)+')');
+     const tbx=[],tby=[],tbz=[];
+     for(let i=0;i<targetResAtoms.length;i++){
+      for(let j=i+1;j<targetResAtoms.length;j++){
+       const dx=targetResAtoms[i].x-targetResAtoms[j].x,dy=targetResAtoms[i].y-targetResAtoms[j].y,dz=targetResAtoms[i].z-targetResAtoms[j].z;
+       const d=Math.sqrt(dx*dx+dy*dy+dz*dz);
+       if(d>=0.8&&d<=1.85){
+        tbx.push(targetResAtoms[i].x,targetResAtoms[j].x,null);
+        tby.push(targetResAtoms[i].y,targetResAtoms[j].y,null);
+        tbz.push(targetResAtoms[i].z,targetResAtoms[j].z,null);
+       }
+      }
+     }
+     if(tbx.length>0){
+      traces3d.push({type:'scatter3d',mode:'lines',x:tbx,y:tby,z:tbz,line:{color:'#334155',width:5},hoverinfo:'skip',showlegend:false,name:'Target Residue Framework'});
+     }
+     traces3d.push({type:'scatter3d',mode:'markers+text',x:tx,y:ty,z:tz,text:tlbl,textposition:'top right',textfont:{size:11,color:'#334155'},hoverinfo:'text',hovertext:thov,marker:{size:tsize,color:tc,symbol:tsym,line:{color:tlineColor,width:tlineWidth}},name:'Target Residue ('+(targetResAtoms[0].residue||'Target')+')'});
     }
-   }
+    const allNucls=cov.pocket_nucleophile_atoms||[];
+    const nucls=allNucls.filter(n=>!targetResAtoms.some(t=>t.is_nucleophile&&Math.abs(t.x-n.x)<0.05&&Math.abs(t.y-n.y)<0.05&&Math.abs(t.z-n.z)<0.05));
+    if(nucls.length>0){
+     const nx=nucls.map(n=>n.x),ny=nucls.map(n=>n.y),nz=nucls.map(n=>n.z);
+     const nt=nucls.map(n=>n.residue+' ('+n.atom+')<br>Coords: ('+n.x.toFixed(2)+', '+n.y.toFixed(2)+', '+n.z.toFixed(2)+')');
+     traces3d.push({type:'scatter3d',mode:'markers+text',x:nx,y:ny,z:nz,text:nucls.map(n=>n.residue+':'+n.atom),textposition:'top left',textfont:{size:10,color:'#065f46'},hoverinfo:'text',hovertext:nt,marker:{size:9,color:'#059669',symbol:'diamond',line:{color:'#064e3b',width:1.5}},name:'Pocket Nucleophiles'});
+    }
+    const contacts=cov.contacts||[];
+    if(contacts.length>0){
+     const best=contacts[0];
+     let targetNucl=targetResAtoms.find(t=>t.is_nucleophile);
+     if(!targetNucl){
+      targetNucl=allNucls.find(n=>n.residue===best.residue&&n.atom===best.nucleophile_atom)||allNucls[0];
+     }
+     const targetLig=ligAtoms.find(a=>a.index===best.ligand_atom_index)||ligAtoms[0];
+     if(targetNucl&&targetLig){
+      traces3d.push({
+       type:'scatter3d',
+       mode:'lines',
+       x:[targetLig.x,targetNucl.x],
+       y:[targetLig.y,targetNucl.y],
+       z:[targetLig.z,targetNucl.z],
+       line:{color:best.is_nac?'#dc2626':'#d97706',width:6,dash:'dash'},
+       hovertemplate:'Attack Vector: '+best.distance_angstrom.toFixed(2)+' Å<br>Distance score: '+best.feasibility_score.toFixed(2)+'<extra></extra>',
+       name:'Near-Attack Vector ('+best.distance_angstrom.toFixed(2)+' Å)'
+      });
+      const midX=(targetLig.x+targetNucl.x)/2;
+      const midY=(targetLig.y+targetNucl.y)/2;
+      const midZ=(targetLig.z+targetNucl.z)/2;
+      traces3d.push({
+       type:'scatter3d',
+       mode:'text',
+       x:[midX],
+       y:[midY],
+       z:[midZ+0.35],
+       text:['d = '+best.distance_angstrom.toFixed(2)+' Å ('+(best.is_nac?'NAC':'Proximal')+')'],
+       textposition:'top center',
+       textfont:{size:11,color:best.is_nac?'#b91c1c':'#b45309'},
+       hoverinfo:'skip',
+       showlegend:false
+      });
+     }
+    }
    if(traces3d.length>0){
     Plotly.newPlot('covalent-3d-plot',traces3d,{scene:{xaxis:{title:'X / Å',showgrid:true,zeroline:false},yaxis:{title:'Y / Å',showgrid:true,zeroline:false},zaxis:{title:'Z / Å',showgrid:true,zeroline:false},aspectmode:'data',camera:{eye:{x:1.8,y:1.3,z:1.2}}},margin:{l:10,r:10,t:30,b:10},legend:{orientation:'h',y:1.05},paper_bgcolor:'#fff'},{responsive:true});
    }

@@ -147,8 +147,8 @@ def test_cli_simple_gold_standard_and_fast_analysis(tmp_path):
     assert code_gold == 0
     assert gold_html.is_file()
     gold_text = gold_html.read_text(encoding="utf-8")
-    assert "MD Representative Snapshot (GROMOS Medoid)" in gold_text
-    assert "Top cluster population" in gold_text
+    assert "MD Representative Conformational & Reactive Snapshot Selection" in gold_text
+    assert "Dominant cluster" in gold_text or "Dominant Conformational Medoid" in gold_text
     assert "THR309" in gold_text
 
 
@@ -262,5 +262,232 @@ def test_rigid_body_superposition_synthetic():
 
     rmsd = np.sqrt(np.mean((aligned - ref_coords) ** 2))
     assert rmsd < 1e-6, f"Superposition failed to recover reference structure: RMSD = {rmsd}"
+
+
+def test_medoid_1_and_2_gromos_center_distinguished_from_true_medoid():
+    """MEDOID-1 & MEDOID-2: Verify GROMOS center and true medoid are distinguished on synthetic matrix."""
+    import numpy as np
+    from shark.analysis.trajectory_cluster import compute_true_medoid
+
+    dist_matrix = np.array([
+        [0.0, 1.4, 1.4, 3.0],
+        [1.4, 0.0, 0.8, 0.9],
+        [1.4, 0.8, 0.0, 0.9],
+        [3.0, 0.9, 0.9, 0.0],
+    ])
+    members = [0, 1, 2, 3]
+    medoid = compute_true_medoid(members, dist_matrix)
+    # The true medoid must be 1 or 2 (sum 3.1), definitely not 0 (sum 5.8) or 3 (sum 4.8)
+    assert medoid in (1, 2)
+    assert medoid != 0
+
+
+def test_reactive_1_selection_not_purely_minimum_distance():
+    """REACTIVE-1: Frame A has shortest distance but low NAC score; Frame B has slightly longer distance and high NAC score."""
+    from shark.analysis.trajectory_cluster import ReactiveFrameRecord, select_reactive_frames
+
+    rec_a = ReactiveFrameRecord(
+        trajectory_frame=1,
+        time_ps=10.0,
+        distance_angstrom=2.70,
+        attack_angle_deg=62.0,
+        distance_score=0.85,
+        angle_score=0.01,
+        nac_score=0.008,  # Below threshold 0.10
+    )
+    rec_b = ReactiveFrameRecord(
+        trajectory_frame=2,
+        time_ps=20.0,
+        distance_angstrom=3.10,
+        attack_angle_deg=106.0,
+        distance_score=0.70,
+        angle_score=0.98,
+        nac_score=0.686,  # Well above threshold 0.10
+    )
+
+    reactive_indices = select_reactive_frames([rec_a, rec_b], nac_min=0.10, distance_max=3.8)
+    # Frame A must NOT be selected as reactive simply because 2.70 < 3.10
+    assert 0 not in reactive_indices
+    assert 1 in reactive_indices
+
+
+def test_reactive_2_dominant_cluster_different_from_reactive_representative(tmp_path):
+    """REACTIVE-2: Dominant conformational cluster is non-reactive (d=5.5 A); minor cluster is NAC-rich (d=3.0 A).
+    Verify representative_frame != reactive_medoid_frame.
+    """
+    mda = pytest.importorskip("MDAnalysis")
+
+    u = mda.Universe.empty(4, n_residues=2, atom_resindex=[0, 0, 1, 1], trajectory=True)
+    u.add_TopologyAttr("names", ["N", "OG1", "C1", "C2"])
+    u.add_TopologyAttr("resnames", ["THR", "LIG"])
+    u.add_TopologyAttr("resids", [309, 1])
+    u.add_TopologyAttr("ids", [1, 2, 3, 4])
+    u.dimensions = [30.0, 30.0, 30.0, 90.0, 90.0, 90.0]
+
+    # Nucleophile at (10, 12, 10). C2 at (10, 0, 10).
+    # Cluster 1 (non-reactive, 4 frames): ligand at (10, 17.5, 10) -> distance = 5.5 A
+    prot_coords = [[10.0, 10.0, 10.0], [10.0, 12.0, 10.0]]
+    lig_unreactive = [[10.0, 17.5, 10.0], [11.0, 17.5, 10.0]]
+
+    # Cluster 2 (reactive, 1 frame): ligand at (10, 15.0, 10) -> distance = 3.0 A
+    lig_reactive = [[10.0, 15.0, 10.0], [11.0, 15.0, 10.0]]
+
+    topology_file = tmp_path / "sys.gro"
+    trajectory_file = tmp_path / "traj.xtc"
+
+    u.atoms.positions = prot_coords + lig_unreactive
+    u.atoms.write(str(topology_file))
+
+    with mda.Writer(str(trajectory_file), n_atoms=4) as writer:
+        for t, l_pos in [(0.0, lig_unreactive), (10.0, lig_unreactive), (20.0, lig_unreactive), (30.0, lig_unreactive), (40.0, lig_reactive)]:
+            u.trajectory.ts.time = t
+            u.atoms.positions = prot_coords + l_pos
+            writer.write(u)
+
+    snapshot_dir = tmp_path / "snaps"
+    rep = cluster_trajectory(
+        topology=topology_file,
+        trajectory=trajectory_file,
+        ligand_selection="resname LIG",
+        protein_selection="protein",
+        cutoff_angstrom=1.5,
+        stride=1,
+        output_dir=snapshot_dir,
+        target_residue="THR309",
+    )
+
+    assert rep.total_sampled_frames == 5
+    assert rep.top_cluster_size == 4
+    assert rep.top_cluster_fraction == 0.80
+
+    # Global conformational medoid is from the dominant unreactive cluster (frames 0, 1, 2, 3)
+    assert rep.medoid_frame_index in (0, 1, 2, 3)
+
+    # Reactive representative medoid is from the reactive cluster (frame 4)
+    assert rep.reactive_medoid_frame_index == 4
+    assert rep.medoid_frame_index != rep.reactive_medoid_frame_index
+    assert rep.reactive_snapshot_complex_pdb.is_file()
+    assert rep.snapshot_complex_pdb.is_file()
+    assert rep.reactive_medoid_distance_angstrom == pytest.approx(3.0, abs=0.1)
+
+
+def test_reactive_4_no_reactive_frames_returns_none(tmp_path):
+    """REACTIVE-4: When no frames meet reactive threshold, reactive snapshot is None with warning."""
+    mda = pytest.importorskip("MDAnalysis")
+
+    u = mda.Universe.empty(4, n_residues=2, atom_resindex=[0, 0, 1, 1], trajectory=True)
+    u.add_TopologyAttr("names", ["N", "OG1", "C1", "C2"])
+    u.add_TopologyAttr("resnames", ["THR", "LIG"])
+    u.add_TopologyAttr("resids", [309, 1])
+    u.add_TopologyAttr("ids", [1, 2, 3, 4])
+    u.dimensions = [30.0, 30.0, 30.0, 90.0, 90.0, 90.0]
+
+    prot_coords = [[10.0, 10.0, 10.0], [10.0, 12.0, 10.0]]
+    lig_distant = [[10.0, 22.0, 10.0], [11.0, 22.0, 10.0]]  # 10 A away
+
+    topology_file = tmp_path / "sys_far.gro"
+    trajectory_file = tmp_path / "traj_far.xtc"
+
+    u.atoms.positions = prot_coords + lig_distant
+    u.atoms.write(str(topology_file))
+
+    with mda.Writer(str(trajectory_file), n_atoms=4) as writer:
+        for t in [0.0, 10.0, 20.0]:
+            u.trajectory.ts.time = t
+            writer.write(u)
+
+    snapshot_dir = tmp_path / "snaps_far"
+    rep = cluster_trajectory(
+        topology=topology_file,
+        trajectory=trajectory_file,
+        ligand_selection="resname LIG",
+        protein_selection="protein",
+        cutoff_angstrom=1.5,
+        stride=1,
+        output_dir=snapshot_dir,
+        target_residue="THR309",
+    )
+
+    assert rep.reactive_frame_count == 0
+    assert rep.reactive_medoid_frame_index is None
+    assert rep.reactive_snapshot_complex_pdb is None
+    assert any("No populated reactive subensemble" in w for w in rep.warnings)
+
+
+def test_cli_1_and_2_tier4_prefers_reactive_medoid_over_global_medoid(tmp_path):
+    """CLI-1 & CLI-2: Tier 4 workflow initialization prefers reactive medoid over global conformational medoid."""
+    import re
+    mda = pytest.importorskip("MDAnalysis")
+
+    # Prepare session archive
+    archive = tmp_path / "session_cli1.poliscreen"
+    with zipfile.ZipFile(archive, "w") as z:
+        z.writestr("manifest.json", json.dumps({"format": 1, "full": True, "project": "CLI1Test"}))
+        z.writestr("receptors/8HTB_ready.pdb", (
+            "ATOM      1  N   THR A 309      10.000  10.000  10.000  1.00 20.00           N\n"
+            "ATOM      2  OG1 THR A 309      10.000  12.000  10.000  1.00 20.00           O\n"
+            "END\n"
+        ))
+        z.writestr("poses/docking_8HTB_ready~Pk1_compounds_a_BENZ-model1.pdb", (
+            "ATOM      1  C1  BENZ A   1      10.000  14.500  10.000  1.00 20.00           C\n"
+            "ATOM      2  C2  BENZ A   1      11.000  14.500  10.000  1.00 20.00           C\n"
+            "END\n"
+        ))
+        z.writestr("docking_results.csv", (
+            "receptor,pose_name,compound_name,docking_score,engine\n"
+            "8HTB_ready~Pk1,docking_8HTB_ready~Pk1_compounds_a_BENZ-model1,BENZ,-8.5,vina\n"
+        ))
+
+    u = mda.Universe.empty(4, n_residues=2, atom_resindex=[0, 0, 1, 1], trajectory=True)
+    u.add_TopologyAttr("names", ["N", "OG1", "C1", "C2"])
+    u.add_TopologyAttr("resnames", ["THR", "BENZ"])
+    u.add_TopologyAttr("resids", [309, 1])
+    u.add_TopologyAttr("ids", [1, 2, 3, 4])
+    u.dimensions = [30.0, 30.0, 30.0, 90.0, 90.0, 90.0]
+
+    prot_coords = [[10.0, 10.0, 10.0], [10.0, 12.0, 10.0]]
+    lig_unreactive = [[10.0, 17.5, 10.0], [11.0, 17.5, 10.0]]  # 5.5 A away (global medoid)
+    lig_reactive = [[10.0, 14.8, 10.0], [11.0, 14.8, 10.0]]    # 2.8 A away (reactive medoid)
+
+    topology_file = tmp_path / "md_cli1.gro"
+    trajectory_file = tmp_path / "md_cli1.xtc"
+
+    u.atoms.positions = prot_coords + lig_unreactive
+    u.atoms.write(str(topology_file))
+
+    with mda.Writer(str(trajectory_file), n_atoms=4) as writer:
+        for t, l_pos in [(0.0, lig_unreactive), (10.0, lig_unreactive), (20.0, lig_reactive)]:
+            u.trajectory.ts.time = t
+            u.atoms.positions = prot_coords + l_pos
+            writer.write(u)
+
+    job_work_dir = tmp_path / "job_cli1"
+    code = cli_main([
+        "--session", str(archive),
+        "--simple-gold-standard",
+        "--topology", str(topology_file),
+        "--trajectory", str(trajectory_file),
+        "--target-residue", "THR309",
+        "--cluster-stride", "1",
+        "--tier-4-ts",
+        "--multiplicity", "2",
+        "--work-dir", str(job_work_dir),
+    ])
+    assert code == 0
+
+    # Verify both snapshots were written to job_work_dir / snapshots
+    snap_dir = job_work_dir / "snapshots"
+    assert (snap_dir / "representative_snapshot_receptor.pdb").is_file()
+    assert (snap_dir / "reactive_snapshot_receptor.pdb").is_file()
+
+    # Verify TS scan input was generated from the reactive snapshot (2.8 A), NOT the global medoid (5.5 A)
+    scan_inp = job_work_dir / "transition_state" / "01_scan.inp"
+    assert scan_inp.is_file()
+    scan_text = scan_inp.read_text(encoding="utf-8")
+    assert "Scan" in scan_text
+    match = re.search(r"B \d+ \d+ = ([\d\.]+),", scan_text)
+    assert match is not None
+    scan_start = float(match.group(1))
+    assert 2.5 <= scan_start <= 3.2
 
 

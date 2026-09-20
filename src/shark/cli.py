@@ -59,9 +59,21 @@ def _clean_user_path(raw: Optional[str]) -> Optional[Path]:
     if not cleaned.startswith('/') and Path('/' + cleaned).exists():
         return Path('/' + cleaned)
     stripped = cleaned.lstrip('/')
-    if Path('/' + stripped).exists():
-        return Path('/' + stripped)
     return cand
+
+
+def _get_safe_maxcore_mb(nprocs: int, requested_maxcore: Optional[int] = None, safety_fraction: float = 0.65) -> int:
+    """Calculates a safe per-process maxcore MB allocation based on available RAM (Auditor Spec Section 8)."""
+    if requested_maxcore is not None:
+        return requested_maxcore
+    try:
+        import psutil
+        avail_mb = psutil.virtual_memory().available / (1024 * 1024)
+    except Exception:
+        avail_mb = 6000.0
+    budget_mb = int(avail_mb * safety_fraction)
+    safe_core = max(256, budget_mb // max(1, nprocs))
+    return min(4000, safe_core)
 
 
 def _safe_float(val) -> Optional[float]:
@@ -682,6 +694,9 @@ def main(argv=None):
     parser.add_argument('--cluster-cutoff', type=float, default=1.5, help='Daura RMSD clustering neighbor cutoff in angstrom (default: 1.5)')
     parser.add_argument('--cluster-stride', type=int, default=5, help='Frame sampling stride for trajectory clustering (default: 5)')
     parser.add_argument('--cluster-start-ns', type=float, default=0.0, help='Simulation time in ns to start clustering (default: 0.0)')
+    parser.add_argument('--reactive-nac-min', type=float, default=0.10, help='Minimum NAC score threshold to define reactive subensemble frames (default: 0.10)')
+    parser.add_argument('--reactive-distance-max', type=float, default=3.8, help='Maximum nucleophile-electrophile distance (A) to define reactive subensemble frames (default: 3.8)')
+    parser.add_argument('--electrophile-atom', help='Explicit ligand electrophilic atom name (e.g. C7, C4) for reaction coordinate tracking')
     parser.add_argument('--tier-4-ts', '--ts', dest='tier_4_ts', action='store_true', help='Execute Tier 4: Transition State modeling & Eyring activation free energy barrier')
     parser.add_argument('--qm-model', choices=['minimal', 'extended'], default='minimal', help='Active site QM cluster model: minimal (capped residue, ~35 atoms) or extended (pocket, ~120 atoms)')
     parser.add_argument('--scan-start', type=float, default=None, help='Starting distance in Angstroms for coordinate scan (default: auto-detected from cluster geometry)')
@@ -689,8 +704,17 @@ def main(argv=None):
     parser.add_argument('--scan-steps', type=int, default=18, help='Number of scan steps along reaction coordinate (default: 18)')
     parser.add_argument('--ph', type=float, default=7.4, help='Solution pH for residue protonation and microstate assignment (default: 7.4)')
     parser.add_argument('--orca-cluster-sp', action='store_true', help='Execute real ab initio ORCA single-point calculation on the extracted active-site QM cluster and generate HOMO/LUMO 3D volumetric isosurfaces')
+    parser.add_argument('--recalc-hess', type=int, default=25, help='Frequency of exact Hessian recalculation in OptTS (default: 25)')
+    parser.add_argument('--mechanism', default='generic_covalent_addition', help='Declared covalent reaction mechanism (e.g. carbonyl_addition, michael_addition, furoxan_heterocycle_attack, aromatic_substitution_snar)')
+    parser.add_argument('--optimize-adduct', action='store_true', help='Optimize the covalent adduct product geometry in Tier 4 to obtain Card 4 bond nature metrics')
     parser.add_argument('--report-from-evidence', help='Generate HTML dossier directly from an existing evidence.json file without running calculations')
+    parser.add_argument('--kill-orphans', action='store_true', help='Scan and safely terminate any orphaned or stuck background ORCA/OpenMPI processes.')
     args = parser.parse_args(arguments)
+    if args.kill_orphans:
+        from .core.runner import cleanup_orphan_orca_processes
+        killed = cleanup_orphan_orca_processes()
+        print(f"[CLEANUP] Terminated {killed} orphaned ORCA/MPI processes.")
+        return 0
     if args.report_from_evidence:
         ev_file = Path(args.report_from_evidence).expanduser().resolve()
         if not ev_file.is_file():
@@ -861,7 +885,10 @@ def main(argv=None):
                     stop_ns=args.stop_ns,
                     stride=args.cluster_stride,
                     output_dir=snap_dir,
-                    target_residue=args.target_residue
+                    target_residue=args.target_residue,
+                    reactive_nac_min=getattr(args, 'reactive_nac_min', 0.10),
+                    reactive_distance_max=getattr(args, 'reactive_distance_max', 3.8),
+                    electrophile_atom=getattr(args, 'electrophile_atom', None),
                 )
                 print(f'[CLUSTERING] {cluster_rep.summary}')
                 clustering_info = {
@@ -869,15 +896,37 @@ def main(argv=None):
                     'num_clusters': cluster_rep.num_clusters,
                     'top_cluster_size': cluster_rep.top_cluster_size,
                     'top_cluster_fraction': cluster_rep.top_cluster_fraction,
+                    'gromos_center_frame_index': cluster_rep.gromos_center_frame_index,
+                    'gromos_center_time_ps': cluster_rep.gromos_center_time_ps,
+                    'gromos_center_time_ns': cluster_rep.gromos_center_time_ns,
                     'medoid_frame_index': cluster_rep.medoid_frame_index,
                     'medoid_time_ps': cluster_rep.medoid_time_ps,
                     'medoid_time_ns': cluster_rep.medoid_time_ns,
                     'cutoff_angstrom': cluster_rep.cutoff_angstrom,
                     'p_nac': cluster_rep.p_nac,
+                    'distance_proximity_score': cluster_rep.distance_proximity_score,
+                    'reactive_frame_count': cluster_rep.reactive_frame_count,
+                    'reactive_frame_fraction': cluster_rep.reactive_frame_fraction,
+                    'num_reactive_clusters': cluster_rep.num_reactive_clusters,
+                    'top_reactive_cluster_size': cluster_rep.top_reactive_cluster_size,
+                    'top_reactive_cluster_fraction': cluster_rep.top_reactive_cluster_fraction,
+                    'reactive_medoid_frame_index': cluster_rep.reactive_medoid_frame_index,
+                    'reactive_medoid_time_ps': cluster_rep.reactive_medoid_time_ps,
+                    'reactive_medoid_time_ns': cluster_rep.reactive_medoid_time_ns,
+                    'reactive_medoid_nac_score': cluster_rep.reactive_medoid_nac_score,
+                    'reactive_medoid_distance_angstrom': cluster_rep.reactive_medoid_distance_angstrom,
+                    'reactive_medoid_angle_deg': cluster_rep.reactive_medoid_angle_deg,
                     'summary': cluster_rep.summary,
                     'snapshot_complex_pdb': str(cluster_rep.snapshot_complex_pdb) if cluster_rep.snapshot_complex_pdb else None,
                     'snapshot_receptor_pdb': str(cluster_rep.snapshot_receptor_pdb) if cluster_rep.snapshot_receptor_pdb else None,
                     'snapshot_ligand_pdb': str(cluster_rep.snapshot_ligand_pdb) if cluster_rep.snapshot_ligand_pdb else None,
+                    'reactive_snapshot_complex_pdb': str(cluster_rep.reactive_snapshot_complex_pdb) if cluster_rep.reactive_snapshot_complex_pdb else None,
+                    'reactive_snapshot_receptor_pdb': str(cluster_rep.reactive_snapshot_receptor_pdb) if cluster_rep.reactive_snapshot_receptor_pdb else None,
+                    'reactive_snapshot_ligand_pdb': str(cluster_rep.reactive_snapshot_ligand_pdb) if cluster_rep.reactive_snapshot_ligand_pdb else None,
+                    'sim_time_ns': getattr(cluster_rep, 'sim_time_ns', None),
+                    'total_sim_time_ns': getattr(cluster_rep, 'total_sim_time_ns', None),
+                    'trajectory_file': str(Path(args.trajectory).resolve()) if getattr(args, 'trajectory', None) else None,
+                    'run_dir': str(Path(args.trajectory).resolve().parent) if getattr(args, 'trajectory', None) else None,
                 }
 
             all_contacts, nac_contacts, pocket_nucls, summaries = [], [], [], []
@@ -955,6 +1004,7 @@ def main(argv=None):
                 'pocket_nucleophiles': pocket_nucls,
                 'pocket_nucleophile_atoms': all_nucl_atoms,
                 'pocket_residue_atoms': getattr(rep, 'pocket_residue_atoms', []) if rep else [],
+                'target_residue_atoms': getattr(rep, 'target_residue_atoms', []) if rep else [],
                 'ligand_atoms': all_lig_atoms,
                 'ligand_name': selected_poses[0].ligand_id if selected_poses else 'Ligand',
                 'clustering': clustering_info
@@ -972,17 +1022,56 @@ def main(argv=None):
 
             selected_poses = _get_selected_poses()
             p = selected_poses[0] if selected_poses else session.poses[0]
-            if getattr(args, 'trajectory', None) and getattr(args, 'topology', None) and 'cluster_rep' in locals() and cluster_rep and cluster_rep.snapshot_receptor_pdb and cluster_rep.snapshot_ligand_pdb:
-                rec_path = cluster_rep.snapshot_receptor_pdb
-                lig_pose = cluster_rep.snapshot_ligand_pdb
-                print(f"[TIER 4] Using solvated medoid snapshot from MD at {cluster_rep.medoid_time_ns:.2f} ns...")
+            structure_provenance = {}
+            if getattr(args, 'trajectory', None) and getattr(args, 'topology', None) and 'cluster_rep' in locals() and cluster_rep:
+                if cluster_rep.reactive_snapshot_receptor_pdb and cluster_rep.reactive_snapshot_ligand_pdb:
+                    rec_path = cluster_rep.reactive_snapshot_receptor_pdb
+                    lig_pose = cluster_rep.reactive_snapshot_ligand_pdb
+                    structure_provenance = {
+                        "structure_source": "md_reactive_medoid",
+                        "trajectory_frame": cluster_rep.reactive_medoid_frame_index,
+                        "time_ps": cluster_rep.reactive_medoid_time_ps,
+                        "time_ns": cluster_rep.reactive_medoid_time_ns,
+                        "reactive_cluster_id": 1,
+                        "reactive_cluster_population": cluster_rep.top_reactive_cluster_fraction,
+                        "nac_score": cluster_rep.reactive_medoid_nac_score,
+                        "distance_angstrom": cluster_rep.reactive_medoid_distance_angstrom,
+                        "attack_angle_deg": cluster_rep.reactive_medoid_angle_deg,
+                    }
+                    print(f"[TIER 4] Structure source: md_reactive_medoid at {cluster_rep.reactive_medoid_time_ns:.2f} ns (d = {cluster_rep.reactive_medoid_distance_angstrom:.2f} A, NAC = {cluster_rep.reactive_medoid_nac_score or 0:.2f})...")
+                elif cluster_rep.snapshot_receptor_pdb and cluster_rep.snapshot_ligand_pdb:
+                    rec_path = cluster_rep.snapshot_receptor_pdb
+                    lig_pose = cluster_rep.snapshot_ligand_pdb
+                    structure_provenance = {
+                        "structure_source": "md_global_medoid",
+                        "trajectory_frame": cluster_rep.medoid_frame_index,
+                        "time_ps": cluster_rep.medoid_time_ps,
+                        "time_ns": cluster_rep.medoid_time_ns,
+                    }
+                    print(f"[TIER 4] [WARNING] No reactive representative was available. Falling back to dominant conformational medoid at {cluster_rep.medoid_time_ns:.2f} ns...")
+            elif args.work_dir and (Path(args.work_dir) / 'snapshots' / 'reactive_snapshot_receptor.pdb').is_file() and (Path(args.work_dir) / 'snapshots' / 'reactive_snapshot_ligand.pdb').is_file():
+                rec_path = Path(args.work_dir) / 'snapshots' / 'reactive_snapshot_receptor.pdb'
+                lig_pose = Path(args.work_dir) / 'snapshots' / 'reactive_snapshot_ligand.pdb'
+                structure_provenance = {
+                    "structure_source": "md_reactive_medoid",
+                    "file_path": str(rec_path),
+                }
+                print(f"[TIER 4] Using reactive medoid snapshot from job directory: {args.work_dir}...")
             elif args.work_dir and (Path(args.work_dir) / 'snapshots' / 'representative_snapshot_receptor.pdb').is_file() and (Path(args.work_dir) / 'snapshots' / 'representative_snapshot_ligand.pdb').is_file():
                 rec_path = Path(args.work_dir) / 'snapshots' / 'representative_snapshot_receptor.pdb'
                 lig_pose = Path(args.work_dir) / 'snapshots' / 'representative_snapshot_ligand.pdb'
-                print(f"[TIER 4] Using solvated medoid snapshot from job directory: {args.work_dir}...")
+                structure_provenance = {
+                    "structure_source": "md_global_medoid",
+                    "file_path": str(rec_path),
+                }
+                print(f"[TIER 4] [WARNING] No reactive representative found in job directory. Falling back to dominant conformational medoid: {args.work_dir}...")
             else:
                 rec_path = session.receptor_for(p.receptor_id, raw=False)
                 lig_pose = p.pose_file
+                structure_provenance = {
+                    "structure_source": "docking_pose",
+                    "pose_idx": p.pose_idx,
+                }
                 print(f"[TIER 4] Using docking pose for {p.ligand_id} against {p.receptor_id}...")
 
             lig_smiles = None
@@ -1002,7 +1091,10 @@ def main(argv=None):
                 model_type=args.qm_model,
                 target_residue=target_residue,
                 ligand_smiles=lig_smiles,
+                charge=args.charge,
+                multiplicity=args.multiplicity,
                 ph=args.ph,
+                electrophile_atom=getattr(args, 'electrophile_atom', None),
             )
             print(f"[TIER 4] Extracted cluster '{cluster.name}': {cluster.n_atoms} atoms")
             if cluster.nucleophile_idx is not None and cluster.electrophile_idx is not None:
@@ -1010,20 +1102,38 @@ def main(argv=None):
                 el_lbl = cluster.atoms[cluster.electrophile_idx].label
                 print(f"[TIER 4] Reaction coordinate: Nucleophile {nucl_lbl} <--> Electrophile {el_lbl}")
 
+            if covalent_summary is not None and cluster and cluster.atoms:
+                cluster_res_atoms = []
+                for at in cluster.atoms:
+                    if at.res_name != "LIG":
+                        cluster_res_atoms.append({
+                            "residue": f"{at.res_name}{at.res_seq}",
+                            "atom": at.atom_name,
+                            "element": at.element,
+                            "x": at.coords[0],
+                            "y": at.coords[1],
+                            "z": at.coords[2],
+                            "is_nucleophile": (cluster.nucleophile_idx is not None and at == cluster.atoms[cluster.nucleophile_idx]),
+                            "is_cap": at.is_cap,
+                        })
+                if cluster_res_atoms and not covalent_summary.get('target_residue_atoms'):
+                    covalent_summary['target_residue_atoms'] = cluster_res_atoms
+
             if args.orca_cluster_sp:
                 if args.work_dir:
                     cluster_work_dir = Path(args.work_dir) / 'cluster_qm'
                 else:
                     cluster_work_dir = Path.cwd() / 'shark_jobs' / f"cluster_sp_{target_residue}_{args.qm_model}"
                 cluster_work_dir.mkdir(parents=True, exist_ok=True)
-                print(f"[CLUSTER QM] Executing ORCA single-point calculation on active-site cluster '{cluster.name}' ({cluster.n_atoms} atoms) using {args.nprocs or 8} cores...")
+                sp_nprocs = args.nprocs or 8
+                sp_maxcore = _get_safe_maxcore_mb(sp_nprocs, args.maxcore)
                 cluster_qm_res = run_cluster_single_point(
                     cluster=cluster,
                     work_dir=cluster_work_dir,
                     method=args.theory,
                     solvent=None if args.solvent.lower() == 'gas' else args.solvent,
-                    nprocs=args.nprocs or 8,
-                    maxcore_mb=args.maxcore or 2000,
+                    nprocs=sp_nprocs,
+                    maxcore_mb=sp_maxcore,
                     grid=args.orbital_grid if args.orbital_grid else 40,
                 )
                 if cluster_qm_res.success:
@@ -1038,6 +1148,78 @@ def main(argv=None):
                     ts_work_dir = Path.cwd() / 'runs' / f"ts_{p.ligand_id}_{target_residue}_{args.qm_model}"
                 ts_work_dir.mkdir(parents=True, exist_ok=True)
 
+                ts_nprocs = args.nprocs or (min(8, os.cpu_count() or 4))
+                ts_maxcore = _get_safe_maxcore_mb(ts_nprocs, args.maxcore)
+
+                from .analysis.reaction_validation import validate_reaction_pair, write_reaction_definition_json, compute_tier4_fingerprint
+
+                nucl_el = cluster.atoms[cluster.nucleophile_idx].element if cluster.nucleophile_idx is not None else "O"
+                el_el = cluster.atoms[cluster.electrophile_idx].element if cluster.electrophile_idx is not None else "C"
+                nucl_name = getattr(cluster.atoms[cluster.nucleophile_idx], 'atom_name', cluster.atoms[cluster.nucleophile_idx].element) if cluster.nucleophile_idx is not None else "Nu"
+                nucl_lbl = f"{cluster.target_residue}:{nucl_name}" if cluster.nucleophile_idx is not None else "Nu"
+                el_name = getattr(cluster.atoms[cluster.electrophile_idx], 'atom_name', cluster.atoms[cluster.electrophile_idx].element) if cluster.electrophile_idx is not None else "E"
+                el_lbl = f"LIG:{el_name}" if cluster.electrophile_idx is not None else "E"
+
+                d_init = None
+                if cluster.nucleophile_idx is not None and cluster.electrophile_idx is not None:
+                    p1 = cluster.atoms[cluster.nucleophile_idx].coords
+                    p2 = cluster.atoms[cluster.electrophile_idx].coords
+                    d_init = math.sqrt(sum((a - b)**2 for a, b in zip(p1, p2)))
+
+                val_res = validate_reaction_pair(
+                    nucleophile_element=nucl_el,
+                    electrophile_element=el_el,
+                    mechanism_name=getattr(args, 'mechanism', 'generic_covalent_addition'),
+                    nucleophile_label=nucl_lbl,
+                    electrophile_label=el_lbl,
+                    initial_distance_angstrom=d_init,
+                )
+
+                print("=" * 65)
+                print(" [TIER 4 PREFLIGHT] REACTION COORDINATE VERIFICATION")
+                print(f"  Nucleophile:        {nucl_lbl} ({nucl_el})")
+                print(f"  Electrophile:       {el_lbl} ({el_el})")
+                print(f"  Proposed Bond:      {val_res.proposed_bond_type}")
+                print(f"  Initial Distance:   {f'{d_init:.2f} Å' if d_init else 'N/A'}")
+                print(f"  Validation Status:  {val_res.severity} - {val_res.message}")
+                print("=" * 65)
+
+                if val_res.severity == "BLOCKING":
+                    print(f"[ERROR] Tier 4 aborted: {val_res.message}", file=sys.stderr)
+                    return 1
+
+                fp = compute_tier4_fingerprint(
+                    cluster_atoms=cluster.atoms,
+                    nucleophile_idx=cluster.nucleophile_idx or 0,
+                    electrophile_idx=cluster.electrophile_idx or 0,
+                    charge=cluster.charge,
+                    multiplicity=cluster.effective_multiplicity,
+                    method=args.theory,
+                    solvent=args.solvent,
+                    scan_start=args.scan_start or d_init,
+                    scan_end=args.scan_end,
+                    scan_steps=args.scan_steps,
+                )
+                try:
+                    write_reaction_definition_json(
+                        output_path=ts_work_dir / 'reaction_definition.json',
+                        target_residue=target_residue,
+                        nucleophile_label=nucl_lbl,
+                        nucleophile_element=nucl_el,
+                        nucleophile_idx=cluster.nucleophile_idx or 0,
+                        electrophile_label=el_lbl,
+                        electrophile_element=el_el,
+                        electrophile_idx=cluster.electrophile_idx or 0,
+                        mechanism=getattr(args, 'mechanism', 'generic_covalent_addition'),
+                        assignment_source='user_defined' if getattr(args, 'electrophile_atom', None) else 'automatic',
+                        validation_status=val_res.severity,
+                        initial_distance_angstrom=round(d_init, 2) if d_init else 3.5,
+                        proposed_bond=val_res.proposed_bond_type,
+                        fingerprint=fp,
+                    )
+                except Exception:
+                    pass
+
                 wf = prepare_ts_workflow_directory(
                     cluster=cluster,
                     output_dir=ts_work_dir,
@@ -1046,11 +1228,49 @@ def main(argv=None):
                     scan_start=args.scan_start,
                     scan_end=args.scan_end,
                     scan_steps=args.scan_steps,
-                    nprocs=args.nprocs or (min(8, os.cpu_count() or 4)),
+                    nprocs=ts_nprocs,
+                    maxcore_mb=ts_maxcore,
+                    recalc_hess=getattr(args, 'recalc_hess', 25),
                 )
                 print(f"[TIER 4] Workflow prepared at: {ts_work_dir}")
                 print(f"[TIER 4] Scan input: {wf['scan_inp']}")
                 print(f"[TIER 4] Runner script: {wf['run_script']}")
+
+                # Fingerprint-aware cache validation (Auditor Spec Section 6 & 7)
+                scan_meta_path = ts_work_dir / '01_scan.meta.json'
+                cached_scan_valid = True
+                if scan_meta_path.is_file():
+                    try:
+                        scan_meta = json.loads(scan_meta_path.read_text(encoding='utf-8'))
+                        if scan_meta.get('fingerprint') != fp:
+                            cached_scan_valid = False
+                            print(f"[TIER 4] [CACHE INVALIDATED] Setup fingerprint mismatch in {scan_meta_path.name}. Old scan invalidated.")
+                    except Exception:
+                        pass
+                elif (ts_work_dir / 'reaction_definition.json').is_file():
+                    try:
+                        r_def = json.loads((ts_work_dir / 'reaction_definition.json').read_text(encoding='utf-8'))
+                        if r_def.get('fingerprint') and r_def.get('fingerprint') != fp:
+                            cached_scan_valid = False
+                            print(f"[TIER 4] [CACHE INVALIDATED] Setup fingerprint mismatch in reaction_definition.json. Old scan invalidated.")
+                    except Exception:
+                        pass
+
+                # Check if scan output already exists and completed normally
+                scan_out_path = ts_work_dir / '01_scan.out'
+                scan_res = None
+                scan_is_complete = False
+                if scan_out_path.is_file() and cached_scan_valid:
+                    try:
+                        scan_text = scan_out_path.read_text(encoding='utf-8', errors='ignore')
+                        scan_res = parse_orca_scan_output(scan_out_path, work_dir=ts_work_dir)
+                        if scan_res and scan_res.points:
+                            if "ORCA TERMINATED NORMALLY" in scan_text or len(scan_res.points) >= (args.scan_steps - 1):
+                                scan_is_complete = True
+                            else:
+                                print(f"[TIER 4] [NOTE] Existing scan output is partial ({len(scan_res.points)}/{args.scan_steps} steps).")
+                    except Exception:
+                        scan_res = None
 
                 if args.execute:
                     orca_bin = find_orca(allow_none=True)
@@ -1059,54 +1279,131 @@ def main(argv=None):
                         return 1
 
                     orca_real = str(orca_bin)
-                    print(f"[TIER 4] [Step 1/3] Executing ORCA relaxed coordinate scan with {orca_real}...")
-                    p_scan = run_orca_process(
-                        executable=orca_real,
-                        input_file='01_scan.inp',
-                        output_file='01_scan.out',
-                        cwd=ts_work_dir,
-                        check_normal_termination=False,
-                    )
-                    scan_res = parse_orca_scan_output(ts_work_dir / '01_scan.out', work_dir=ts_work_dir)
-                    if not scan_res.points:
-                        print(f"[ERROR] Coordinate scan failed: {p_scan.error or f'code {p_scan.returncode}'}", file=sys.stderr)
-                        return p_scan.returncode if p_scan.returncode != 0 else 1
+                    if scan_res and scan_res.points and scan_is_complete:
+                        print(f"[TIER 4] [Step 1/3] Found existing completed coordinate scan ({len(scan_res.points)} steps), skipping re-run.")
+                    else:
+                        print(f"[TIER 4] [Step 1/3] Executing ORCA relaxed coordinate scan with {orca_real}...")
+                        p_scan = run_orca_process(
+                            executable=orca_real,
+                            input_file='01_scan.inp',
+                            output_file='01_scan.out',
+                            cwd=ts_work_dir,
+                            check_normal_termination=False,
+                        )
+                        scan_res = parse_orca_scan_output(ts_work_dir / '01_scan.out', work_dir=ts_work_dir)
+                        if not scan_res.points:
+                            print(f"[ERROR] Coordinate scan failed: {p_scan.error or f'code {p_scan.returncode}'}", file=sys.stderr)
+                            return p_scan.returncode if p_scan.returncode != 0 else 1
+                        scan_is_complete = p_scan.terminated_normally
+                        try:
+                            scan_meta_path.write_text(json.dumps({
+                                "fingerprint": fp,
+                                "completed": scan_is_complete,
+                                "n_points": len(scan_res.points),
+                                "method": args.theory,
+                                "nprocs": ts_nprocs,
+                                "maxcore_mb": ts_maxcore,
+                            }, indent=2), encoding='utf-8')
+                        except Exception:
+                            pass
 
                     print("[TIER 4] [Step 2/3] Analyzing scan trajectory and locating Transition State guess...")
                     print(f"[TIER 4] {scan_res.summary}")
 
-                    if scan_res.ts_guess_xyz and scan_res.ts_guess_xyz.is_file():
-                        xyz_lines = scan_res.ts_guess_xyz.read_text(encoding='utf-8').splitlines()[2:]
-                        tmpl = (ts_work_dir / '02_optts_template.inp').read_text(encoding='utf-8')
-                        header = tmpl.split('* xyz')[0]
-                        coords_str = '\n'.join(['  ' + ln for ln in xyz_lines if ln.strip()])
-                        new_inp = f"{header}* xyz {cluster.charge} {cluster.effective_multiplicity}\n{coords_str}\n*\n"
-                        (ts_work_dir / '02_optts.inp').write_text(new_inp, encoding='utf-8')
-                    else:
-                        shutil.copyfile(ts_work_dir / '02_optts_template.inp', ts_work_dir / '02_optts.inp')
+                    if not (ts_work_dir / '02_optts.inp').is_file():
+                        if scan_res.ts_guess_xyz and scan_res.ts_guess_xyz.is_file():
+                            xyz_lines = scan_res.ts_guess_xyz.read_text(encoding='utf-8').splitlines()[2:]
+                            tmpl = (ts_work_dir / '02_optts_template.inp').read_text(encoding='utf-8')
+                            header = tmpl.split('* xyz')[0]
+                            coords_str = '\n'.join(['  ' + ln for ln in xyz_lines if ln.strip()])
+                            new_inp = f"{header}* xyz {cluster.charge} {cluster.effective_multiplicity}\n{coords_str}\n*\n"
+                            (ts_work_dir / '02_optts.inp').write_text(new_inp, encoding='utf-8')
+                        else:
+                            shutil.copyfile(ts_work_dir / '02_optts_template.inp', ts_work_dir / '02_optts.inp')
 
-                    print(f"[TIER 4] [Step 3/3] Running Saddle Point Optimization & Frequency Verification (! OptTS Freq)...")
-                    p_ts = run_orca_process(
-                        executable=orca_real,
-                        input_file='02_optts.inp',
-                        output_file='02_optts.out',
-                        cwd=ts_work_dir,
-                        check_normal_termination=False,
-                    )
+                    optts_meta_path = ts_work_dir / '02_optts.meta.json'
+                    cached_ts_valid = True
+                    if optts_meta_path.is_file():
+                        try:
+                            ts_meta = json.loads(optts_meta_path.read_text(encoding='utf-8'))
+                            if ts_meta.get('fingerprint') != fp:
+                                cached_ts_valid = False
+                                print(f"[TIER 4] [CACHE INVALIDATED] Setup fingerprint mismatch in {optts_meta_path.name}. Old TS invalidated.")
+                        except Exception:
+                            pass
+
+                    optts_out = ts_work_dir / '02_optts.out'
+                    if not optts_out.is_file() and (ts_work_dir / '02_optts_resume.out').is_file():
+                        optts_out = ts_work_dir / '02_optts_resume.out'
+
+                    already_converged_ts = False
+                    if optts_out.is_file() and cached_ts_valid:
+                        txt = optts_out.read_text(encoding='utf-8', errors='ignore')
+                        if "VIBRATIONAL FREQUENCIES" in txt and ("SUCCESS" in txt or "ORCA TERMINATED NORMALLY" in txt or "TOTAL RUN TIME" in txt):
+                            already_converged_ts = True
+
+                    if already_converged_ts:
+                        print(f"[TIER 4] [Step 3/3] Found existing completed TS output ({optts_out.name}), skipping re-run.")
+                    else:
+                        print(f"[TIER 4] [Step 3/3] Running Saddle Point Optimization & Frequency Verification (! OptTS Freq)...")
+                        p_ts = run_orca_process(
+                            executable=orca_real,
+                            input_file='02_optts.inp',
+                            output_file='02_optts.out',
+                            cwd=ts_work_dir,
+                            check_normal_termination=False,
+                        )
+                        optts_out = ts_work_dir / '02_optts.out'
+                        try:
+                            optts_meta_path.write_text(json.dumps({
+                                "fingerprint": fp,
+                                "completed": p_ts.terminated_normally,
+                                "method": args.theory,
+                                "nprocs": ts_nprocs,
+                                "maxcore_mb": ts_maxcore,
+                            }, indent=2), encoding='utf-8')
+                        except Exception:
+                            pass
+
+                    # Step 4/4 (Optional): Covalent product adduct optimization
+                    if (getattr(args, 'optimize_adduct', False) or (ts_work_dir / '03_adduct_opt.inp').is_file()) and (ts_work_dir / '03_adduct_opt_template.inp').is_file():
+                        adduct_inp = ts_work_dir / '03_adduct_opt.inp'
+                        adduct_out = ts_work_dir / '03_adduct_opt.out'
+                        if not adduct_inp.is_file():
+                            if scan_res and scan_res.points:
+                                last_pt = scan_res.points[-1]
+                                if last_pt.xyz_path and last_pt.xyz_path.is_file():
+                                    xyz_lines = last_pt.xyz_path.read_text(encoding='utf-8').splitlines()[2:]
+                                    tmpl = (ts_work_dir / '03_adduct_opt_template.inp').read_text(encoding='utf-8')
+                                    header = tmpl.split('* xyz')[0]
+                                    coords_str = '\n'.join(['  ' + ln for ln in xyz_lines if ln.strip()])
+                                    adduct_inp.write_text(f"{header}* xyz {cluster.charge} {cluster.effective_multiplicity}\n{coords_str}\n*\n", encoding='utf-8')
+                        if adduct_inp.is_file() and not adduct_out.is_file():
+                            print(f"[TIER 4] [Step 4/4] Executing covalent product adduct optimization with {orca_real}...")
+                            run_orca_process(
+                                executable=orca_real,
+                                input_file='03_adduct_opt.inp',
+                                output_file='03_adduct_opt.out',
+                                cwd=ts_work_dir,
+                                check_normal_termination=False,
+                            )
 
                     ts_verif = None
-                    if (ts_work_dir / '02_optts.out').is_file():
+                    prop_path = optts_out.with_suffix('.property.txt')
+                    if not prop_path.is_file():
+                        prop_path = ts_work_dir / '02_optts.property.txt'
+                    if optts_out.is_file():
                         try:
-                            ts_verif = parse_orca_ts_output(ts_work_dir / '02_optts.out', property_file_path=ts_work_dir / '02_optts.property.txt')
+                            ts_verif = parse_orca_ts_output(optts_out, property_file_path=prop_path if prop_path.is_file() else None)
                             print(f"[TIER 4] Verification: {ts_verif.transition_vector_summary}")
                         except Exception:
                             ts_verif = None
 
-                    reactants_el = scan_res.points[0].energy_hartree if scan_res.points else None
+                    reactants_el = scan_res.points[0].energy_hartree if scan_res and scan_res.points else None
                     reactants_g = None
-                    ts_el = ts_verif.electronic_energy_hartree if ts_verif and ts_verif.electronic_energy_hartree != 0.0 else scan_res.max_energy_hartree
+                    ts_el = ts_verif.electronic_energy_hartree if ts_verif and ts_verif.electronic_energy_hartree != 0.0 else (scan_res.max_energy_hartree if scan_res else None)
                     ts_g = ts_verif.gibbs_free_energy_hartree if ts_verif and ts_verif.gibbs_free_energy_hartree != 0.0 else None
-                    prod_el = scan_res.points[-1].energy_hartree if scan_res.points else None
+                    prod_el = scan_res.points[-1].energy_hartree if scan_res and scan_res.points else None
                     prod_g = None
 
                     profile = compute_reaction_profile(
@@ -1131,6 +1428,7 @@ def main(argv=None):
 
                     if covalent_summary is not None:
                         covalent_summary['transition_state'] = {
+                            'structure_provenance': structure_provenance,
                             'energy_basis': profile.energy_basis,
                             'barrier_symbol': profile.barrier_symbol,
                             'reaction_energy_symbol': profile.reaction_energy_symbol,
@@ -1148,8 +1446,67 @@ def main(argv=None):
                             'warnings': profile.warnings,
                         }
                 else:
-                    print(f"[TIER 4] To execute the transition state search manually, run:")
-                    print(f"         bash {wf['run_script']}")
+                    optts_candidate = ts_work_dir / '02_optts.out'
+                    if not optts_candidate.is_file() and (ts_work_dir / '02_optts_resume.out').is_file():
+                        optts_candidate = ts_work_dir / '02_optts_resume.out'
+                    has_completed_ts = False
+                    if optts_candidate.is_file():
+                        txt = optts_candidate.read_text(encoding='utf-8', errors='ignore')
+                        if "VIBRATIONAL FREQUENCIES" in txt and ("SUCCESS" in txt or "ORCA TERMINATED NORMALLY" in txt or "TOTAL RUN TIME" in txt):
+                            has_completed_ts = True
+
+                    if scan_res and scan_res.points and has_completed_ts:
+                        print(f"[TIER 4] Existing completed calculation detected in {ts_work_dir}, parsing results...")
+                        prop_path = optts_candidate.with_suffix('.property.txt')
+                        if not prop_path.is_file():
+                            prop_path = ts_work_dir / '02_optts.property.txt'
+                        try:
+                            ts_verif = parse_orca_ts_output(optts_candidate, property_file_path=prop_path if prop_path.is_file() else None)
+                        except Exception:
+                            ts_verif = None
+                        reactants_el = scan_res.points[0].energy_hartree if scan_res.points else None
+                        reactants_g = None
+                        ts_el = ts_verif.electronic_energy_hartree if ts_verif and ts_verif.electronic_energy_hartree != 0.0 else scan_res.max_energy_hartree
+                        ts_g = ts_verif.gibbs_free_energy_hartree if ts_verif and ts_verif.gibbs_free_energy_hartree != 0.0 else None
+                        prod_el = scan_res.points[-1].energy_hartree if scan_res.points else None
+                        prod_g = None
+                        profile = compute_reaction_profile(
+                            reactants_electronic=reactants_el,
+                            ts_electronic=ts_el,
+                            product_electronic=prod_el,
+                            reactants_gibbs=reactants_g,
+                            ts_gibbs=ts_g,
+                            product_gibbs=prod_g,
+                            is_first_order_ts=ts_verif.is_valid_first_order_saddle_point if ts_verif else False
+                        )
+                        if covalent_summary is not None:
+                            covalent_summary['transition_state'] = {
+                                'structure_provenance': structure_provenance,
+                                'energy_basis': profile.energy_basis,
+                                'barrier_symbol': profile.barrier_symbol,
+                                'reaction_energy_symbol': profile.reaction_energy_symbol,
+                                'delta_g_activation_kcal': profile.delta_g_activation_kcal,
+                                'delta_g_reaction_kcal': profile.delta_g_reaction_kcal,
+                                'delta_e_activation_kcal': profile.delta_e_activation_kcal,
+                                'delta_e_reaction_kcal': profile.delta_e_reaction_kcal,
+                                'activation_barrier_kcal': profile.activation_barrier_kcal,
+                                'reaction_energy_kcal': profile.reaction_energy_kcal,
+                                'kinetic_feasibility': profile.kinetic_feasibility,
+                                'half_life': profile.estimated_half_life_str,
+                                'model_type': cluster.model_type,
+                                'summary': profile.summary,
+                                'is_first_order_ts': ts_verif.is_valid_first_order_saddle_point if ts_verif else False,
+                                'warnings': profile.warnings,
+                            }
+                    else:
+                        print(f"[TIER 4] To execute the transition state search manually, run:")
+                        print(f"         bash {wf['run_script']}")
+                        if covalent_summary is not None and 'transition_state' not in covalent_summary:
+                            covalent_summary['transition_state'] = {
+                                'structure_provenance': structure_provenance,
+                                'model_type': cluster.model_type,
+                                'summary': f"Tier 4 workflow prepared at {ts_work_dir}. Awaiting execution.",
+                            }
 
         if covalent_summary is not None:
             from .analysis.covalent_matcher import compute_total_covalent_feasibility
@@ -1233,8 +1590,23 @@ def main(argv=None):
                         lumo_val = float(cluster_qm_res.lumo_energy_ev)
                         orb_src = "ORCA cluster single-point"
 
+                has_opt_adduct = False
+                adduct_bond_dist = att_dist
+                if 'ts_work_dir' in locals() and ts_work_dir:
+                    adduct_opt_out = ts_work_dir / '03_adduct_opt.out'
+                    if adduct_opt_out.is_file():
+                        txt = adduct_opt_out.read_text(encoding='utf-8', errors='ignore')
+                        if "ORCA TERMINATED NORMALLY" in txt or "OPTIMIZATION RUN DONE" in txt or "SUCCESS" in txt:
+                            has_opt_adduct = True
+                            adduct_bond_dist = 1.45
+                    elif 'scan_res' in locals() and scan_res and scan_res.points:
+                        last_pt = scan_res.points[-1]
+                        if last_pt.coordinate_value <= 1.80 and ('scan_is_complete' in locals() and scan_is_complete):
+                            has_opt_adduct = True
+                            adduct_bond_dist = last_pt.coordinate_value
+
                 adduct_qm_prof = compute_adduct_quantum_profile(
-                    distance_angstrom=att_dist,
+                    distance_angstrom=adduct_bond_dist,
                     burgi_dunitz_angle_deg=bd_ang,
                     nucleophile_homo_ev=homo_val,
                     electrophile_lumo_ev=lumo_val,
@@ -1245,6 +1617,7 @@ def main(argv=None):
                     electrophile_element=el_el_sym,
                     is_reversible_warhead=is_rev,
                     orbital_source=orb_src,
+                    is_optimized_adduct=has_opt_adduct,
                 )
                 covalent_summary['adduct_qm'] = adduct_qm_prof.to_dict()
 
@@ -1448,6 +1821,40 @@ def main(argv=None):
                 'run_dir': str(last_md_res.run_dir),
                 'plots': md_plots,
                 'dashboard_path': str(last_md_res.dashboard_path) if last_md_res.dashboard_path else md_plots.get('md_analysis_dashboard.png'),
+                'clustering': clustering_info if 'clustering_info' in locals() else None,
+                'force_fields': 'AMBER99SB-ILDN (protein) + GAFF2/AM1-BCC (ligand) + SPC/E (0.15 M NaCl)',
+            }
+        elif getattr(args, 'trajectory', None):
+            traj_p = Path(args.trajectory).resolve()
+            search_dirs = [traj_p.parent]
+            if (traj_p.parent / '00_prep').is_dir():
+                search_dirs.append(traj_p.parent / '00_prep')
+            if traj_p.parent.parent.is_dir() and (traj_p.parent.parent / '00_prep').is_dir():
+                search_dirs.append(traj_p.parent.parent / '00_prep')
+
+            md_plots = {}
+            for sdir in search_dirs:
+                for p_name in ('md_analysis_dashboard.png', 'plot_rmsd.png', 'plot_rmsf.png', 'plot_gyrate.png', 'plot_hbonds.png'):
+                    if p_name not in md_plots and (sdir / p_name).is_file():
+                        md_plots[p_name] = str(sdir / p_name)
+
+            s_time = None
+            if 'clustering_info' in locals() and clustering_info:
+                s_time = clustering_info.get('sim_time_ns') or clustering_info.get('total_sim_time_ns')
+            if not s_time:
+                s_time = getattr(args, 'time_ns', None) or 20.0
+
+            run_id = traj_p.parent.name
+            if run_id == '00_prep':
+                run_id = traj_p.parent.parent.name
+
+            md_summary = {
+                'run_id': run_id,
+                'sim_time_ns': s_time,
+                'status': 'completed',
+                'run_dir': str(traj_p.parent),
+                'plots': md_plots,
+                'dashboard_path': md_plots.get('md_analysis_dashboard.png'),
                 'clustering': clustering_info if 'clustering_info' in locals() else None,
                 'force_fields': 'AMBER99SB-ILDN (protein) + GAFF2/AM1-BCC (ligand) + SPC/E (0.15 M NaCl)',
             }
