@@ -684,6 +684,7 @@ def prepare_ts_workflow_directory(
     nprocs: int = 4,
     maxcore_mb: int = 2000,
     recalc_hess: int = 25,
+    full_thermo: bool = False,
 ) -> dict:
     """Creates directory structure, ORCA scan input, and runner scripts for Tier 4 TS modeling."""
     out_path = Path(output_dir)
@@ -699,6 +700,17 @@ def prepare_ts_workflow_directory(
 
     # 1. Write initial cluster geometry
     xyz_path = cluster.write_xyz(out_path / "00_initial_cluster.xyz")
+
+    # 1b. Write reactant vibrational frequency calculation (for Gibbs free energy G_reactant)
+    reactant_freq_path = out_path / "00_reactant_freq.inp"
+    reactant_freq_content = cluster.to_orca_input(
+        job_type="freq",
+        method=method,
+        solvent=solvent,
+        nprocs=nprocs,
+        maxcore_mb=maxcore_mb,
+    )
+    reactant_freq_path.write_text(reactant_freq_content, encoding="utf-8")
 
     # 2. Write coordinate scan input
     scan_inp_path = cluster.write_orca_input(
@@ -728,7 +740,7 @@ def prepare_ts_workflow_directory(
     # 4. Write template Adduct Optimization input (to be filled with product coordinates after scan)
     adduct_template_path = out_path / "03_adduct_opt_template.inp"
     adduct_template_content = cluster.to_orca_input(
-        job_type="opt",
+        job_type="opt_freq" if full_thermo else "opt",
         method=method,
         solvent=solvent,
         nprocs=nprocs,
@@ -760,6 +772,11 @@ if [ -z "$ORCA_BIN" ]; then
 fi
 # Resolve symlink to realpath for ORCA 6
 ORCA_REAL=$(readlink -f "$ORCA_BIN")
+
+if [ -f 00_reactant_freq.inp ]; then
+    echo "[Step 0/4] Running Reactant State Vibrational Frequencies for Gibbs Free Energy..."
+    "$ORCA_REAL" 00_reactant_freq.inp > 00_reactant_freq.out
+fi
 
 echo "[Step 1/4] Running Relaxed Coordinate Scan..."
 "$ORCA_REAL" 01_scan.inp > 01_scan.out
@@ -817,6 +834,7 @@ echo "Tier 4 workflow (Scan, TS, and Adduct) completed successfully."
     return {
         "output_dir": out_path,
         "initial_xyz": xyz_path,
+        "reactant_freq_inp": reactant_freq_path,
         "scan_inp": scan_inp_path,
         "optts_template": optts_template_path,
         "run_script": run_sh_path,

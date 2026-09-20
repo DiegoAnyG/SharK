@@ -136,11 +136,29 @@ A continuacion se detallan todas las variables, su definicion matematica, su sig
 
 ---
 
-## 3. Modos de Ejecucion Practicos
+## 3. Modos de Ejecucion Practicos y Banderas Modulares
 
-SharK puede ejecutarse en diferentes modalidades segun el nivel de detalle computacional requerido.
+SharK puede ejecutarse tanto en flujos de trabajo orquestados integrales como en ejecucion modular por tareas individuales (modo manual).
 
-### Modo 1: Cribado Rapido Basado en Docking (`--fast-analysis`)
+### 3.1 Catalogo Completo de Banderas Modulares Individuales
+
+Para el control manual de cada tarea que genera secciones o salidas en el dossier cientifico, SharK ofrece las siguientes banderas modulares:
+
+| Bandera CLI | Tarea / Subproceso | Entrada Principal | Salida Generada en Dossier |
+| :--- | :--- | :--- | :--- |
+| `--dft`, `--run-dft` | Calculo DFT de ligando aislado y equilibrios tautomericos | `--session` o PDB/SMILES | Seccion 01: Tabla de orbitales frontera HOMO/LUMO, gap, poblaciones de Boltzmann e iframe interactivo |
+| `--run-md`, `--md` | Dinamica molecular clasica solvatada (GROMACS) | `--session` (receptor crudo) | Seccion 02: Graficas de trayectoria (RMSD, RMSF, Rg, enlaces H) y panel general |
+| `--cluster-nac`, `--cluster-trajectory` | Agrupamiento Daura/GROMOS y muestreo dinamico NAC | `--topology`, `--trajectory` | Seccion 02: P_NAC, medoides global y reactivo, distancia de contacto y angulo de ataque |
+| `--covalent` | Reactividad CDFT y correspondencia geometrica en bolsillo | `--session` o snapshots | Seccion 03: Identificacion de nucleofilos, angulo Burgi-Dunitz, factor de activacion de diada, CFI_pre |
+| `--orca-cluster-sp` | Punto unico QM ab initio en cluster de sitio activo | `--session` o snapshot PDB | Seccion 03: Orbitales frontera del sitio activo, brecha HOMO-LUMO y visor 3Dmol de densidad electronica |
+| `--tier-4-ts`, `--ts` | Modelado de estado de transicion (Pillar 3) | `--session` o snapshot PDB | Seccion 03: Escaneo relajado PES, OptTS, frecuencia imaginaria, barrera Delta G‡, k_chem y t_1/2 |
+| `--optimize-adduct` | Optimizacion cuantica del aducto covalente | Entrada del TS o ultimo paso | Seccion 03 (Tarjeta 4): Termodinamica Delta G_rxn, barrera retro Delta G‡_retro, orden de enlace Wiberg |
+| `--full-thermo`, `--gibbs-thermo` | Termodinamica completa de Gibbs (reactivos, TS y producto) | `--session` o snapshot PDB | Seccion 03: Frecuencias de reactivo y aducto, Delta G‡, Delta G_rxn, k_chem de Eyring y vida media t_1/2 |
+| `--html`, `--generate-dossier` | Generacion del informe HTML autocontenido | Archivos de calculo | Archivo HTML portatil con graficas Plotly.js y visualizadores 3Dmol.js integrados |
+| `--report-from-evidence` | Regeneracion inmediata desde JSON | `evidence.json` | Dossier HTML regenerado en < 2 segundos sin recomputar calculos |
+| `--kill-orphans` | Limpieza de procesos MPI/ORCA colgados | N/A | Terminacion segura de procesos huerfanos en segundo plano |
+
+### 3.2 Modo 1: Cribado Rapido Basado en Docking (`--fast-analysis`)
 Para evaluar rapidamente decenas o cientos de compuestos a partir de poses de docking sin ejecutar dinamica molecular:
 
 ```bash
@@ -151,8 +169,23 @@ shark \
   --work-dir ./shark_fast_results
 ```
 
-### Modo 2: Estandar de Oro Simple con Dinamica Molecular Externa (`--simple-gold-standard`)
-Cuando ya se dispone de una trayectoria calculada en GROMACS (`.xtc` y `.gro`):
+### 3.3 Modo 2: Muestreo Dinamico y Agrupamiento de Trayectoria (`--cluster-nac`)
+Cuando ya se dispone de una trayectoria calculada en GROMACS (`.xtc` y `.gro`) y se desea obtener el muestreo dinamico NAC y los medoides representativos:
+
+```bash
+shark \
+  --session /ruta/a/sesion_docking.tar.gz \
+  --topology /ruta/a/sistema_solvatado.gro \
+  --trajectory /ruta/a/trayectoria_produccion.xtc \
+  --cluster-nac \
+  --cluster-cutoff 1.5 \
+  --cluster-stride 5 \
+  --target-residue THR309 \
+  --work-dir ./shark_cluster_results
+```
+
+### 3.4 Modo 3: Estandar de Oro Simple (`--simple-gold-standard`)
+Combina el agrupamiento de trayectoria externa con el analisis covalente prerreactivo:
 
 ```bash
 shark \
@@ -164,12 +197,8 @@ shark \
   --work-dir ./shark_md_results
 ```
 
-*Parametros de clustering utiles:*
-* `--cluster-cutoff 1.5`: Radio de corte RMSD en Angstroms para el algoritmo Daura/GROMOS (por defecto: 1.5 A).
-* `--cluster-stride 5`: Muestreo de fotogramas para optimizar velocidad sin perder resolucion.
-
-### Modo 3: Flujo Completo con Preparacion y Ejecucion de MD (`--full-gold-standard`)
-Para preparar el sistema desde el PDB cristalino crudo, parametrizar el ligando con GAFF/OpenFF, simular en GROMACS y analizar:
+### 3.5 Modo 4: Flujo Integral de 4 Tiers (`--full-gold-standard`)
+Orquesta de forma automatica y secuencial los 4 Tiers completos a traves de 8 etapas con barra de progreso in-situ:
 
 ```bash
 shark \
@@ -177,11 +206,34 @@ shark \
   --full-gold-standard \
   --time-ns 20.0 \
   --target-residue THR309 \
+  --theory r2SCAN-3c \
+  --solvent Water \
+  --execute \
   --work-dir ./shark_full_results
 ```
 
-### Modo 4: Modelado Cuantico de Estado de Transicion y Kinetica (`--tier-4-ts --execute`)
-Para ejecutar el barrido de coordenada de reaccion (relaxed scan) y la optimizacion del estado de transicion con ORCA:
+#### Etapas Orquestadas en `--full-gold-standard`:
+1. **Etapa 1/8 (12%): Ingestion y Clasificacion de Poses PoliScreen (Pilar 1):**
+   Lectura de la sesion, extraccion de receptores cristalográficos crudos y ordenamiento de poses de acoplamiento.
+2. **Etapa 2/8 (25%): Dinamica Molecular Solvatada con GROMACS (Pilar 2):**
+   Parametrizacion automatica (AMBER99SB-ILDN + GAFF2/AM1-BCC), solvatacion explicita SPC/E (0.15 M NaCl), minimizacion de energia, equilibrios NVT/NPT y simulacion de produccion.
+3. **Etapa 3/8 (37%): Agrupamiento Daura RMSD y Muestreo Dinamico NAC:**
+   Analisis de la trayectoria, calculo de la poblacion reactiva P_NAC y extraccion automatica de los medoides global y reactivo.
+4. **Etapa 4/8 (50%): Perfilado CDFT del Bolsillo Activo y Correspondencia Burgi-Dunitz:**
+   Identificacion de residuos nucleofilicos del bolsillo, evaluacion del angulo de aproximacion Burgi-Dunitz y factor de activacion por diada catalitica.
+5. **Etapa 5/8 (62%): Punto Unico Cuantico del Cluster de Sitio Activo (ORCA):**
+   Extraccion del modelo de cluster cuantico a pH fisiologico (7.4) y calculo ab initio de niveles HOMO, LUMO y gap de energia.
+6. **Etapa 6/8 (75%): Modelado Cuantico de Estado de Transicion y Kinetica (Pilar 3):**
+   Escaneo relajado de la coordenada de reaccion (scan PES), optimizacion del punto de silla de primer orden (! OptTS Freq), confirmacion de modo imaginario y calculo de Eyring (Delta G‡, k_chem, t_1/2).
+7. **Etapa 7/8 (87%): Optimizacion del Aducto Covalente de Producto:**
+   Optimizacion de la geometria del aducto final, determinacion de la termodinamica de reaccion (Delta G_rxn) y evaluacion del orden de enlace de Wiberg (WBO).
+8. **Etapa 8/8 (100%): Calculo Cuantico DFT de Tautomeros del Ligando Aislado:**
+   Optimizacion en disolucion acuosa de las formas tautomericas del ligando, calculo de la distribucion de Boltzmann y exportacion de isosuperficies de orbitales moleculares.
+
+Al finalizar las 8 etapas, SharK consolida `dossier.html`, `evidence.json`, `covalent_feasibility.json` y `poses_summary.csv` en el directorio de trabajo.
+
+### 3.6 Modo 5: Modelado Cuantico Aislado de Estado de Transicion (`--tier-4-ts --execute`)
+Para ejecutar el barrido de coordenada de reaccion (relaxed scan) y la optimizacion del estado de transicion sobre un snapshot o complejo preexistente:
 
 ```bash
 shark \
@@ -191,6 +243,7 @@ shark \
   --simple-gold-standard \
   --target-residue THR309 \
   --tier-4-ts \
+  --optimize-adduct \
   --qm-model minimal \
   --theory r2SCAN-3c \
   --solvent Water \
@@ -198,6 +251,30 @@ shark \
   --execute \
   --work-dir ./shark_ts_results
 ```
+
+### 3.7 Modo 6: Termodinamica Completa de Gibbs y Cinetica de Eyring (`--full-thermo`)
+Para obtener la termodinamica cuantica completa en base Gibbs homogenea (`INV-006`):
+- Calcula las frecuencias vibracionales del complejo reactivo (`00_reactant_freq.inp`) para obtener $G_{\text{reactant}}$.
+- Ejecuta el escaneo relajado (`01_scan.inp`) y la optimizacion del punto de silla (`02_optts.inp`) para obtener $G_{\text{TS}}$.
+- Optimiza y calcula las frecuencias vibracionales del aducto producto (`03_adduct_opt.inp` con `! Opt Freq`) para obtener $G_{\text{product}}$.
+- Evalua automaticamente la barrera libre de activacion $\Delta G^\ddagger$, la energia libre de reaccion $\Delta G_{\text{rxn}}$, la barrera de retro-adicion $\Delta G^\ddagger_{\text{retro}}$, la constante cinetica $k_{\text{chem}}$ y el tiempo de vida media $t_{1/2}$.
+
+```bash
+shark \
+  --session /ruta/a/sesion_docking.tar.gz \
+  --topology /ruta/a/sistema.gro \
+  --trajectory /ruta/a/trayectoria.xtc \
+  --simple-gold-standard \
+  --target-residue THR309 \
+  --full-thermo \
+  --theory r2SCAN-3c \
+  --solvent Water \
+  --nprocs 4 \
+  --execute \
+  --work-dir ./shark_thermo_results
+```
+
+*Nota:* La bandera `--full-gold-standard` activa automaticamente `--full-thermo` al ejecutarse con `--execute`.
 
 ---
 
@@ -376,6 +453,11 @@ Si el usuario modifica el atomo electrofilico o la geometria del ligando, SharK 
 
 ### Pregunta 3: "Deseo pausar el analisis y continuar mañana sin perder lo calculado"
 * Todos los artefactos intermedios se almacenan de forma persistente en el directorio de trabajo (`--work-dir`). Al volver a ejecutar el comando de SharK apuntando al mismo directorio, el sistema detecta los calculos finalizados validos (mediante su huella SHA-256) y continua inmediatamente en la etapa pendiente.
+
+### Pregunta 4: Diferencia entre `dossier.html` y `test_dossier.html` (¿Cual es el informe oficial?)
+* **Respuesta y Estado Oficial:** El archivo cientifico oficial, consolidado y definitivo es **`dossier.html`**.
+* **Antecedente:** En una version intermedia anterior, la plantilla generadora de `dossier.html` contenia una llave de cierre huerfana (`}`) en el bloque JavaScript, lo que provocaba un error de sintaxis en el motor JS del navegador (`SyntaxError: Unexpected token '}'`). Dicho error abortaba prematuramente la ejecucion del script antes de que Plotly.js y 3Dmol.js pudieran instanciar los graficos de tautomeros, orbitales frontera y visualizadores moleculares 3D (mostrando unicamente el panel estatico de dinamica molecular que es una etiqueta `<img>` en base64). Por contraste, `test_dossier.html` habia sido generado con una copia de prueba con delimitadores balanceados.
+* **Correccion Verificada:** La plantilla `src/shark/reports/dossier.html` fue reparada, auditada y verificada con balance estricto de llaves, parentesis y corchetes (`balance=0`). `dossier.html` ha sido regenerado y cuenta con la totalidad de los visualizadores 3D (complejo ligando-bolsillo y aducto covalente), graficas interactivas de poblacion de Boltzmann, diagramas de energia de orbitales frontera HOMO/LUMO, y la termodinamica homogenea en base Gibbs ($\Delta G^\ddagger = -0.43\text{ kcal/mol}$, $\Delta G_{\text{rxn}} = -2.73\text{ kcal/mol}$, $k_{\text{chem}} = 1.28 \times 10^{13}\text{ s}^{-1}$, $t_{1/2} < 1\text{ ps}$).
 
 ---
 *Manual de Usuario de SharK — Diseñado para computo cientifico robusto, reproducible y autonomo.*

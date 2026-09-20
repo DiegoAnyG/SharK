@@ -386,7 +386,6 @@ if(eqPlotEl && data.tautomers && data.tautomers.length>1){
     }
    }
   }
-}
 document.querySelectorAll('.help-button').forEach(button=>{
  button.onclick=()=>{const box=button.parentElement;const open=box.toggleAttribute('data-open');button.setAttribute('aria-expanded',String(open));};
  button.onkeydown=e=>{if(e.key==='Escape'){button.parentElement.removeAttribute('data-open');button.setAttribute('aria-expanded','false');button.blur();}};

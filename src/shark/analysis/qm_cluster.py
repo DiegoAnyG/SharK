@@ -193,10 +193,17 @@ class QMCluster:
 
         # Route line
         solvent_str = f"CPCM({solvent})" if solvent else ""
-        if job_type.lower() == "scan":
+        jt = job_type.lower()
+        if jt == "scan":
             route = f"! Opt {method} {solvent_str} TightSCF"
-        elif job_type.lower() == "optts":
+        elif jt == "optts":
             route = f"! OptTS Freq {method} {solvent_str} TightSCF"
+        elif jt in ("opt_freq", "optfreq"):
+            route = f"! Opt Freq {method} {solvent_str} TightSCF"
+        elif jt == "freq":
+            route = f"! Freq {method} {solvent_str} TightSCF"
+        elif jt == "opt":
+            route = f"! Opt {method} {solvent_str} TightSCF"
         else:
             route = f"! {method} {solvent_str} TightSCF"
         lines.append(route.strip())

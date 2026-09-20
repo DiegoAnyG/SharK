@@ -251,3 +251,23 @@ def test_prepare_ts_workflow_directory(mock_active_site, tmp_path):
     assert wf_dict["run_script"].is_file()
     assert "run_tier4_ts.sh" in str(wf_dict["run_script"])
 
+
+def test_prepare_ts_workflow_directory_full_thermo(mock_active_site, tmp_path):
+    rec_pdb, lig_pdb = mock_active_site
+    cluster = extract_qm_cluster(
+        receptor_pdb=rec_pdb,
+        ligand_pose=lig_pdb,
+        model_type="minimal",
+        target_residue="THR309",
+    )
+    wf_dir = tmp_path / "ts_wf_thermo"
+    wf_dict = prepare_ts_workflow_directory(cluster, wf_dir, full_thermo=True)
+    assert wf_dict["reactant_freq_inp"].is_file()
+    rf_txt = wf_dict["reactant_freq_inp"].read_text()
+    assert "! Freq" in rf_txt
+    adduct_tmpl = (wf_dir / "03_adduct_opt_template.inp").read_text()
+    assert "! Opt Freq" in adduct_tmpl
+    sh_txt = wf_dict["run_script"].read_text()
+    assert "00_reactant_freq.inp" in sh_txt
+
+
