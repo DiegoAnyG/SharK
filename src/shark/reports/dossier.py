@@ -108,7 +108,16 @@ def _generate_molecule_svg(job: dict, ligand_label: str, width: int = 160, heigh
 
 
 def _number(value, digits=4):
-    return f'{value:.{digits}f}' if isinstance(value, (float, int)) and math.isfinite(value) else 'N/A'
+    if isinstance(value, (float, int)) and math.isfinite(value):
+        return f'{value:.{digits}f}'
+    if isinstance(value, str):
+        try:
+            val_f = float(value)
+            if math.isfinite(val_f):
+                return f'{val_f:.{digits}f}'
+        except (ValueError, TypeError):
+            pass
+    return 'N/A'
 
 
 def _json(value):
@@ -1119,7 +1128,8 @@ def generate_html_dossier(project_name: str, poses_data: list[dict], out_html: s
         dg = ts_info.get('activation_barrier_kcal') if ts_info.get('activation_barrier_kcal') is not None else ts_info.get('delta_g_activation_kcal')
         k_ch = ts_info.get('k_chem') or (covalent_summary.get('total_feasibility', {}).get('k_chem') if covalent_summary else None)
         k_str = f" · k = {k_ch:.1e} s⁻¹" if k_ch else ""
-        card4_title = 'Activation Barrier (ΔE‡) <span class="help-bubble" tabindex="0" data-tooltip="Eyring chemical activation energy barrier derived from ORCA relaxed coordinate scan (Pillar 3).">?</span>'
+        b_sym = ts_info.get('barrier_symbol', 'ΔG‡' if ts_info.get('energy_basis') == 'gibbs' else 'ΔE‡')
+        card4_title = f'Activation Barrier ({b_sym}) <span class="help-bubble" tabindex="0" data-tooltip="Eyring chemical activation energy barrier ({b_sym}) derived from quantum chemical calculation (Pillar 3).">?</span>'
         card4_main = f"{dg:.2f} kcal/mol"
         coord_val = ts_info.get('ts_guess_coord_angstrom')
         coord_str = f"TS at {coord_val:.2f} Å" if coord_val else "Reaction coordinate"
