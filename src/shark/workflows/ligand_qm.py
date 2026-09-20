@@ -16,7 +16,7 @@ from rdkit import Chem, rdBase
 from rdkit.Chem import AllChem
 
 from ..core.frontier import file_hash
-from ..core.session import PoliScreenSession
+from ..core.session import PoliScreenSession, match_receptor_id
 
 
 def _flag(value) -> bool:
@@ -46,7 +46,7 @@ def select_ligands(session: PoliScreenSession, *, top: int = 1, target: str | No
     for row in rows:
         name = row['ligand_id']
         receptor = str(row.get('receptor', ''))
-        if target and receptor != target and receptor.split('~', 1)[0] != target:
+        if target and not match_receptor_id(receptor, target):
             continue
         if wanted and name.casefold() not in wanted:
             continue

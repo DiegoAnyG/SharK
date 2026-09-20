@@ -2,6 +2,7 @@
 
 import json
 from pathlib import Path
+import shutil
 import tempfile
 import zipfile
 import pytest
@@ -110,4 +111,28 @@ def test_cli_covalent_and_run_md(tmp_path):
     assert prepared_run.is_dir()
     assert (prepared_run / "00_prep" / "receptor_raw.pdb").is_file()
     assert (prepared_run / "config.env").is_file()
+
+    # 3. Test that --target 8HTB matches 8HTB_ready~Pk1 and prepares simulation
+    shutil.rmtree(prepared_run)
+    norm_code = cli_main([
+        "--session", str(archive),
+        "--compound", "LIG1",
+        "--target", "8HTB",
+        "--run-md",
+        "--pipeline-dir", str(mock_pipeline),
+        "--time-ns", "5.0"
+    ])
+    assert norm_code == 0
+    assert prepared_run.is_dir()
+
+    # 4. Test that non-existent compound returns exit code 1 and does NOT fall back
+    err_code = cli_main([
+        "--session", str(archive),
+        "--compound", "NON_EXISTENT",
+        "--target", "8HTB",
+        "--run-md",
+        "--pipeline-dir", str(mock_pipeline),
+    ])
+    assert err_code == 1
+
 

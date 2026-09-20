@@ -11,7 +11,7 @@ import shutil
 import sys
 import zipfile
 
-from .core.session import read_poliscreen_session
+from .core.session import read_poliscreen_session, match_receptor_id
 from .core.runner import run_orca_job, run_orca_process, find_orca
 from .reports.dossier import generate_html_dossier
 from .workflows.ligand_qm import prepare_ligand_jobs
@@ -640,6 +640,17 @@ def load_dft_records(dft_dir: Path, report_dir: Path) -> list[dict]:
     return records
 
 
+def report_stage_progress(current_stage: int, total_stages: int, stage_name: str, detail: str = ""):
+    """Print high-visibility stage progress banner for orchestrated workflows."""
+    pct = int((current_stage / total_stages) * 100)
+    bar_len = 24
+    filled = int(bar_len * current_stage / total_stages)
+    bar = "=" * filled + "-" * (bar_len - filled)
+    print(f"\n[STAGE {current_stage}/{total_stages}] [{bar}] {pct}% | {stage_name}")
+    if detail:
+        print(f"        {detail}")
+
+
 def main(argv=None):
     arguments = list(sys.argv[1:] if argv is None else argv)
     if arguments and arguments[0] == 'run-qm':
@@ -664,7 +675,7 @@ def main(argv=None):
     parser.add_argument('--compound', action='append', help='Exact compound name; may be repeated')
     parser.add_argument('--pareto', action='store_true', help='Select recorded Pareto leaders')
     parser.add_argument('--include-controls', action='store_true')
-    parser.add_argument('--dft', action='store_true', help='Prepare isolated-ligand ORCA jobs')
+    parser.add_argument('--dft', '--run-dft', action='store_true', dest='dft', help='Prepare or execute isolated-ligand ORCA jobs')
     parser.add_argument('--execute', action='store_true', help='Execute the prepared DFT jobs now')
     parser.add_argument('--theory', default='r2SCAN-3c', help='ORCA method and basis keywords')
     parser.add_argument('--solvent', default='Water', help='CPCM solvent; gas disables solvent')
@@ -681,10 +692,11 @@ def main(argv=None):
     parser.add_argument('--maxcore', type=int, help='ORCA memory in MB per process')
     parser.add_argument('--timeout', type=float, help='Maximum seconds per ORCA job')
     parser.add_argument('--work-dir', help='New or empty output directory; defaults to SHARK_SCRATCH')
-    parser.add_argument('--html', help='Output HTML dossier path')
+    parser.add_argument('--html', '--generate-dossier', dest='html', help='Output HTML dossier path')
     parser.add_argument('--run-md', '--md', dest='run_md', action='store_true', help='Prepare or launch GROMACS MD simulation using raw receptor')
     parser.add_argument('--pipeline-dir', help='Custom path to GROMACS pipeline root (overrides SHARK_GROMACS_PIPELINE)')
     parser.add_argument('--time-ns', type=float, default=10.0, help='Simulation time in nanoseconds for MD')
+    parser.add_argument('--cluster-nac', '--cluster-trajectory', action='store_true', dest='cluster_nac', help='Execute Daura RMSD clustering & dynamic NAC analysis on trajectory')
     parser.add_argument('--covalent', action='store_true', help='Perform Conceptual DFT reactivity profiling and pocket Near-Attack Conformation matching')
     parser.add_argument('--target-residue', help='Target nucleophile residue to scan (e.g. CYS145, CYS, 145)')
     parser.add_argument('--dft-dir', help='Directory with existing ORCA calculation outputs (.out) to load into report')
@@ -707,6 +719,7 @@ def main(argv=None):
     parser.add_argument('--recalc-hess', type=int, default=25, help='Frequency of exact Hessian recalculation in OptTS (default: 25)')
     parser.add_argument('--mechanism', default='generic_covalent_addition', help='Declared covalent reaction mechanism (e.g. carbonyl_addition, michael_addition, furoxan_heterocycle_attack, aromatic_substitution_snar)')
     parser.add_argument('--optimize-adduct', action='store_true', help='Optimize the covalent adduct product geometry in Tier 4 to obtain Card 4 bond nature metrics')
+    parser.add_argument('--full-thermo', '--gibbs-thermo', action='store_true', dest='full_thermo', help='Compute complete Gibbs free energy thermochemistry (Delta G‡, Delta G_rxn, k_chem, half-life t1/2) by calculating vibrational frequencies on reactant complex and product adduct')
     parser.add_argument('--report-from-evidence', help='Generate HTML dossier directly from an existing evidence.json file without running calculations')
     parser.add_argument('--kill-orphans', action='store_true', help='Scan and safely terminate any orphaned or stuck background ORCA/OpenMPI processes.')
     args = parser.parse_args(arguments)
@@ -767,8 +780,46 @@ def main(argv=None):
             except Exception:
                 pass
 
+        # Check for trajectory plots and md_summary
+        md_summary = None
+        dyn = res.dynamics if hasattr(res, 'dynamics') and isinstance(res.dynamics, dict) else (res.to_dict().get('dynamics') if hasattr(res, 'to_dict') else {})
+        cands_dir = []
+        if isinstance(dyn, dict):
+            if dyn.get('run_dir'):
+                cands_dir.append(Path(dyn['run_dir']))
+                cands_dir.append(Path(dyn['run_dir']) / '00_prep')
+            if dyn.get('trajectory_file'):
+                cands_dir.append(Path(dyn['trajectory_file']).parent)
+                cands_dir.append(Path(dyn['trajectory_file']).parent / '00_prep')
+        cands_dir.extend([
+            ev_file.parent,
+            ev_file.parent / '00_prep',
+            ev_file.parent / 'md',
+            ev_file.parent / 'md' / '00_prep',
+        ])
+        found_plots = {}
+        for cdir in cands_dir:
+            if cdir.is_dir():
+                for p_name in ('md_analysis_dashboard.png', 'plot_rmsd.png', 'plot_rmsf.png', 'plot_gyrate.png', 'plot_hbonds.png'):
+                    pf = cdir / p_name
+                    if pf.is_file() and p_name not in found_plots:
+                        found_plots[p_name] = str(pf.resolve())
+        if found_plots:
+            sim_t = (dyn.get('sim_time_ns') if isinstance(dyn, dict) else None) or (dyn.get('total_sim_time_ns') if isinstance(dyn, dict) else None) or 20.0
+            md_summary = {
+                'run_id': dyn.get('run_id', 'md_production') if isinstance(dyn, dict) else 'md_production',
+                'sim_time_ns': sim_t,
+                'status': 'completed',
+                'run_dir': str(cands_dir[0]) if cands_dir else str(ev_file.parent),
+                'plots': found_plots,
+                'dashboard_path': found_plots.get('md_analysis_dashboard.png'),
+                'clustering': dyn if dyn else None,
+                'force_fields': 'AMBER99SB-ILDN (protein) + GAFF2/AM1-BCC (ligand) + SPC/E (0.15 M NaCl)',
+            }
+
         generate_html_dossier(res.analysis_id or "SharK Analysis", poses_data, out_html,
-                              qm_summary=qm_summary, covalent_summary=cov_summary, result=res)
+                              qm_summary=qm_summary, md_summary=md_summary,
+                              covalent_summary=cov_summary, result=res)
         print(f"[REPORT] Regenerated dossier from evidence: {out_html}")
         return 0
     if args.interactive or not arguments:
@@ -777,6 +828,8 @@ def main(argv=None):
         except (EOFError, KeyboardInterrupt):
             return 130
     if args.fast_analysis:
+        args.covalent = True
+    if args.cluster_nac:
         args.covalent = True
     if args.simple_gold_standard:
         if not (args.topology and args.trajectory):
@@ -787,14 +840,24 @@ def main(argv=None):
             )
             return 1
         args.covalent = True
+        args.cluster_nac = True
     if args.orca_cluster_sp:
         args.covalent = True
     if args.full_gold_standard:
+        args.dft = True
+        args.execute = True
         if not (args.topology and args.trajectory):
             args.run_md = True
         args.covalent = True
+        args.cluster_nac = True
         args.orca_cluster_sp = True
         args.tier_4_ts = True
+        args.optimize_adduct = True
+        args.full_thermo = True
+    if getattr(args, 'full_thermo', False):
+        args.covalent = True
+        args.tier_4_ts = True
+        args.optimize_adduct = True
     if args.tier_4_ts:
         args.covalent = True
     # One persistent root per invocation; explicit --work-dir remains supported.
@@ -844,20 +907,58 @@ def main(argv=None):
         print(f"[SharK] Session '{session.project_name}': {len(session.poses)} indexed poses")
         for warning in session.warnings:
             print(f'[NOTE] {warning}')
+        if args.full_gold_standard:
+            report_stage_progress(1, 8, "PoliScreen Ingestion & Pose Ranking (Pillar 1)", f"Project: {session.project_name} | {len(session.poses)} indexed poses")
 
         def _get_selected_poses():
             if args.compound:
                 selected = []
                 for c in args.compound:
                     matched = [p for p in session.poses if p.ligand_id.casefold() == c.casefold()
-                               and (args.target is None or p.receptor_id == args.target)]
+                               and match_receptor_id(p.receptor_id, args.target)]
                     if matched:
                         if args.pose is not None:
-                            matched = [p for p in matched if p.pose_idx == args.pose]
+                            pose_matches = [p for p in matched if p.pose_idx == args.pose]
+                            if not pose_matches:
+                                avail_poses = sorted(set(p.pose_idx for p in matched))
+                                raise ValueError(
+                                    f"Pose #{args.pose} requested for compound '{c}', but only poses "
+                                    f"{avail_poses} exist matching target '{args.target}'."
+                                )
+                            matched = pose_matches
                         matched.sort(key=lambda p: (p.score if math.isfinite(p.score) else math.inf, p.pose_idx))
                         selected.extend(matched[:args.top])
+                    else:
+                        avail_compounds = sorted(set(p.ligand_id for p in session.poses))
+                        avail_targets = sorted(set(p.receptor_id for p in session.poses))
+                        target_msg = f" against target '{args.target}'" if args.target else ""
+                        raise ValueError(
+                            f"Compound '{c}' not found in session '{session.project_name}'{target_msg}.\n"
+                            f"Available compounds ({len(avail_compounds)}): {avail_compounds[:10]}{'...' if len(avail_compounds) > 10 else ''}\n"
+                            f"Available targets: {avail_targets}"
+                        )
                 if selected:
                     return selected
+            elif args.target:
+                matched = [p for p in session.poses if match_receptor_id(p.receptor_id, args.target)]
+                if not matched:
+                    avail_targets = sorted(set(p.receptor_id for p in session.poses))
+                    raise ValueError(
+                        f"Target '{args.target}' not found in session '{session.project_name}'.\n"
+                        f"Available targets: {avail_targets}"
+                    )
+                if args.pose is not None:
+                    pose_matches = [p for p in matched if p.pose_idx == args.pose]
+                    if not pose_matches:
+                        avail_poses = sorted(set(p.pose_idx for p in matched))
+                        raise ValueError(
+                            f"Pose #{args.pose} requested for target '{args.target}', but only poses "
+                            f"{avail_poses} exist for this target."
+                        )
+                    matched = pose_matches
+                matched.sort(key=lambda p: (p.score if math.isfinite(p.score) else math.inf, p.pose_idx))
+                return matched[:args.top]
+
             poses = session.list_top_poses(args.top)
             if args.pose is not None:
                 poses = [p for p in poses if p.pose_idx == args.pose]
@@ -865,6 +966,8 @@ def main(argv=None):
 
         last_md_res = None
         if args.run_md:
+            if args.full_gold_standard:
+                report_stage_progress(2, 8, "Classical Molecular Dynamics Simulation (GROMACS)", f"{args.time_ns:.1f} ns solvated production")
             from .workflows.md_pipeline import run_md_from_session
             selected_poses = _get_selected_poses()
 
@@ -887,7 +990,7 @@ def main(argv=None):
                 print(f"[MD] Status: {res.status} | Directory: {res.run_dir}")
                 if res.dashboard_path:
                     print(f"[MD] Dashboard: {res.dashboard_path}")
-                if args.full_gold_standard and res.status == 'completed':
+                if (args.full_gold_standard or args.covalent or getattr(args, 'cluster_nac', False)) and res.status == 'completed':
                     gro_cand = res.run_dir / '00_prep' / 'md_prod.gro'
                     xtc_cand = res.run_dir / '00_prep' / 'md_noPBC.xtc'
                     if not gro_cand.is_file():
@@ -898,7 +1001,7 @@ def main(argv=None):
                         args.topology = str(gro_cand)
                         args.trajectory = str(xtc_cand)
                         print(f'[MD] Linking trajectory for clustering: {xtc_cand}')
-            if not args.full_gold_standard:
+            if not (args.full_gold_standard or args.covalent or getattr(args, 'cluster_nac', False) or args.tier_4_ts or args.dft):
                 return 0
 
         covalent_summary = None
@@ -911,6 +1014,8 @@ def main(argv=None):
             cluster_rep = None
 
             if args.trajectory and args.topology:
+                if args.full_gold_standard or getattr(args, 'cluster_nac', False):
+                    report_stage_progress(3, 8, "Trajectory Clustering & Dynamic NAC Sampling (Pillar 2)", f"Daura RMSD clustering (cutoff: {args.cluster_cutoff} Å)")
                 from .analysis.trajectory_cluster import cluster_trajectory
                 print(f'[CLUSTERING] Performing Daura RMSD clustering on {args.trajectory}...')
                 if args.work_dir:
@@ -973,6 +1078,9 @@ def main(argv=None):
                     'trajectory_file': str(Path(args.trajectory).resolve()) if getattr(args, 'trajectory', None) else None,
                     'run_dir': str(Path(args.trajectory).resolve().parent) if getattr(args, 'trajectory', None) else None,
                 }
+
+            if args.full_gold_standard:
+                report_stage_progress(4, 8, "Active-Site Pocket Conceptual DFT & Bürgi-Dunitz Matching", f"Target residue: {args.target_residue or 'Auto-detect'}")
 
             all_contacts, nac_contacts, pocket_nucls, summaries = [], [], [], []
             rep = None
@@ -1165,6 +1273,8 @@ def main(argv=None):
                     covalent_summary['target_residue_atoms'] = cluster_res_atoms
 
             if args.orca_cluster_sp:
+                if args.full_gold_standard:
+                    report_stage_progress(5, 8, "Active-Site Cluster QM Single-Point (Pillar 3)", f"Method: {args.theory} | Solvent: {args.solvent}")
                 if args.work_dir:
                     cluster_work_dir = Path(args.work_dir) / 'cluster_qm'
                 else:
@@ -1187,6 +1297,8 @@ def main(argv=None):
                     print(f"[NOTE] Cluster QM single-point skipped or failed: {cluster_qm_res.error_message}")
 
             if args.tier_4_ts:
+                if args.full_gold_standard:
+                    report_stage_progress(6, 8, "Tier 4 Transition State Modeling (Pillar 3)", f"Scan: {args.scan_steps} steps | OptTS + Freq verification")
                 if args.work_dir:
                     ts_work_dir = Path(args.work_dir) / 'transition_state'
                 else:
@@ -1276,6 +1388,7 @@ def main(argv=None):
                     nprocs=ts_nprocs,
                     maxcore_mb=ts_maxcore,
                     recalc_hess=getattr(args, 'recalc_hess', 25),
+                    full_thermo=getattr(args, 'full_thermo', False),
                 )
                 print(f"[TIER 4] Workflow prepared at: {ts_work_dir}")
                 print(f"[TIER 4] Scan input: {wf['scan_inp']}")
@@ -1324,6 +1437,24 @@ def main(argv=None):
                         return 1
 
                     orca_real = str(orca_bin)
+                    if getattr(args, 'full_thermo', False) and (ts_work_dir / '00_reactant_freq.inp').is_file():
+                        rf_out = ts_work_dir / '00_reactant_freq.out'
+                        rf_done = False
+                        if rf_out.is_file():
+                            txt = rf_out.read_text(encoding='utf-8', errors='ignore')
+                            if "VIBRATIONAL FREQUENCIES" in txt and ("ORCA TERMINATED NORMALLY" in txt or "SUCCESS" in txt or "TOTAL RUN TIME" in txt):
+                                rf_done = True
+                        if rf_done:
+                            print(f"[TIER 4] [Step 0/4] Found existing completed reactant frequency calculation ({rf_out.name}), skipping re-run.")
+                        else:
+                            print(f"[TIER 4] [Step 0/4] Executing reactant vibrational frequencies with {orca_real} (Gibbs free energy)...")
+                            run_orca_process(
+                                executable=orca_real,
+                                input_file='00_reactant_freq.inp',
+                                output_file='00_reactant_freq.out',
+                                cwd=ts_work_dir,
+                                check_normal_termination=False,
+                            )
                     if scan_res and scan_res.points and scan_is_complete:
                         print(f"[TIER 4] [Step 1/3] Found existing completed coordinate scan ({len(scan_res.points)} steps), skipping re-run.")
                     else:
@@ -1412,6 +1543,8 @@ def main(argv=None):
 
                     # Step 4/4 (Optional): Covalent product adduct optimization
                     if (getattr(args, 'optimize_adduct', False) or (ts_work_dir / '03_adduct_opt.inp').is_file()) and (ts_work_dir / '03_adduct_opt_template.inp').is_file():
+                        if args.full_gold_standard:
+                            report_stage_progress(7, 8, "Covalent Adduct Product Optimization & Thermodynamics", "Adduct Opt + Freq (Delta G_rxn)")
                         adduct_inp = ts_work_dir / '03_adduct_opt.inp'
                         adduct_out = ts_work_dir / '03_adduct_opt.out'
                         if not adduct_inp.is_file():
@@ -1433,6 +1566,46 @@ def main(argv=None):
                                 check_normal_termination=False,
                             )
 
+                    def _extract_tier4_energies(t_dir, s_res, t_verif):
+                        r_el = s_res.points[0].energy_hartree if s_res and s_res.points else None
+                        r_g = None
+                        t_el = t_verif.electronic_energy_hartree if t_verif and t_verif.electronic_energy_hartree != 0.0 else (s_res.max_energy_hartree if s_res else None)
+                        t_g = t_verif.gibbs_free_energy_hartree if t_verif and t_verif.gibbs_free_energy_hartree != 0.0 else None
+                        p_el = s_res.points[-1].energy_hartree if s_res and s_res.points else None
+                        p_g = None
+
+                        if t_dir and Path(t_dir).is_dir():
+                            tw = Path(t_dir)
+                            for r_name in ('00_reactant_freq.out', '00_reactants_freq.out'):
+                                rf = tw / r_name
+                                if rf.is_file():
+                                    try:
+                                        from .core.parser import parse_orca_results
+                                        r_calc = parse_orca_results(rf, name="Reactants")
+                                        if r_calc.gibbs_energy and math.isfinite(r_calc.gibbs_energy):
+                                            r_g = r_calc.gibbs_energy
+                                        if r_calc.el_energy and math.isfinite(r_calc.el_energy):
+                                            r_el = r_calc.el_energy
+                                        break
+                                    except Exception:
+                                        pass
+
+                            for p_name in ('03_adduct_freq.out', '03_adduct_opt.out'):
+                                pf = tw / p_name
+                                if pf.is_file():
+                                    try:
+                                        from .core.parser import parse_orca_results
+                                        p_calc = parse_orca_results(pf, name="Product_Adduct")
+                                        if p_calc.gibbs_energy and math.isfinite(p_calc.gibbs_energy):
+                                            p_g = p_calc.gibbs_energy
+                                        if p_calc.el_energy and math.isfinite(p_calc.el_energy):
+                                            p_el = p_calc.el_energy
+                                        break
+                                    except Exception:
+                                        pass
+
+                        return r_el, r_g, t_el, t_g, p_el, p_g
+
                     ts_verif = None
                     prop_path = optts_out.with_suffix('.property.txt')
                     if not prop_path.is_file():
@@ -1444,12 +1617,7 @@ def main(argv=None):
                         except Exception:
                             ts_verif = None
 
-                    reactants_el = scan_res.points[0].energy_hartree if scan_res and scan_res.points else None
-                    reactants_g = None
-                    ts_el = ts_verif.electronic_energy_hartree if ts_verif and ts_verif.electronic_energy_hartree != 0.0 else (scan_res.max_energy_hartree if scan_res else None)
-                    ts_g = ts_verif.gibbs_free_energy_hartree if ts_verif and ts_verif.gibbs_free_energy_hartree != 0.0 else None
-                    prod_el = scan_res.points[-1].energy_hartree if scan_res and scan_res.points else None
-                    prod_g = None
+                    reactants_el, reactants_g, ts_el, ts_g, prod_el, prod_g = _extract_tier4_energies(ts_work_dir, scan_res, ts_verif)
 
                     profile = compute_reaction_profile(
                         reactants_electronic=reactants_el,
@@ -1509,12 +1677,7 @@ def main(argv=None):
                             ts_verif = parse_orca_ts_output(optts_candidate, property_file_path=prop_path if prop_path.is_file() else None)
                         except Exception:
                             ts_verif = None
-                        reactants_el = scan_res.points[0].energy_hartree if scan_res.points else None
-                        reactants_g = None
-                        ts_el = ts_verif.electronic_energy_hartree if ts_verif and ts_verif.electronic_energy_hartree != 0.0 else scan_res.max_energy_hartree
-                        ts_g = ts_verif.gibbs_free_energy_hartree if ts_verif and ts_verif.gibbs_free_energy_hartree != 0.0 else None
-                        prod_el = scan_res.points[-1].energy_hartree if scan_res.points else None
-                        prod_g = None
+                        reactants_el, reactants_g, ts_el, ts_g, prod_el, prod_g = _extract_tier4_energies(ts_work_dir, scan_res, ts_verif)
                         profile = compute_reaction_profile(
                             reactants_electronic=reactants_el,
                             ts_electronic=ts_el,
@@ -1704,6 +1867,8 @@ def main(argv=None):
                 print(f"[NOTE] Could not generate 3Dmol adduct viewer: {e}")
 
         if args.dft:
+            if args.full_gold_standard:
+                report_stage_progress(8, 8, "Isolated Ligand DFT & Frontier Orbitals", f"Theory: {args.theory} | Solvent: {args.solvent}")
             jobs = prepare_ligand_jobs(
                 session, Path(args.work_dir) / 'quantum', top=args.top, target=args.target, compounds=args.compound,
                 pareto=args.pareto, include_controls=args.include_controls, method=args.theory,
@@ -1734,11 +1899,13 @@ def main(argv=None):
                         'electrophilicity_ev': desc.electrophilicity_ev,
                         'softness_ev': desc.softness_ev,
                     }
-            generate_html_dossier(session.project_name, [], out_file, qm_summary={'jobs': records},
-                                  covalent_summary=covalent_summary)
-            print(f'[REPORT] {out_file}')
-            return int(args.execute and any(r['status'] != 'completed' or
-                       r.get('orbital_export', {}).get('status') == 'failed' for r in records))
+            qm_summary = {'jobs': records}
+            if not (args.full_gold_standard or args.covalent or getattr(args, 'cluster_nac', False) or args.run_md):
+                generate_html_dossier(session.project_name, [], out_file, qm_summary={'jobs': records},
+                                      covalent_summary=covalent_summary)
+                print(f'[REPORT] {out_file}')
+                return int(args.execute and any(r['status'] != 'completed' or
+                           r.get('orbital_export', {}).get('status') == 'failed' for r in records))
         poses = _get_selected_poses()
         poses_data = [dict(ligand_id=p.ligand_id, pose_idx=p.pose_idx,
                            score=p.score if math.isfinite(p.score) else None) for p in poses]
@@ -1757,8 +1924,9 @@ def main(argv=None):
                 root.mkdir(parents=True, exist_ok=True)
                 out_file = Path(tempfile.mkdtemp(prefix='shark-dft-report-', dir=root)) / 'dossier.html'
 
-        qm_summary = None
-        if not args.dft_dir:
+        if 'qm_summary' not in locals() or qm_summary is None:
+            qm_summary = None
+        if qm_summary is None and not args.dft_dir:
             cands = []
             if args.compound:
                 for c in args.compound:
@@ -1783,44 +1951,47 @@ def main(argv=None):
                     print(f"[DFT] Auto-detected existing DFT calculation directory: {d_cand}")
                     break
 
-        if args.dft_dir:
+        if args.dft_dir and qm_summary is None:
             dft_path = Path(args.dft_dir)
             if dft_path.is_dir():
                 records = load_dft_records(dft_path, out_file.parent)
                 if records:
                     qm_summary = {'jobs': records}
                     print(f"[DFT] Loaded {len(records)} existing quantum calculation(s) from {dft_path}")
-                    for p_dict in poses_data:
-                        cand_rec = records[0]
-                        for r in records:
-                            r_id = r.get('selection', {}).get('ligand_id', '')
-                            if r_id.casefold() in p_dict['ligand_id'].casefold() or p_dict['ligand_id'].casefold() in r_id.casefold():
-                                cand_rec = r
-                                break
-                        orb = cand_rec.get('results', {}).get('orbitals', {}).get('0', {})
-                        if orb:
-                            h = orb.get('homo', {}).get('energy_eV')
-                            l = orb.get('lumo', {}).get('energy_eV')
-                            g = orb.get('gap_ev')
-                            if h is not None:
-                                p_dict['homo_ev'] = h
-                            if l is not None:
-                                p_dict['lumo_ev'] = l
-                            if g is not None:
-                                p_dict['gap_ev'] = g
-                    if covalent_summary and 'cdft' not in covalent_summary:
-                        first_orb = records[0].get('results', {}).get('orbitals', {}).get('0', {})
-                        h = first_orb.get('homo', {}).get('energy_eV')
-                        l = first_orb.get('lumo', {}).get('energy_eV')
-                        if h is not None and l is not None:
-                            from .analysis.reactivity import calculate_cdft_descriptors
-                            desc = calculate_cdft_descriptors(homo_ev=h, lumo_ev=l)
-                            covalent_summary['cdft'] = {
-                                'hardness_ev': desc.hardness_ev,
-                                'chemical_potential_ev': desc.chemical_potential_ev,
-                                'electrophilicity_ev': desc.electrophilicity_ev,
-                                'softness_ev': desc.softness_ev,
-                            }
+
+        if qm_summary and qm_summary.get('jobs'):
+            records = qm_summary['jobs']
+            for p_dict in poses_data:
+                cand_rec = records[0]
+                for r in records:
+                    r_id = r.get('selection', {}).get('ligand_id', '')
+                    if r_id.casefold() in p_dict['ligand_id'].casefold() or p_dict['ligand_id'].casefold() in r_id.casefold():
+                        cand_rec = r
+                        break
+                orb = cand_rec.get('results', {}).get('orbitals', {}).get('0', {})
+                if orb:
+                    h = orb.get('homo', {}).get('energy_eV')
+                    l = orb.get('lumo', {}).get('energy_eV')
+                    g = orb.get('gap_ev')
+                    if h is not None:
+                        p_dict['homo_ev'] = h
+                    if l is not None:
+                        p_dict['lumo_ev'] = l
+                    if g is not None:
+                        p_dict['gap_ev'] = g
+            if covalent_summary and 'cdft' not in covalent_summary:
+                first_orb = records[0].get('results', {}).get('orbitals', {}).get('0', {})
+                h = first_orb.get('homo', {}).get('energy_eV')
+                l = first_orb.get('lumo', {}).get('energy_eV')
+                if h is not None and l is not None:
+                    from .analysis.reactivity import calculate_cdft_descriptors
+                    desc = calculate_cdft_descriptors(homo_ev=h, lumo_ev=l)
+                    covalent_summary['cdft'] = {
+                        'hardness_ev': desc.hardness_ev,
+                        'chemical_potential_ev': desc.chemical_potential_ev,
+                        'electrophilicity_ev': desc.electrophilicity_ev,
+                        'softness_ev': desc.softness_ev,
+                    }
 
         from .core.analysis_result import SharKAnalysisResult
         out_dir = out_file.parent

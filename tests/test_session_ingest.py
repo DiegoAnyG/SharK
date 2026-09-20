@@ -105,3 +105,29 @@ def test_producer_export_can_be_read(tmp_path):
     assert result.manifest['format'] == 1
     assert result.ligand_files['candidate'].name == 'candidate.mol'
     assert result.poses == []
+
+
+def test_match_receptor_id():
+    from shark.core.session import match_receptor_id
+    assert match_receptor_id('8HTB_ready', '8HTB') is True
+    assert match_receptor_id('8HTB_ready~Pk1', '8HTB') is True
+    assert match_receptor_id('8HTB_ready~Pk1', '8HTB_ready') is True
+    assert match_receptor_id('8HTB_clean', '8HTB') is True
+    assert match_receptor_id('8HTB_prep', '8HTB') is True
+    assert match_receptor_id('4D44_ready', '8HTB') is False
+    assert match_receptor_id('8HTB', None) is True
+    assert match_receptor_id('8HTB', '') is True
+    assert match_receptor_id(None, '8HTB') is False
+
+
+def test_case_insensitive_and_target_normalized_pose_lookup(sample_session_zip, tmp_path):
+    session = read_poliscreen_session(sample_session_zip, tmp_path / 'unpacked_lookup')
+    # Original pose stored with ligand_id='LIG_A' and receptor_id='target'
+    pose = session.get_pose('lig_a', 1, 'target')
+    assert pose is not None
+    assert pose.ligand_id == 'LIG_A'
+    # Check that receptor normalization works with get_pose
+    pose_norm = session.get_pose('lig_a', 1, 'target_ready')
+    assert pose_norm is not None
+    assert pose_norm.ligand_id == 'LIG_A'
+

@@ -33,6 +33,45 @@ class DockingPose:
     metadata: dict = field(default_factory=dict)
 
 
+def match_receptor_id(candidate: str | None, target: str | None) -> bool:
+    """Robust matcher between receptor IDs and user target queries.
+
+    Handles:
+    - None or empty target (matches anything)
+    - Exact case-insensitive match (e.g. '8HTB_ready' == '8htb_ready')
+    - Pocket stripping (e.g. '8HTB_ready~Pk1' matches '8HTB_ready' or '8HTB')
+    - Preparation suffix stripping (e.g. '8HTB_ready', '8HTB_prep', '8HTB_clean' match '8HTB')
+    """
+    if target is None:
+        return True
+    if candidate is None:
+        return False
+    cand_str = str(candidate).strip()
+    tgt_str = str(target).strip()
+    if not tgt_str:
+        return True
+    if cand_str.casefold() == tgt_str.casefold():
+        return True
+    # If target explicitly specifies a pocket (~...), candidate must match that pocket
+    cand_has_pocket = "~" in cand_str
+    tgt_has_pocket = "~" in tgt_str
+    if tgt_has_pocket:
+        if not cand_has_pocket:
+            return False
+        cand_pocket = cand_str.split("~", 1)[1].strip().casefold()
+        tgt_pocket = tgt_str.split("~", 1)[1].strip().casefold()
+        if cand_pocket != tgt_pocket:
+            return False
+
+    cand_stem = cand_str.split("~", 1)[0].casefold()
+    tgt_stem = tgt_str.split("~", 1)[0].casefold()
+    if cand_stem == tgt_stem:
+        return True
+    cand_base = re.sub(r"_(?:ready|prep|docking|prepared|clean)$", "", cand_stem, flags=re.IGNORECASE)
+    tgt_base = re.sub(r"_(?:ready|prep|docking|prepared|clean)$", "", tgt_stem, flags=re.IGNORECASE)
+    return cand_base == tgt_base
+
+
 @dataclass
 class PoliScreenSession:
     session_file: Path
@@ -58,8 +97,8 @@ class PoliScreenSession:
 
     def get_pose(self, ligand_id: str, pose_idx: int = 1,
                  receptor_id: str | None = None) -> DockingPose | None:
-        matches = [p for p in self.poses if p.ligand_id == ligand_id and p.pose_idx == pose_idx
-                   and (receptor_id is None or p.receptor_id == receptor_id)]
+        matches = [p for p in self.poses if p.ligand_id.casefold() == ligand_id.casefold() and p.pose_idx == pose_idx
+                   and match_receptor_id(p.receptor_id, receptor_id)]
         if len(matches) > 1:
             raise ValueError("Ambiguous pose; specify receptor_id including its pocket identifier")
         return matches[0] if matches else None
