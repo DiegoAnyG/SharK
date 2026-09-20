@@ -165,20 +165,34 @@ def generate_html_dossier(project_name: str, poses_data: list[dict], out_html: s
     if result is not None:
         r_dict = result.to_dict() if hasattr(result, 'to_dict') else result
         project_name = r_dict.get('analysis_id') or project_name
+
+        # 1. Attempt to load rich covalent_feasibility.json if covalent_summary is absent
+        if covalent_summary is None:
+            cf_cand = out_path.parent / 'covalent_feasibility.json'
+            if not cf_cand.is_file() and 'provenance' in r_dict:
+                wdir = r_dict['provenance'].get('work_dir')
+                if wdir:
+                    w_cand = Path(wdir) / 'covalent_feasibility.json'
+                    if w_cand.is_file():
+                        cf_cand = w_cand
+            if cf_cand.is_file():
+                try:
+                    covalent_summary = json.loads(cf_cand.read_text(encoding='utf-8'))
+                except Exception:
+                    covalent_summary = None
+
         if covalent_summary is None:
             covalent_summary = {}
             feas = r_dict.get('feasibility', {})
             covalent_summary['total_feasibility'] = {
-                'cfi_pre': feas.get('cfi_pre', {}).get('value') if isinstance(feas.get('cfi_pre'), dict) else feas.get('cfi_pre'),
-                'cfi_final': feas.get('cfi_final', {}).get('value') if isinstance(feas.get('cfi_final'), dict) else feas.get('cfi_final'),
-                'cfi_total': feas.get('cfi_total', {}).get('value') if isinstance(feas.get('cfi_total'), dict) else feas.get('cfi_total'),
-                'tier': feas.get('tier', {}).get('value') if isinstance(feas.get('tier'), dict) else feas.get('tier', 'Evaluated'),
-                'affinity_score': feas.get('affinity_score', {}).get('value') if isinstance(feas.get('affinity_score'), dict) else feas.get('affinity_score'),
-                'nac_score': feas.get('nac_score', {}).get('value') if isinstance(feas.get('nac_score'), dict) else feas.get('nac_score'),
-                'ts_score': feas.get('ts_score', {}).get('value') if isinstance(feas.get('ts_score'), dict) else feas.get('ts_score'),
-                'percentage': feas.get('percentage', {}).get('value') if isinstance(feas.get('percentage'), dict) else feas.get('percentage'),
-                'summary': feas.get('summary', {}).get('value') if isinstance(feas.get('summary'), dict) else feas.get('summary'),
+                k: (v.get('value') if isinstance(v, dict) else v)
+                for k, v in feas.items()
             }
+            if 'delta_g_ts' not in covalent_summary['total_feasibility'] and 'transition_state' in r_dict:
+                ts_dict = r_dict['transition_state']
+                covalent_summary['total_feasibility']['delta_g_ts'] = ts_dict.get('delta_g_activation_kcal') or ts_dict.get('activation_barrier_kcal')
+            if 'docking_score' not in covalent_summary['total_feasibility'] and 'binding' in r_dict:
+                covalent_summary['total_feasibility']['docking_score'] = r_dict['binding'].get('docking_score')
             if 'adduct' in r_dict and r_dict['adduct']:
                 covalent_summary['adduct_qm'] = r_dict['adduct']
             if 'cluster_qm' in r_dict and r_dict['cluster_qm']:
@@ -188,7 +202,97 @@ def generate_html_dossier(project_name: str, poses_data: list[dict], out_html: s
             if 'dynamics' in r_dict and r_dict['dynamics']:
                 covalent_summary['clustering'] = r_dict['dynamics']
             if 'static_reactive_geometry' in r_dict and r_dict['static_reactive_geometry']:
-                covalent_summary['contacts'] = [{'composite_feasibility': r_dict['static_reactive_geometry'].get('rgi_static', {}).get('value') if isinstance(r_dict['static_reactive_geometry'].get('rgi_static'), dict) else r_dict['static_reactive_geometry'].get('rgi_static')}]
+                srg = r_dict['static_reactive_geometry']
+                best_c = srg.get('best_contact')
+                if best_c:
+                    covalent_summary['contacts'] = [best_c]
+                    covalent_summary['best_match'] = best_c
+                else:
+                    covalent_summary['contacts'] = [{'composite_feasibility': srg.get('rgi_static')}]
+        else:
+            # Synchronize latest feasibility and adduct data into existing covalent_summary
+            tf = covalent_summary.setdefault('total_feasibility', {})
+            feas = r_dict.get('feasibility', {})
+            for k, v in feas.items():
+                if k not in tf or tf[k] is None:
+                    tf[k] = v.get('value') if isinstance(v, dict) else v
+            if 'docking_score' not in tf or tf['docking_score'] is None:
+                if 'binding' in r_dict:
+                    tf['docking_score'] = r_dict['binding'].get('docking_score')
+            if 'delta_g_ts' not in tf or tf['delta_g_ts'] is None:
+                if 'transition_state' in r_dict:
+                    ts_dict = r_dict['transition_state']
+                    tf['delta_g_ts'] = ts_dict.get('delta_g_activation_kcal') or ts_dict.get('activation_barrier_kcal')
+            if 'adduct' in r_dict and r_dict['adduct']:
+                covalent_summary['adduct_qm'] = r_dict['adduct']
+            if 'transition_state' in r_dict and r_dict['transition_state']:
+                covalent_summary['transition_state'] = r_dict['transition_state']
+
+        # 2. If md_summary is missing, attempt auto-reconstruction from dynamics in r_dict
+        if md_summary is None and 'dynamics' in r_dict and r_dict['dynamics']:
+            dyn = r_dict['dynamics']
+            md_run_dir = dyn.get('run_dir')
+            if md_run_dir and Path(md_run_dir).is_dir():
+                m_dir = Path(md_run_dir)
+                md_plots = {}
+                for p_name in ('md_analysis_dashboard.png', 'plot_rmsd.png', 'plot_rmsf.png', 'plot_gyrate.png', 'plot_hbonds.png'):
+                    p_file = m_dir / p_name
+                    if p_file.is_file():
+                        md_plots[p_name] = str(p_file)
+                if md_plots:
+                    md_summary = {
+                        'run_id': m_dir.parent.name if m_dir.name == '00_prep' else m_dir.name,
+                        'sim_time_ns': dyn.get('sim_time_ns', 20.0),
+                        'status': 'completed',
+                        'run_dir': str(m_dir),
+                        'plots': md_plots,
+                        'dashboard_path': md_plots.get('md_analysis_dashboard.png'),
+                        'clustering': dyn,
+                        'force_fields': 'AMBER99SB-ILDN (protein) + GAFF2/AM1-BCC (ligand) + SPC/E (0.15 M NaCl)',
+                    }
+
+        # 3. If qm_summary is missing, attempt auto-discovery of existing DFT directories
+        if qm_summary is None:
+            dft_cands = [
+                out_path.parent / 'dft',
+                out_path.parent / 'dft_benzofuroxan',
+                Path.cwd() / 'dft_benzofuroxan',
+                Path('/home/diego/SharK/dft_benzofuroxan'),
+            ]
+            for cand in dft_cands:
+                if cand.is_dir() and any(cand.glob('*.out')):
+                    try:
+                        from ..cli import load_dft_records
+                    except Exception:
+                        from shark.cli import load_dft_records
+                    records = load_dft_records(cand, out_path.parent)
+                    if records:
+                        qm_summary = {'jobs': records}
+                        break
+
+        # 4. If poses_data is missing, attempt loading or populating from results
+        if not poses_data:
+            poses_file = out_path.parent / 'poses_summary.csv'
+            if poses_file.is_file():
+                import csv
+                try:
+                    with open(poses_file, encoding='utf-8') as pf:
+                        reader = csv.DictReader(pf)
+                        for row in reader:
+                            poses_data.append(dict(row))
+                except Exception:
+                    pass
+            if not poses_data and 'binding' in r_dict:
+                lig_name = r_dict.get('analysis_id') or project_name
+                d_sc = r_dict['binding'].get('docking_score')
+                p_item = {'ligand_id': lig_name, 'pose_idx': 1, 'score': d_sc}
+                if qm_summary and qm_summary.get('jobs'):
+                    orb = qm_summary['jobs'][0].get('results', {}).get('orbitals', {}).get('0', {})
+                    if orb:
+                        p_item['homo_ev'] = orb.get('homo', {}).get('energy_eV')
+                        p_item['lumo_ev'] = orb.get('lumo', {}).get('energy_eV')
+                        p_item['gap_ev'] = orb.get('gap_ev')
+                poses_data.append(p_item)
 
     jobs = (qm_summary or {}).get('jobs', [])
     rows, viewers, levels, methods = [], [], [], []

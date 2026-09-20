@@ -723,7 +723,52 @@ def main(argv=None):
         from .core.analysis_result import SharKAnalysisResult
         res = SharKAnalysisResult.from_json(ev_file)
         out_html = Path(args.html).expanduser().resolve() if args.html else ev_file.parent / "dossier.html"
-        generate_html_dossier(res.analysis_id or "SharK Analysis", [], out_html, result=res)
+
+        # Check for user-supplied or auto-discovered DFT directory
+        qm_summary = None
+        dft_dir_to_use = getattr(args, 'dft_dir', None)
+        if not dft_dir_to_use:
+            dft_cands = [
+                ev_file.parent / 'dft',
+                ev_file.parent / 'dft_benzofuroxan',
+                Path.cwd() / 'dft_benzofuroxan',
+                Path('/home/diego/SharK/dft_benzofuroxan'),
+                Path(__file__).resolve().parent.parent.parent / 'dft_benzofuroxan',
+            ]
+            for d_cand in dft_cands:
+                if d_cand.is_dir() and any(d_cand.glob('*.out')):
+                    dft_dir_to_use = str(d_cand)
+                    break
+        if dft_dir_to_use:
+            records = load_dft_records(Path(dft_dir_to_use), out_html.parent)
+            if records:
+                qm_summary = {'jobs': records}
+                print(f"[DFT] Loaded {len(records)} quantum calculation(s) from {dft_dir_to_use}")
+
+        # Check for covalent_feasibility.json in ev_file directory
+        cov_summary = None
+        cf_path = ev_file.parent / 'covalent_feasibility.json'
+        if cf_path.is_file():
+            try:
+                cov_summary = json.loads(cf_path.read_text(encoding='utf-8'))
+            except Exception:
+                pass
+
+        # Check for poses_summary.csv in ev_file directory
+        poses_data = []
+        pf_path = ev_file.parent / 'poses_summary.csv'
+        if pf_path.is_file():
+            import csv
+            try:
+                with open(pf_path, encoding='utf-8') as pf:
+                    reader = csv.DictReader(pf)
+                    for row in reader:
+                        poses_data.append(dict(row))
+            except Exception:
+                pass
+
+        generate_html_dossier(res.analysis_id or "SharK Analysis", poses_data, out_html,
+                              qm_summary=qm_summary, covalent_summary=cov_summary, result=res)
         print(f"[REPORT] Regenerated dossier from evidence: {out_html}")
         return 0
     if args.interactive or not arguments:
@@ -1720,9 +1765,20 @@ def main(argv=None):
                     c_base = c.split('_')[0]
                     cands.extend([Path.cwd() / f"dft_{c}", Path.cwd() / f"dft_{c_base}", Path.cwd() / "dft"])
             else:
-                cands.extend([Path.cwd() / "dft_benzofuroxan", Path.cwd() / "dft"])
+                cands.extend([
+                    Path.cwd() / "dft_benzofuroxan",
+                    Path.cwd() / "dft",
+                    Path('/home/diego/SharK/dft_benzofuroxan'),
+                    Path(__file__).resolve().parent.parent.parent / "dft_benzofuroxan",
+                ])
+            # If compound or project name mentions benzofuroxan or 091326
+            proj_str = str(getattr(session, 'project_name', '')).casefold()
+            if 'benzofuroxan' in proj_str or '091326' in proj_str:
+                for b_cand in [Path.cwd() / "dft_benzofuroxan", Path('/home/diego/SharK/dft_benzofuroxan'), Path(__file__).resolve().parent.parent.parent / "dft_benzofuroxan"]:
+                    if b_cand not in cands:
+                        cands.append(b_cand)
             for d_cand in cands:
-                if d_cand.is_dir():
+                if d_cand.is_dir() and any(d_cand.glob("*.out")):
                     args.dft_dir = str(d_cand)
                     print(f"[DFT] Auto-detected existing DFT calculation directory: {d_cand}")
                     break

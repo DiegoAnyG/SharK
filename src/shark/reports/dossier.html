@@ -162,215 +162,230 @@ if(eqPlotEl && data.tautomers && data.tautomers.length>1){
   document.querySelectorAll('.help-bubble.active').forEach(el=>el.classList.remove('active'));
  });
  if(data.mesh){const traces=[];for(const [key,color] of [['pos','#2878B5'],['neg','#D64B40']])if(data.mesh[key])traces.push({type:'mesh3d',...data.mesh[key],color,name:key});if(data.mesh.atoms)traces.push({type:'scatter3d',mode:'markers',...data.mesh.atoms,marker:{size:data.mesh.atoms.size||5,color:data.mesh.atoms.color||'#526277'}});Plotly.newPlot('legacy-mesh',traces,{height:480,scene:{aspectmode:'data'}},{responsive:true});}
- if(data.covalent){
-  const cov=data.covalent;
-  const cov3dEl=document.getElementById('covalent-3d-plot');
-  if(cov3dEl){
-   const traces3d=[];
-   const pResAtoms=cov.pocket_residue_atoms||[];
-   if(pResAtoms.length>0){
-    const px=pResAtoms.map(a=>a.x),py=pResAtoms.map(a=>a.y),pz=pResAtoms.map(a=>a.z);
-    const pt=pResAtoms.map(a=>a.residue+' ('+a.atom+')');
-    const pbx=[],pby=[],pbz=[];
-    for(let i=0;i<pResAtoms.length;i++){
-     for(let j=i+1;j<pResAtoms.length;j++){
-      const d2=(pResAtoms[i].x-pResAtoms[j].x)**2+(pResAtoms[i].y-pResAtoms[j].y)**2+(pResAtoms[i].z-pResAtoms[j].z)**2;
-      if(d2>=0.8&&d2<=3.24){
-       pbx.push(pResAtoms[i].x,pResAtoms[j].x,null);
-       pby.push(pResAtoms[i].y,pResAtoms[j].y,null);
-       pbz.push(pResAtoms[i].z,pResAtoms[j].z,null);
-      }
-     }
-    }
-    if(pbx.length>0){
-     traces3d.push({type:'scatter3d',mode:'lines',x:pbx,y:pby,z:pbz,line:{color:'#cbd5e1',width:1.5},hoverinfo:'skip',showlegend:false,name:'Pocket Framework'});
-    }
-    traces3d.push({type:'scatter3d',mode:'markers',x:px,y:py,z:pz,text:pt,hoverinfo:'text',marker:{size:3.5,color:'#94a3b8',opacity:0.6},name:'Pocket Residues'});
-   }
-   const ligAtoms=cov.ligand_atoms||[];
-   if(ligAtoms.length>0){
-    const elemColors={C:'#475569',O:'#ef4444',N:'#3b82f6',S:'#eab308',H:'#94a3b8',P:'#f97316',F:'#10b981',CL:'#22c55e',BR:'#78350f'};
-    const lx=ligAtoms.map(a=>a.x),ly=ligAtoms.map(a=>a.y),lz=ligAtoms.map(a=>a.z);
-    const lc=ligAtoms.map(a=>elemColors[(a.element||'').toUpperCase()]||'#6b7280');
-    const lt=ligAtoms.map(a=>'Ligand Atom #'+a.index+' ('+a.element+')<br>Coords: ('+a.x.toFixed(2)+', '+a.y.toFixed(2)+', '+a.z.toFixed(2)+')');
-    const bx=[],by=[],bz=[];
-    for(let i=0;i<ligAtoms.length;i++){
-     for(let j=i+1;j<ligAtoms.length;j++){
-      const dx=ligAtoms[i].x-ligAtoms[j].x,dy=ligAtoms[i].y-ligAtoms[j].y,dz=ligAtoms[i].z-ligAtoms[j].z;
-      const d=Math.sqrt(dx*dx+dy*dy+dz*dz);
-      if(d>=0.8&&d<=1.85){
-       bx.push(ligAtoms[i].x,ligAtoms[j].x,null);
-       by.push(ligAtoms[i].y,ligAtoms[j].y,null);
-       bz.push(ligAtoms[i].z,ligAtoms[j].z,null);
-      }
-     }
-    }
-    if(bx.length>0){
-     traces3d.push({type:'scatter3d',mode:'lines',x:bx,y:by,z:bz,line:{color:'#334155',width:5},hoverinfo:'skip',showlegend:false,name:'Ligand Bonds'});
-    }
-    traces3d.push({type:'scatter3d',mode:'markers',x:lx,y:ly,z:lz,text:lt,hoverinfo:'text',marker:{size:7.5,color:lc,line:{color:'#0f172a',width:1}},name:'Ligand ('+(cov.ligand_name||'Pose')+')'});
-   }
-    const targetResAtoms=cov.target_residue_atoms||[];
-    if(targetResAtoms.length>0){
-     const resElemColors={C:'#475569',O:'#ef4444',N:'#3b82f6',S:'#eab308',H:'#94a3b8',P:'#f97316'};
-     const tx=targetResAtoms.map(a=>a.x),ty=targetResAtoms.map(a=>a.y),tz=targetResAtoms.map(a=>a.z);
-     const tc=targetResAtoms.map(a=>resElemColors[(a.element||'').toUpperCase()]||'#6b7280');
-     const tsize=targetResAtoms.map(a=>a.is_nucleophile?12:(a.element==='H'?4.5:7.5));
-     const tsym=targetResAtoms.map(a=>a.is_nucleophile?'square':'circle');
-     const tlineColor=targetResAtoms.map(a=>a.is_nucleophile?'#b91c1c':'#0f172a');
-     const tlineWidth=targetResAtoms.map(a=>a.is_nucleophile?2.5:1);
-     const tlbl=targetResAtoms.map(a=>a.is_nucleophile?(a.atom+' (Nu)'):a.atom);
-     const thov=targetResAtoms.map(a=>a.residue+':'+a.atom+(a.is_cap?' [CAP]':'')+(a.is_nucleophile?' [Nucleophile]':'')+'<br>Coords: ('+a.x.toFixed(2)+', '+a.y.toFixed(2)+', '+a.z.toFixed(2)+')');
-     const tbx=[],tby=[],tbz=[];
-     for(let i=0;i<targetResAtoms.length;i++){
-      for(let j=i+1;j<targetResAtoms.length;j++){
-       const dx=targetResAtoms[i].x-targetResAtoms[j].x,dy=targetResAtoms[i].y-targetResAtoms[j].y,dz=targetResAtoms[i].z-targetResAtoms[j].z;
-       const d=Math.sqrt(dx*dx+dy*dy+dz*dz);
-       if(d>=0.8&&d<=1.85){
-        tbx.push(targetResAtoms[i].x,targetResAtoms[j].x,null);
-        tby.push(targetResAtoms[i].y,targetResAtoms[j].y,null);
-        tbz.push(targetResAtoms[i].z,targetResAtoms[j].z,null);
+  if(data.covalent){
+   const cov=data.covalent;
+   const cov3dEl=document.getElementById('covalent-3d-plot');
+   if(cov3dEl){
+    try {
+     const traces3d=[];
+     const pResAtoms=cov.pocket_residue_atoms||[];
+     if(pResAtoms.length>0){
+      const px=pResAtoms.map(a=>a.x),py=pResAtoms.map(a=>a.y),pz=pResAtoms.map(a=>a.z);
+      const pt=pResAtoms.map(a=>a.residue+' ('+a.atom+')');
+      const pbx=[],pby=[],pbz=[];
+      for(let i=0;i<pResAtoms.length;i++){
+       for(let j=i+1;j<pResAtoms.length;j++){
+        const d2=(pResAtoms[i].x-pResAtoms[j].x)**2+(pResAtoms[i].y-pResAtoms[j].y)**2+(pResAtoms[i].z-pResAtoms[j].z)**2;
+        if(d2>=0.8&&d2<=3.24){
+         pbx.push(pResAtoms[i].x,pResAtoms[j].x,null);
+         pby.push(pResAtoms[i].y,pResAtoms[j].y,null);
+         pbz.push(pResAtoms[i].z,pResAtoms[j].z,null);
+        }
        }
       }
+      if(pbx.length>0){
+       traces3d.push({type:'scatter3d',mode:'lines',x:pbx,y:pby,z:pbz,line:{color:'#cbd5e1',width:1.5},hoverinfo:'skip',showlegend:false,name:'Pocket Framework'});
+      }
+      traces3d.push({type:'scatter3d',mode:'markers',x:px,y:py,z:pz,text:pt,hoverinfo:'text',marker:{size:3.5,color:'#94a3b8',opacity:0.6},name:'Pocket Residues'});
      }
-     if(tbx.length>0){
-      traces3d.push({type:'scatter3d',mode:'lines',x:tbx,y:tby,z:tbz,line:{color:'#334155',width:5},hoverinfo:'skip',showlegend:false,name:'Target Residue Framework'});
+     const ligAtoms=cov.ligand_atoms||[];
+     if(ligAtoms.length>0){
+      const elemColors={C:'#475569',O:'#ef4444',N:'#3b82f6',S:'#eab308',H:'#94a3b8',P:'#f97316',F:'#10b981',CL:'#22c55e',BR:'#78350f'};
+      const lx=ligAtoms.map(a=>a.x),ly=ligAtoms.map(a=>a.y),lz=ligAtoms.map(a=>a.z);
+      const lc=ligAtoms.map(a=>elemColors[(a.element||'').toUpperCase()]||'#6b7280');
+      const lt=ligAtoms.map(a=>'Ligand Atom #'+a.index+' ('+a.element+')<br>Coords: ('+(a.x!=null?a.x.toFixed(2):'')+','+(a.y!=null?a.y.toFixed(2):'')+','+(a.z!=null?a.z.toFixed(2):'')+')');
+      const bx=[],by=[],bz=[];
+      for(let i=0;i<ligAtoms.length;i++){
+       for(let j=i+1;j<ligAtoms.length;j++){
+        const dx=ligAtoms[i].x-ligAtoms[j].x,dy=ligAtoms[i].y-ligAtoms[j].y,dz=ligAtoms[i].z-ligAtoms[j].z;
+        const d=Math.sqrt(dx*dx+dy*dy+dz*dz);
+        if(d>=0.8&&d<=1.85){
+         bx.push(ligAtoms[i].x,ligAtoms[j].x,null);
+         by.push(ligAtoms[i].y,ligAtoms[j].y,null);
+         bz.push(ligAtoms[i].z,ligAtoms[j].z,null);
+        }
+       }
+      }
+      if(bx.length>0){
+       traces3d.push({type:'scatter3d',mode:'lines',x:bx,y:by,z:bz,line:{color:'#334155',width:5},hoverinfo:'skip',showlegend:false,name:'Ligand Bonds'});
+      }
+      traces3d.push({type:'scatter3d',mode:'markers',x:lx,y:ly,z:lz,text:lt,hoverinfo:'text',marker:{size:7.5,color:lc,line:{color:'#0f172a',width:1}},name:'Ligand ('+(cov.ligand_name||'Pose')+')'});
      }
-     traces3d.push({type:'scatter3d',mode:'markers+text',x:tx,y:ty,z:tz,text:tlbl,textposition:'top right',textfont:{size:11,color:'#334155'},hoverinfo:'text',hovertext:thov,marker:{size:tsize,color:tc,symbol:tsym,line:{color:tlineColor,width:tlineWidth}},name:'Target Residue ('+(targetResAtoms[0].residue||'Target')+')'});
+      const targetResAtoms=cov.target_residue_atoms||[];
+      if(targetResAtoms.length>0){
+       const resElemColors={C:'#475569',O:'#ef4444',N:'#3b82f6',S:'#eab308',H:'#94a3b8',P:'#f97316'};
+       const tx=targetResAtoms.map(a=>a.x),ty=targetResAtoms.map(a=>a.y),tz=targetResAtoms.map(a=>a.z);
+       const tc=targetResAtoms.map(a=>resElemColors[(a.element||'').toUpperCase()]||'#6b7280');
+       const tsize=targetResAtoms.map(a=>a.is_nucleophile?12:(a.element==='H'?4.5:7.5));
+       const tsym=targetResAtoms.map(a=>a.is_nucleophile?'square':'circle');
+       const tlineColor=targetResAtoms.map(a=>a.is_nucleophile?'#b91c1c':'#0f172a');
+       const tlineWidth=targetResAtoms.map(a=>a.is_nucleophile?2.5:1);
+       const tlbl=targetResAtoms.map(a=>a.is_nucleophile?(a.atom+' (Nu)'):a.atom);
+       const thov=targetResAtoms.map(a=>a.residue+':'+a.atom+(a.is_cap?' [CAP]':'')+(a.is_nucleophile?' [Nucleophile]':'')+'<br>Coords: ('+(a.x!=null?a.x.toFixed(2):'')+','+(a.y!=null?a.y.toFixed(2):'')+','+(a.z!=null?a.z.toFixed(2):'')+')');
+       const tbx=[],tby=[],tbz=[];
+       for(let i=0;i<targetResAtoms.length;i++){
+        for(let j=i+1;j<targetResAtoms.length;j++){
+         const dx=targetResAtoms[i].x-targetResAtoms[j].x,dy=targetResAtoms[i].y-targetResAtoms[j].y,dz=targetResAtoms[i].z-targetResAtoms[j].z;
+         const d=Math.sqrt(dx*dx+dy*dy+dz*dz);
+         if(d>=0.8&&d<=1.85){
+          tbx.push(targetResAtoms[i].x,targetResAtoms[j].x,null);
+          tby.push(targetResAtoms[i].y,targetResAtoms[j].y,null);
+          tbz.push(targetResAtoms[i].z,targetResAtoms[j].z,null);
+         }
+        }
+       }
+       if(tbx.length>0){
+        traces3d.push({type:'scatter3d',mode:'lines',x:tbx,y:tby,z:tbz,line:{color:'#334155',width:5},hoverinfo:'skip',showlegend:false,name:'Target Residue Framework'});
+       }
+       traces3d.push({type:'scatter3d',mode:'markers+text',x:tx,y:ty,z:tz,text:tlbl,textposition:'top right',textfont:{size:11,color:'#334155'},hoverinfo:'text',hovertext:thov,marker:{size:tsize,color:tc,symbol:tsym,line:{color:tlineColor,width:tlineWidth}},name:'Target Residue ('+(targetResAtoms[0].residue||'Target')+')'});
+      }
+      const allNucls=cov.pocket_nucleophile_atoms||[];
+      const nucls=allNucls.filter(n=>!targetResAtoms.some(t=>t.is_nucleophile&&Math.abs(t.x-n.x)<0.05&&Math.abs(t.y-n.y)<0.05&&Math.abs(t.z-n.z)<0.05));
+      if(nucls.length>0){
+       const nx=nucls.map(n=>n.x),ny=nucls.map(n=>n.y),nz=nucls.map(n=>n.z);
+       const nt=nucls.map(n=>n.residue+' ('+n.atom+')<br>Coords: ('+(n.x!=null?n.x.toFixed(2):'')+','+(n.y!=null?n.y.toFixed(2):'')+','+(n.z!=null?n.z.toFixed(2):'')+')');
+       traces3d.push({type:'scatter3d',mode:'markers+text',x:nx,y:ny,z:nz,text:nucls.map(n=>n.residue+':'+n.atom),textposition:'top left',textfont:{size:10,color:'#065f46'},hoverinfo:'text',hovertext:nt,marker:{size:9,color:'#059669',symbol:'diamond',line:{color:'#064e3b',width:1.5}},name:'Pocket Nucleophiles'});
+      }
+      const contacts=cov.contacts||[];
+      if(contacts.length>0){
+       const best=contacts[0];
+       let targetNucl=targetResAtoms.find(t=>t.is_nucleophile);
+       if(!targetNucl){
+        targetNucl=allNucls.find(n=>n.residue===best.residue&&n.atom===best.nucleophile_atom)||allNucls[0];
+       }
+       const targetLig=ligAtoms.find(a=>a.index===best.ligand_atom_index)||ligAtoms[0];
+       if(targetNucl&&targetLig&&typeof best.distance_angstrom==='number'){
+        traces3d.push({
+         type:'scatter3d',
+         mode:'lines',
+         x:[targetLig.x,targetNucl.x],
+         y:[targetLig.y,targetNucl.y],
+         z:[targetLig.z,targetNucl.z],
+         line:{color:best.is_nac?'#dc2626':'#d97706',width:6,dash:'dash'},
+         hovertemplate:'Attack Vector: '+best.distance_angstrom.toFixed(2)+' Å<br>Distance score: '+(best.feasibility_score!=null?best.feasibility_score.toFixed(2):'N/A')+'<extra></extra>',
+         name:'Near-Attack Vector ('+best.distance_angstrom.toFixed(2)+' Å)'
+        });
+        const midX=(targetLig.x+targetNucl.x)/2;
+        const midY=(targetLig.y+targetNucl.y)/2;
+        const midZ=(targetLig.z+targetNucl.z)/2;
+        traces3d.push({
+         type:'scatter3d',
+         mode:'text',
+         x:[midX],
+         y:[midY],
+         z:[midZ+0.35],
+         text:['d = '+best.distance_angstrom.toFixed(2)+' Å ('+(best.is_nac?'NAC':'Proximal')+')'],
+         textposition:'top center',
+         textfont:{size:11,color:best.is_nac?'#b91c1c':'#b45309'},
+         hoverinfo:'skip',
+         showlegend:false
+        });
+       }
+      }
+    if(traces3d.length>0){
+     Plotly.newPlot('covalent-3d-plot',traces3d,{scene:{xaxis:{title:'X / Å',showgrid:true,zeroline:false},yaxis:{title:'Y / Å',showgrid:true,zeroline:false},zaxis:{title:'Z / Å',showgrid:true,zeroline:false},aspectmode:'data',camera:{eye:{x:1.8,y:1.3,z:1.2}}},margin:{l:10,r:10,t:30,b:10},legend:{orientation:'h',y:1.05},paper_bgcolor:'#fff'},{responsive:true});
     }
-    const allNucls=cov.pocket_nucleophile_atoms||[];
-    const nucls=allNucls.filter(n=>!targetResAtoms.some(t=>t.is_nucleophile&&Math.abs(t.x-n.x)<0.05&&Math.abs(t.y-n.y)<0.05&&Math.abs(t.z-n.z)<0.05));
-    if(nucls.length>0){
-     const nx=nucls.map(n=>n.x),ny=nucls.map(n=>n.y),nz=nucls.map(n=>n.z);
-     const nt=nucls.map(n=>n.residue+' ('+n.atom+')<br>Coords: ('+n.x.toFixed(2)+', '+n.y.toFixed(2)+', '+n.z.toFixed(2)+')');
-     traces3d.push({type:'scatter3d',mode:'markers+text',x:nx,y:ny,z:nz,text:nucls.map(n=>n.residue+':'+n.atom),textposition:'top left',textfont:{size:10,color:'#065f46'},hoverinfo:'text',hovertext:nt,marker:{size:9,color:'#059669',symbol:'diamond',line:{color:'#064e3b',width:1.5}},name:'Pocket Nucleophiles'});
-    }
-    const contacts=cov.contacts||[];
-    if(contacts.length>0){
-     const best=contacts[0];
-     let targetNucl=targetResAtoms.find(t=>t.is_nucleophile);
-     if(!targetNucl){
-      targetNucl=allNucls.find(n=>n.residue===best.residue&&n.atom===best.nucleophile_atom)||allNucls[0];
-     }
-     const targetLig=ligAtoms.find(a=>a.index===best.ligand_atom_index)||ligAtoms[0];
-     if(targetNucl&&targetLig){
-      traces3d.push({
-       type:'scatter3d',
-       mode:'lines',
-       x:[targetLig.x,targetNucl.x],
-       y:[targetLig.y,targetNucl.y],
-       z:[targetLig.z,targetNucl.z],
-       line:{color:best.is_nac?'#dc2626':'#d97706',width:6,dash:'dash'},
-       hovertemplate:'Attack Vector: '+best.distance_angstrom.toFixed(2)+' Å<br>Distance score: '+best.feasibility_score.toFixed(2)+'<extra></extra>',
-       name:'Near-Attack Vector ('+best.distance_angstrom.toFixed(2)+' Å)'
-      });
-      const midX=(targetLig.x+targetNucl.x)/2;
-      const midY=(targetLig.y+targetNucl.y)/2;
-      const midZ=(targetLig.z+targetNucl.z)/2;
-      traces3d.push({
-       type:'scatter3d',
-       mode:'text',
-       x:[midX],
-       y:[midY],
-       z:[midZ+0.35],
-       text:['d = '+best.distance_angstrom.toFixed(2)+' Å ('+(best.is_nac?'NAC':'Proximal')+')'],
-       textposition:'top center',
-       textfont:{size:11,color:best.is_nac?'#b91c1c':'#b45309'},
-       hoverinfo:'skip',
-       showlegend:false
-      });
-     }
-    }
-   if(traces3d.length>0){
-    Plotly.newPlot('covalent-3d-plot',traces3d,{scene:{xaxis:{title:'X / Å',showgrid:true,zeroline:false},yaxis:{title:'Y / Å',showgrid:true,zeroline:false},zaxis:{title:'Z / Å',showgrid:true,zeroline:false},aspectmode:'data',camera:{eye:{x:1.8,y:1.3,z:1.2}}},margin:{l:10,r:10,t:30,b:10},legend:{orientation:'h',y:1.05},paper_bgcolor:'#fff'},{responsive:true});
+   } catch (err3d) {
+    console.error('Error rendering 3D pocket plot:', err3d);
    }
   }
-  const curveEl=document.getElementById('covalent-curve-plot');
-  if(curveEl){
-   const curveX=[],curveY=[];
-   for(let d=1.5;d<=6.0;d+=0.05){curveX.push(d);curveY.push(1.0/(1.0+Math.exp((d-3.5)/0.4)));}
-   const curveTraces=[{type:'scatter',mode:'lines',x:curveX,y:curveY,line:{color:'#087b70',width:3},name:'Distance heuristic',hovertemplate:'Distance: %{x:.2f} Å<br>Distance score: %{y:.3f}<extra></extra>'}];
-   const contacts=cov.contacts||[];
-   const curveAnnotations=[
-    {x:2.35,y:0.92,text:'Distance cutoff (≤ 3.5 Å)',showarrow:false,font:{color:'#087b70',size:11,weight:'bold'}},
-    {x:4.75,y:0.92,text:'Outside cutoff (> 3.5 Å)',showarrow:false,font:{color:'#64748b',size:11}}
-   ];
-   if(contacts.length>0){
-    curveTraces.push({
-     type:'scatter',
-     mode:'markers',
-     x:contacts.map(c=>c.distance_angstrom),
-     y:contacts.map(c=>c.feasibility_score),
-     marker:{size:contacts.map(c=>c.is_nac?12:8),color:contacts.map(c=>c.is_nac?'#dc2626':'#64748b'),symbol:contacts.map(c=>c.is_nac?'star':'circle'),line:{color:'#16283f',width:1}},
-     name:'Pocket Residues',
-     hovertemplate:contacts.map(c=>`<b>${c.residue} (${c.nucleophile_atom})</b><br>Distance: ${c.distance_angstrom.toFixed(2)} Å<br>Distance score: ${c.feasibility_score.toFixed(3)}<extra></extra>`)
-    });
-    const best=contacts[0];
-    curveAnnotations.push({
-     x:best.distance_angstrom,
-     y:best.feasibility_score,
-     text:`<b>${best.residue} (${best.nucleophile_atom})</b><br>d = ${best.distance_angstrom.toFixed(2)} Å · Feas = ${best.feasibility_score.toFixed(2)}`,
-     showarrow:true,
-     arrowhead:2,
-     arrowsize:1,
-     arrowwidth:1.5,
-     arrowcolor:'#dc2626',
-     ax:-75,
-     ay:-40,
-     bgcolor:'rgba(255,255,255,0.92)',
-     bordercolor:'#dc2626',
-     borderwidth:1.5,
-     borderpad:5,
-     font:{size:11,color:'#16283f'}
-    });
+   const curveEl=document.getElementById('covalent-curve-plot');
+   if(curveEl){
+    try {
+     const curveX=[],curveY=[];
+     for(let d=1.5;d<=6.0;d+=0.05){curveX.push(d);curveY.push(1.0/(1.0+Math.exp((d-3.5)/0.4)));}
+     const curveTraces=[{type:'scatter',mode:'lines',x:curveX,y:curveY,line:{color:'#087b70',width:3},name:'Distance heuristic',hovertemplate:'Distance: %{x:.2f} Å<br>Distance score: %{y:.3f}<extra></extra>'}];
+     const contacts=(cov.contacts||[]).filter(c=>typeof c.distance_angstrom==='number');
+     const curveAnnotations=[
+      {x:2.35,y:0.92,text:'Distance cutoff (≤ 3.5 Å)',showarrow:false,font:{color:'#087b70',size:11,weight:'bold'}},
+      {x:4.75,y:0.92,text:'Outside cutoff (> 3.5 Å)',showarrow:false,font:{color:'#64748b',size:11}}
+     ];
+     if(contacts.length>0){
+      curveTraces.push({
+       type:'scatter',
+       mode:'markers',
+       x:contacts.map(c=>c.distance_angstrom),
+       y:contacts.map(c=>c.feasibility_score||0),
+       marker:{size:contacts.map(c=>c.is_nac?12:8),color:contacts.map(c=>c.is_nac?'#dc2626':'#64748b'),symbol:contacts.map(c=>c.is_nac?'star':'circle'),line:{color:'#16283f',width:1}},
+       name:'Pocket Residues',
+       hovertemplate:contacts.map(c=>`<b>${c.residue||'Res'} (${c.nucleophile_atom||'Nu'})</b><br>Distance: ${(c.distance_angstrom!=null?c.distance_angstrom.toFixed(2):'N/A')} Å<br>Distance score: ${(c.feasibility_score!=null?c.feasibility_score.toFixed(3):'N/A')}<extra></extra>`)
+      });
+      const best=contacts[0];
+      if(best && typeof best.distance_angstrom==='number'){
+       curveAnnotations.push({
+        x:best.distance_angstrom,
+        y:best.feasibility_score||0,
+        text:`<b>${best.residue||'Target'} (${best.nucleophile_atom||'Nu'})</b><br>d = ${best.distance_angstrom.toFixed(2)} Å · Feas = ${(best.feasibility_score||0).toFixed(2)}`,
+        showarrow:true,
+        arrowhead:2,
+        arrowsize:1,
+        arrowwidth:1.5,
+        arrowcolor:'#dc2626',
+        ax:-75,
+        ay:-40,
+        bgcolor:'rgba(255,255,255,0.92)',
+        bordercolor:'#dc2626',
+        borderwidth:1.5,
+        borderpad:5,
+        font:{size:11,color:'#16283f'}
+       });
+      }
+     }
+     Plotly.newPlot('covalent-curve-plot',curveTraces,{
+      margin:{l:55,r:20,t:30,b:45},
+      xaxis:{title:{text:'Distance / Å'},range:[1.5,6.0],zeroline:false},
+      yaxis:{title:{text:'Distance score'},range:[-0.05,1.05]},
+      shapes:[
+       {type:'line',x0:3.5,x1:3.5,y0:0,y1:1,line:{color:'#dc2626',width:2,dash:'dash'}},
+       {type:'rect',x0:1.5,x1:3.5,y0:0,y1:1,fillcolor:'rgba(8, 123, 112, 0.08)',line:{width:0}}
+      ],
+      annotations:curveAnnotations,
+      legend:{orientation:'h',y:1.15},
+      paper_bgcolor:'#fff',
+      plot_bgcolor:'#fff'
+     },{responsive:true});
+    } catch (errCurve) {
+     console.error('Error rendering curve plot:', errCurve);
+    }
    }
-   Plotly.newPlot('covalent-curve-plot',curveTraces,{
-    margin:{l:55,r:20,t:30,b:45},
-    xaxis:{title:{text:'Distance / Å'},range:[1.5,6.0],zeroline:false},
-    yaxis:{title:{text:'Distance score'},range:[-0.05,1.05]},
-    shapes:[
-     {type:'line',x0:3.5,x1:3.5,y0:0,y1:1,line:{color:'#dc2626',width:2,dash:'dash'}},
-     {type:'rect',x0:1.5,x1:3.5,y0:0,y1:1,fillcolor:'rgba(8, 123, 112, 0.08)',line:{width:0}}
-    ],
-    annotations:curveAnnotations,
-    legend:{orientation:'h',y:1.15},
-    paper_bgcolor:'#fff',
-    plot_bgcolor:'#fff'
-   },{responsive:true});
+   const fukuiEl=document.getElementById('fukui-bar-plot');
+   if(fukuiEl){
+    try {
+     const adductQm=cov.adduct_qm;
+     if(adductQm && adductQm.regiospecificity && adductQm.regiospecificity.sites && adductQm.regiospecificity.sites.length){
+      const sites=adductQm.regiospecificity.sites.slice(0, 10);
+      const xLabels=sites.map(s=>`${s.atom_symbol}#${s.atom_index}${s.is_target_site?' (Target)':''}`);
+      const yVals=sites.map(s=>s.fukui_electrophilic);
+      const barColors=sites.map(s=>s.is_target_site?'#dc2626':'#087b70');
+      const fukuiTraces=[{
+       type:'bar',
+       x:xLabels,
+       y:yVals,
+       text:yVals.map(v=>typeof v==='number'?v.toFixed(3):''),
+       textposition:'auto',
+       marker:{color:barColors,line:{color:'#0f172a',width:1}},
+       hovertemplate:'<b>%{x}</b><br>f_k^+: %{y:.4f}<extra></extra>'
+      }];
+      Plotly.newPlot('fukui-bar-plot',fukuiTraces,{
+       title:{text:'<b>Local Fukui Electrophilic Function (f<sub>k</sub><sup>+</sup>)</b>',font:{size:13,color:'#16283f'}},
+       margin:{l:55,r:20,t:35,b:55},
+       xaxis:{tickangle:-20,tickfont:{size:11,color:'#16283f'}},
+       yaxis:{title:{text:'f_k^+ (Susceptibility)'},zeroline:false},
+       paper_bgcolor:'#fff',
+       plot_bgcolor:'#fff'
+      },{responsive:true});
+     } else {
+      const cdft=cov.cdft||{};
+      const cdftLabels=['Frontier gap','−μ','μ² / (2 gap)'];
+      const cdftVals=[cdft.hardness_ev||0,Math.abs(cdft.chemical_potential_ev||0),cdft.electrophilicity_ev||0];
+      const fukuiTraces=[{type:'bar',x:cdftLabels,y:cdftVals,marker:{color:['#3b82f6','#8b5cf6','#dc2626','#087b70']},hovertemplate:'%{x}: %{y:.3f} eV<extra></extra>'}];
+      Plotly.newPlot('fukui-bar-plot',fukuiTraces,{margin:{l:55,r:20,t:25,b:45},yaxis:{title:{text:'Value / eV'},zeroline:false},paper_bgcolor:'#fff',plot_bgcolor:'#fff'},{responsive:true});
+     }
+    } catch (errFukui) {
+     console.error('Error rendering Fukui/CDFT plot:', errFukui);
+    }
+   }
   }
- const fukuiEl=document.getElementById('fukui-bar-plot');
- if(fukuiEl){
-  const adductQm=cov.adduct_qm;
-  if(adductQm && adductQm.regiospecificity && adductQm.regiospecificity.sites && adductQm.regiospecificity.sites.length){
-   const sites=adductQm.regiospecificity.sites.slice(0, 10);
-   const xLabels=sites.map(s=>`${s.atom_symbol}#${s.atom_index}${s.is_target_site?' (Target)':''}`);
-   const yVals=sites.map(s=>s.fukui_electrophilic);
-   const barColors=sites.map(s=>s.is_target_site?'#dc2626':'#087b70');
-   const fukuiTraces=[{
-    type:'bar',
-    x:xLabels,
-    y:yVals,
-    text:yVals.map(v=>v.toFixed(3)),
-    textposition:'auto',
-    marker:{color:barColors,line:{color:'#0f172a',width:1}},
-    hovertemplate:'<b>%{x}</b><br>f_k^+: %{y:.4f}<extra></extra>'
-   }];
-   Plotly.newPlot('fukui-bar-plot',fukuiTraces,{
-    title:{text:'<b>Local Fukui Electrophilic Function (f<sub>k</sub><sup>+</sup>)</b>',font:{size:13,color:'#16283f'}},
-    margin:{l:55,r:20,t:35,b:55},
-    xaxis:{tickangle:-20,tickfont:{size:11,color:'#16283f'}},
-    yaxis:{title:{text:'f_k^+ (Susceptibility)'},zeroline:false},
-    paper_bgcolor:'#fff',
-    plot_bgcolor:'#fff'
-   },{responsive:true});
-  } else {
-   const cdft=cov.cdft||{};
-   const cdftLabels=['Frontier gap','−μ','μ² / (2 gap)'];
-   const cdftVals=[cdft.hardness_ev||0,Math.abs(cdft.chemical_potential_ev||0),cdft.electrophilicity_ev||0];
-   const fukuiTraces=[{type:'bar',x:cdftLabels,y:cdftVals,marker:{color:['#3b82f6','#8b5cf6','#dc2626','#087b70']},hovertemplate:'%{x}: %{y:.3f} eV<extra></extra>'}];
-   Plotly.newPlot('fukui-bar-plot',fukuiTraces,{margin:{l:55,r:20,t:25,b:45},yaxis:{title:{text:'Value / eV'},zeroline:false},paper_bgcolor:'#fff',plot_bgcolor:'#fff'},{responsive:true});
-  }
- }
 }
 document.querySelectorAll('.help-button').forEach(button=>{
  button.onclick=()=>{const box=button.parentElement;const open=box.toggleAttribute('data-open');button.setAttribute('aria-expanded',String(open));};
