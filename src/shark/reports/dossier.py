@@ -818,9 +818,23 @@ def generate_html_dossier(project_name: str, poses_data: list[dict], out_html: s
             bond_is_calc = bond.get('is_calculated', False)
             w_bo = bond.get('wiberg_bond_order')
             w_bo_str = f"{_number(w_bo, 2)}" if (w_bo is not None and bond_is_calc) else "Not calculated"
-            prod_status_badge = (
-                '<span class="badge" style="background:#f1f5f9;color:#475569;border:1px solid #cbd5e1;">Status: NOT CALCULATED</span>'
-            )
+            if bond_is_calc:
+                prod_status_badge = (
+                    '<span class="badge" style="background:#e7f4f0;color:#086357;border:1px solid #bbf7d0;">Status: CALCULATED</span>'
+                )
+                prod_status_val = '<dd style="margin:0;font-weight:600;color:#086357;">CALCULATED</dd>'
+                q_trans = bond.get('charge_transfer_e')
+                q_trans_str = f"{_number(q_trans, 2)} e" if q_trans is not None else "N/A"
+                b_type = escape(str(bond.get('bond_type', 'Covalent sigma-bond')))
+                d_eq = bond.get('equilibrium_distance_angstrom')
+                geom_str = f"{b_type} ({_number(d_eq, 2)} Å)" if d_eq is not None else b_type
+            else:
+                prod_status_badge = (
+                    '<span class="badge" style="background:#f1f5f9;color:#475569;border:1px solid #cbd5e1;">Status: NOT CALCULATED</span>'
+                )
+                prod_status_val = '<dd style="margin:0;font-weight:600;color:#b45309;">NOT CALCULATED</dd>'
+                q_trans_str = "Not calculated"
+                geom_str = "Not calculated"
 
             sym_type_esc = escape(str(fmo.get("symmetry_type", "Approach Trajectory (Model Heuristic)")))
             fmo_expl_esc = escape(str(fmo.get("explanation", "")))
@@ -886,10 +900,10 @@ def generate_html_dossier(project_name: str, poses_data: list[dict], out_html: s
                 f'</div>'
                 f'<div style="font-size:12px;color:#475569;margin-bottom:10px;">Optimized Adduct Observable</div>'
                 f'<dl style="margin:0;font-size:12.5px;">'
-                f'<div style="display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid #f1f5f9;"><dt style="color:#64748b;">Status</dt><dd style="margin:0;font-weight:600;color:#b45309;">NOT CALCULATED</dd></div>'
+                f'<div style="display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid #f1f5f9;"><dt style="color:#64748b;">Status</dt>{prod_status_val}</div>'
                 f'<div style="display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid #f1f5f9;"><dt style="color:#64748b;">Wiberg Bond Order</dt><dd style="margin:0;font-weight:600;color:#0f172a;">{w_bo_str}</dd></div>'
-                f'<div style="display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid #f1f5f9;"><dt style="color:#64748b;">Net Charge Transfer (Δq)</dt><dd style="margin:0;font-weight:600;color:#0f172a;">Not calculated</dd></div>'
-                f'<div style="display:flex;justify-content:space-between;padding:4px 0;"><dt style="color:#64748b;">Covalent Adduct Geometry</dt><dd style="margin:0;font-weight:600;color:#0f172a;">Not calculated</dd></div>'
+                f'<div style="display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid #f1f5f9;"><dt style="color:#64748b;">Net Charge Transfer (Δq)</dt><dd style="margin:0;font-weight:600;color:#0f172a;">{q_trans_str}</dd></div>'
+                f'<div style="display:flex;justify-content:space-between;padding:4px 0;"><dt style="color:#64748b;">Covalent Adduct Geometry</dt><dd style="margin:0;font-weight:600;color:#0f172a;">{geom_str}</dd></div>'
                 f'</dl>'
                 f'<p style="margin:10px 0 0;font-size:11.5px;color:#64748b;line-height:1.4;">{bond_expl_esc}</p>'
                 f'</div>'

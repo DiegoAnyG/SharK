@@ -379,3 +379,4 @@ Si el usuario modifica el atomo electrofilico o la geometria del ligando, SharK 
 
 ---
 *Manual de Usuario de SharK — Diseñado para computo cientifico robusto, reproducible y autonomo.*
+

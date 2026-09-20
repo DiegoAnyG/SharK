@@ -301,3 +301,4 @@ def write_reaction_definition_json(
     }
     p.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
     return p
+
