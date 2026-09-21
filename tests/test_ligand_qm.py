@@ -15,6 +15,7 @@ from rdkit import Chem
 from shark.cli import main
 from shark.core.runner import read_qm_results, run_orca_job
 from shark.core.session import read_poliscreen_session
+from shark.core.workflow_state import initialize_workflow_manifest
 from shark.workflows.ligand_qm import prepare_ligand_jobs, select_ligands
 
 
@@ -166,6 +167,116 @@ def test_successful_execution_records_real_output_and_hashes(session, tmp_path, 
     assert not result['results']['stationary_minimum_verified']
     with pytest.raises(ValueError, match='Only a prepared'):
         run_orca_job(job)
+
+
+def test_resume_archives_failed_attempt_and_completes(session, tmp_path, monkeypatch):
+    job = prepare_ligand_jobs(session, tmp_path / 'jobs', orbital_grid=None)[0]
+    executable = tmp_path / 'fixture-orca'
+    executable.write_text('#!' + sys.executable + '\nprint("first attempt")\nraise SystemExit(2)\n')
+    executable.chmod(0o755)
+    monkeypatch.setenv('SHARK_ORCA', str(executable))
+    assert run_orca_job(job)['status'] == 'failed'
+
+    fixture = ('Program Version fixture\nTHE OPTIMIZATION HAS CONVERGED\n'
+               'FINAL SINGLE POINT ENERGY -1.0\nORBITAL ENERGIES\n'
+               'NO OCC E(Eh) E(eV)\n0 2.0 -0.3 -8.0\n1 0.0 0.0 0.0\n\n'
+               'ORCA TERMINATED NORMALLY\n')
+    executable.write_text('#!' + sys.executable + '\nprint(' + repr(fixture) + ')\n')
+    result = run_orca_job(job, resume=True)
+
+    assert result['status'] == 'completed'
+    assert result['resume_count'] == 1
+    assert 'first attempt' in (job / 'attempts' / 'attempt-1' / 'calculation.out').read_text()
+
+
+def test_resume_retries_only_failed_orbital_export(session, tmp_path, monkeypatch):
+    import shark.core.runner as runner
+
+    job = prepare_ligand_jobs(session, tmp_path / 'jobs', orbital_grid=None)[0]
+    executable = tmp_path / 'fixture-orca'
+    fixture = ('Program Version fixture\nTHE OPTIMIZATION HAS CONVERGED\n'
+               'FINAL SINGLE POINT ENERGY -1.0\nORBITAL ENERGIES\n'
+               'NO OCC E(Eh) E(eV)\n0 2.0 -0.3 -8.0\n1 0.0 0.0 0.0\n\n'
+               'ORCA TERMINATED NORMALLY\n')
+    executable.write_text('#!' + sys.executable + '\nprint(' + repr(fixture) + ')\n')
+    executable.chmod(0o755)
+    monkeypatch.setenv('SHARK_ORCA', str(executable))
+    assert run_orca_job(job)['status'] == 'completed'
+
+    record = json.loads((job / 'job.json').read_text())
+    record['parameters']['orbital_grid'] = 60
+    record['orbital_export'] = {'status': 'failed', 'error': 'fixture failure'}
+    (job / 'job.json').write_text(json.dumps(record), encoding='utf-8')
+    called = []
+    monkeypatch.setattr(
+        runner,
+        '_export_frontiers',
+        lambda *args, **kwargs: called.append(True) or {'status': 'completed'},
+    )
+
+    result = run_orca_job(job, resume=True)
+    assert called == [True]
+    assert result['status'] == 'completed'
+    assert result['orbital_export']['status'] == 'completed'
+    assert not (job / 'attempts').exists()
+
+
+def test_cli_status_and_resume_prepared_dft(session, tmp_path, monkeypatch, capsys):
+    root = tmp_path / 'workflow'
+    prepare_ligand_jobs(session, root / 'quantum', orbital_grid=None)
+    initialize_workflow_manifest(
+        root,
+        project='test',
+        session_sha256=session.archive_sha256,
+        stages={'ligand_dft': {'method': 'r2SCAN-3c'}},
+    )
+    executable = tmp_path / 'fixture-orca'
+    fixture = ('Program Version fixture\nTHE OPTIMIZATION HAS CONVERGED\n'
+               'FINAL SINGLE POINT ENERGY -1.0\nORBITAL ENERGIES\n'
+               'NO OCC E(Eh) E(eV)\n0 2.0 -0.3 -8.0\n1 0.0 0.0 0.0\n\n'
+               'ORCA TERMINATED NORMALLY\n')
+    executable.write_text('#!' + sys.executable + '\nprint(' + repr(fixture) + ')\n')
+    executable.chmod(0o755)
+    monkeypatch.setenv('SHARK_ORCA', str(executable))
+
+    assert main(['status', '--work-dir', str(root)]) == 0
+    assert 'ligand_dft: planned' in capsys.readouterr().out
+    assert main(['resume', '--work-dir', str(root)]) == 0
+    assert main(['status', '--work-dir', str(root)]) == 0
+    output = capsys.readouterr().out
+    assert '[RESUME] DFT lig_A: completed' in output
+    assert 'ligand_dft: completed | validation=validated' in output
+
+
+def test_cli_resume_refuses_changed_dft_input(session, tmp_path, capsys):
+    root = tmp_path / 'workflow'
+    job = prepare_ligand_jobs(session, root / 'quantum', orbital_grid=None)[0]
+    initialize_workflow_manifest(
+        root,
+        project='test',
+        session_sha256=session.archive_sha256,
+        stages={'ligand_dft': {'method': 'r2SCAN-3c'}},
+    )
+    (job / 'calculation.inp').write_text('modified', encoding='utf-8')
+
+    assert main(['resume', '--work-dir', str(root)]) == 1
+    assert 'Refusing resume' in capsys.readouterr().err
+
+
+def test_cli_status_marks_dead_recorded_process_interrupted(tmp_path, capsys):
+    root = tmp_path / 'workflow'
+    manifest = initialize_workflow_manifest(
+        root,
+        project='test',
+        session_sha256='fixture',
+        stages={'ligand_dft': {'method': 'fixture'}},
+    )
+    data = json.loads(manifest.read_text())
+    data['stages']['ligand_dft'].update(status='running', pid=99999999)
+    manifest.write_text(json.dumps(data), encoding='utf-8')
+
+    assert main(['status', '--work-dir', str(root)]) == 1
+    assert 'ligand_dft: interrupted' in capsys.readouterr().out
 
 
 @pytest.mark.skipif(os.name != 'posix', reason='POSIX signal boundary')

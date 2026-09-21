@@ -91,6 +91,10 @@ shark run-qm --session screening.poliscreen --work-dir ../qm_results \
 # Regenerate geometry from recorded SMILES, selecting a target and Pareto leaders.
 shark run-qm --session screening.poliscreen --target target_ready~Pk1 \
   --pareto --top 3 --geometry smiles --work-dir ../selected_jobs
+
+# Inspect recorded stages, then resume prepared or interrupted ligand DFT jobs.
+shark status --work-dir ../qm_results
+shark resume --work-dir ../qm_results
 ```
 
 `--dft --session ...` is an alias for `run-qm`. Preparation never runs ORCA;
@@ -125,8 +129,14 @@ tautomers or conformer ensembles.
 Each `job-NNN/` contains `geometry.xyz`, `calculation.inp` and `job.json`. Execution adds
 raw ORCA output, the GBW wavefunction and calculated results. Records include source and
 input hashes, parameters, seed, software versions, execution status, output hashes and
-failures. Changed inputs and already-executed jobs require fresh preparation. Raw engine
+failures. `resume` refuses changed inputs, preserves earlier failed artifacts under
+`attempts/`, and can retry a failed orbital export without recalculating the DFT result. Raw engine
 logs may contain local runtime paths; keep calculation directories private.
+
+Each workflow also writes an atomic `execution_manifest.json` with stage fingerprints,
+runtime state and validation state. `status` detects a recorded worker that is no longer
+running. Automatic resume currently covers isolated-ligand DFT only; MD checkpoints and
+Tier 4 continuation still require their workflow-specific commands.
 
 The offline `dossier.html` distinguishes prepared, completed, failed and interrupted jobs.
 Only normally terminated calculations with a final energy and orbital table provide

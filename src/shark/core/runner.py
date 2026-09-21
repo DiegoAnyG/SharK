@@ -470,14 +470,41 @@ def _export_frontiers(job, exe, results, grid, timeout):
                 executable_sha256=file_hash(plot), spatial_convergence='not assessed')
 
 
-def run_orca_job(job_dir: str | Path, *, timeout: float | None = None) -> dict:
+def _archive_failed_orca_attempt(job: Path, input_names: set[str]) -> Optional[Path]:
+    artifacts = [
+        path for path in job.iterdir()
+        if path.is_file() and path.name not in input_names and path.name not in ("job.json", "job.json.tmp")
+    ]
+    if not artifacts:
+        return None
+    attempts = job / "attempts"
+    attempts.mkdir(exist_ok=True)
+    number = 1
+    while (attempts / f"attempt-{number}").exists():
+        number += 1
+    destination = attempts / f"attempt-{number}"
+    destination.mkdir()
+    for artifact in artifacts:
+        artifact.replace(destination / artifact.name)
+    return destination
+
+
+def run_orca_job(job_dir: str | Path, *, timeout: float | None = None, resume: bool = False) -> dict:
     """Run once; preserve inputs, logs, hashes and status even when ORCA fails."""
     if timeout is not None and (not math.isfinite(timeout) or timeout <= 0):
         raise ValueError('Timeout must be a finite positive number')
     job = Path(job_dir).resolve()
     manifest = job / 'job.json'
     record = json.loads(manifest.read_text(encoding='utf-8'))
-    if record.get('schema_version') != 1 or record.get('status') != 'prepared':
+    if record.get('schema_version') != 1:
+        raise ValueError('Only schema-1 jobs can be executed')
+    resumable = record.get('status') in ('failed', 'interrupted')
+    export_retry = (
+        resume
+        and record.get('status') == 'completed'
+        and record.get('orbital_export', {}).get('status') == 'failed'
+    )
+    if record.get('status') != 'prepared' and not (resume and (resumable or export_retry)):
         raise ValueError('Only a prepared schema-1 job can be executed; prepare a new job to rerun')
     for name in ('calculation.inp', 'geometry.xyz'):
         if file_hash(job / name) != record['inputs'].get(name):
@@ -485,10 +512,44 @@ def run_orca_job(job_dir: str | Path, *, timeout: float | None = None) -> dict:
     # Recheck allocation at execution time; the job may have moved to a smaller host.
     from ..workflows.ligand_qm import _resources
     _resources(record['parameters']['nprocs'], record['parameters']['maxcore_mb'])
+    if resume and resumable:
+        archived = _archive_failed_orca_attempt(job, set(record['inputs']))
+        record['resume_count'] = int(record.get('resume_count', 0)) + 1
+        if archived is not None:
+            record.setdefault('attempts', []).append(archived.relative_to(job).as_posix())
+        for key in ('error', 'returncode', 'started_utc', 'finished_utc', 'outputs', 'orbital_export'):
+            record.pop(key, None)
+        record['status'] = 'prepared'
     def save():
         staging = manifest.with_suffix('.json.tmp')
         staging.write_text(json.dumps(record, indent=2, allow_nan=False) + '\n', encoding='utf-8')
         staging.replace(manifest)
+    if export_retry:
+        try:
+            exe = find_orca()
+            record['results'] = read_qm_results(
+                job / 'calculation.out',
+                optimize=record['parameters']['optimize'],
+                frequencies=record['parameters']['frequencies'],
+            )
+            record['orbital_export'] = _export_frontiers(
+                job,
+                exe,
+                record['results'],
+                record['parameters']['orbital_grid'],
+                timeout,
+            )
+        except (ValueError, OSError, RuntimeError, subprocess.TimeoutExpired) as exc:
+            record['orbital_export'] = {
+                'status': 'failed',
+                'error': str(exc) if isinstance(exc, ValueError) else type(exc).__name__,
+            }
+        record['finished_utc'] = datetime.now(timezone.utc).isoformat()
+        record['outputs'] = {p.name: file_hash(p) for p in sorted(job.iterdir())
+                             if p.is_file() and p.name not in ('job.json', 'job.json.tmp')
+                             and p.name not in record['inputs']}
+        save()
+        return record
     proc = None
     old_term = None
     record.update(status='running', started_utc=datetime.now(timezone.utc).isoformat())

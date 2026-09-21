@@ -13,6 +13,12 @@ import zipfile
 
 from .core.session import read_poliscreen_session, match_receptor_id
 from .core.runner import run_orca_job, run_orca_process, find_orca
+from .core.frontier import file_hash
+from .core.workflow_state import (
+    initialize_workflow_manifest,
+    inspect_workflow,
+    update_workflow_stage,
+)
 from .reports.dossier import generate_html_dossier, _sanitize_covalent_summary
 from .workflows.ligand_qm import prepare_ligand_jobs
 
@@ -674,8 +680,98 @@ def report_stage_progress(current_stage: int, total_stages: int, stage_name: str
         print(f"        {detail}")
 
 
+def _workflow_control(command: str, arguments: list[str]) -> int:
+    parser = argparse.ArgumentParser(prog=f"shark {command}")
+    parser.add_argument("--work-dir", required=True, help="Existing SharK job directory")
+    parser.add_argument("--timeout", type=float, default=float(os.environ.get("SHARK_STAGE_TIMEOUT", "86400")))
+    options = parser.parse_args(arguments)
+    if not math.isfinite(options.timeout) or options.timeout <= 0:
+        parser.error("--timeout must be a finite positive number of seconds")
+    root = Path(options.work_dir).expanduser().resolve()
+    if not root.is_dir():
+        parser.error("--work-dir must name an existing directory")
+
+    manifest, jobs = inspect_workflow(root)
+    if command == "status":
+        if manifest:
+            print(f"Workflow: {manifest.get('project', root.name)}")
+            for name, stage in manifest.get("stages", {}).items():
+                validation = stage.get("validation", "not_evaluated")
+                stage_status = stage.get("observed_status", stage.get("status", "unknown"))
+                stage_reason = stage.get("observed_reason", stage.get("reason"))
+                reason = f" | {stage_reason}" if stage_reason else ""
+                print(f"  {name}: {stage_status} | validation={validation}{reason}")
+        else:
+            print("Workflow manifest: not available (legacy or incomplete job)")
+        for job in jobs:
+            changed = f" | changed={','.join(job.get('changed_inputs', []))}" if job.get("changed_inputs") else ""
+            print(f"  DFT {job.get('ligand', job['path'])}: {job['status']} | {job['path']}{changed}")
+        bad = {"failed", "interrupted", "timed_out", "invalid", "invalidated", "invalid_manifest", "completed_export_failed"}
+        stage_bad = bool(manifest and any(
+            stage.get("observed_status", stage.get("status")) in bad
+            for stage in manifest.get("stages", {}).values()
+        ))
+        return int(stage_bad or any(job.get("status") in bad for job in jobs))
+
+    resumable = [
+        job for job in jobs
+        if job.get("status") in ("prepared", "failed", "interrupted", "completed_export_failed")
+    ]
+    invalid = [job for job in jobs if job.get("status") in ("invalidated", "invalid_manifest")]
+    if invalid:
+        print("[ERROR] Refusing resume because one or more DFT inputs or manifests changed", file=sys.stderr)
+        return 1
+    if not resumable:
+        if jobs and all(job.get("status") == "completed" for job in jobs):
+            print("[RESUME] All isolated-ligand DFT jobs are already complete.")
+            return 0
+        print("[RESUME] No safely resumable DFT job was found. MD and Tier 4 checkpoint resume are not yet supported.")
+        return 1
+
+    update_workflow_stage(root, "ligand_dft", status="running", validation="pending")
+    failed = False
+    for job in resumable:
+        job_path = root / job["path"]
+        try:
+            record = run_orca_job(job_path, timeout=options.timeout, resume=True)
+        except KeyboardInterrupt:
+            update_workflow_stage(
+                root,
+                "ligand_dft",
+                status="interrupted",
+                validation="failed",
+                reason="Resume interrupted by user",
+            )
+            return 130
+        except (ValueError, OSError) as exc:
+            update_workflow_stage(
+                root,
+                "ligand_dft",
+                status="failed",
+                validation="failed",
+                reason=str(exc),
+            )
+            print(f"[ERROR] Could not resume {job['path']}: {exc}", file=sys.stderr)
+            return 1
+        print(f"[RESUME] DFT {record['selection']['ligand_id']}: {record['status']}")
+        failed = failed or record.get("status") != "completed" or record.get("orbital_export", {}).get("status") == "failed"
+    _, refreshed = inspect_workflow(root)
+    all_complete = bool(refreshed) and all(job.get("status") == "completed" for job in refreshed)
+    update_workflow_stage(
+        root,
+        "ligand_dft",
+        status="completed" if all_complete else "failed",
+        validation="validated" if all_complete else "failed",
+        reason=None if all_complete else "One or more isolated-ligand calculations did not complete",
+        details={"completed_jobs": sum(job.get("status") == "completed" for job in refreshed), "total_jobs": len(refreshed)},
+    )
+    return int(failed or not all_complete)
+
+
 def main(argv=None):
     arguments = list(sys.argv[1:] if argv is None else argv)
+    if arguments and arguments[0] in ("status", "resume"):
+        return _workflow_control(arguments[0], arguments[1:])
     if arguments and arguments[0] == 'run-qm':
         arguments = ['--dft'] + arguments[1:]
     if arguments and arguments[0] == 'analyze-md':
@@ -945,6 +1041,77 @@ def main(argv=None):
         print(f"[SharK] Session '{session.project_name}': {len(session.poses)} indexed poses")
         for warning in session.warnings:
             print(f'[NOTE] {warning}')
+        topology_hash = file_hash(Path(args.topology)) if args.topology and Path(args.topology).is_file() else None
+        trajectory_hash = file_hash(Path(args.trajectory)) if args.trajectory and Path(args.trajectory).is_file() else None
+        stage_specs = {}
+        if args.run_md:
+            stage_specs["molecular_dynamics"] = {
+                "time_ns": args.time_ns,
+                "execute": args.execute,
+                "target": args.target,
+                "compounds": args.compound,
+                "pose": args.pose,
+            }
+        if args.cluster_nac:
+            stage_specs["trajectory_clustering"] = {
+                "topology_sha256": topology_hash,
+                "trajectory_sha256": trajectory_hash,
+                "cutoff_angstrom": args.cluster_cutoff,
+                "stride": args.cluster_stride,
+                "reactive_nac_min": args.reactive_nac_min,
+                "reactive_distance_max": args.reactive_distance_max,
+            }
+        if args.orca_cluster_sp:
+            stage_specs["cluster_qm"] = {
+                "method": args.theory,
+                "solvent": args.solvent,
+                "model": args.qm_model,
+                "target_residue": args.target_residue,
+                "topology_sha256": topology_hash,
+                "trajectory_sha256": trajectory_hash,
+            }
+        if args.tier_4_ts:
+            stage_specs["tier_4"] = {
+                "method": args.theory,
+                "solvent": args.solvent,
+                "model": args.qm_model,
+                "mechanism": args.mechanism,
+                "scan_start": args.scan_start,
+                "scan_end": args.scan_end,
+                "scan_steps": args.scan_steps,
+                "full_thermo": args.full_thermo,
+                "optimize_adduct": args.optimize_adduct,
+                "target_residue": args.target_residue,
+                "electrophile_atom": args.electrophile_atom,
+                "recalc_hess": args.recalc_hess,
+                "topology_sha256": topology_hash,
+                "trajectory_sha256": trajectory_hash,
+            }
+        if args.dft:
+            stage_specs["ligand_dft"] = {
+                "method": args.theory,
+                "solvent": args.solvent,
+                "optimize": not args.single_point,
+                "frequencies": args.frequencies,
+                "multiplicity": args.multiplicity,
+                "charge": args.charge,
+                "seed": args.seed,
+                "geometry": args.geometry,
+                "orbital_grid": None if args.no_orbital_plots else args.orbital_grid,
+                "top": args.top,
+                "target": args.target,
+                "compounds": args.compound,
+                "pareto": args.pareto,
+                "include_controls": args.include_controls,
+                "nprocs": args.nprocs,
+                "maxcore_mb": args.maxcore,
+            }
+        initialize_workflow_manifest(
+            args.work_dir,
+            project=session.project_name,
+            session_sha256=session.archive_sha256,
+            stages=stage_specs,
+        )
         if args.full_gold_standard:
             report_stage_progress(1, 8, "PoliScreen Ingestion & Pose Ranking (Pillar 1)", f"Project: {session.project_name} | {len(session.poses)} indexed poses")
 
@@ -1005,6 +1172,12 @@ def main(argv=None):
         last_md_res = None
         workflow_failures = []
         if args.run_md:
+            update_workflow_stage(
+                args.work_dir,
+                "molecular_dynamics",
+                status="running" if args.execute else "preparing",
+                validation="pending" if args.execute else "not_evaluated",
+            )
             if args.full_gold_standard:
                 report_stage_progress(2, 8, "Classical Molecular Dynamics Simulation (GROMACS)", f"{args.time_ns:.1f} ns solvated production")
             from .workflows.md_pipeline import run_md_from_session
@@ -1043,6 +1216,16 @@ def main(argv=None):
                         args.topology = str(gro_cand)
                         args.trajectory = str(xtc_cand)
                         print(f'[MD] Linking trajectory for clustering: {xtc_cand}')
+            if last_md_res is not None:
+                md_validated = last_md_res.status == "completed" and bool(args.execute)
+                update_workflow_stage(
+                    args.work_dir,
+                    "molecular_dynamics",
+                    status=last_md_res.status,
+                    validation="process_completed" if md_validated else "not_evaluated",
+                    reason=last_md_res.error_message,
+                    details={"sim_time_ns": last_md_res.sim_time_ns},
+                )
             if not (args.full_gold_standard or args.covalent or getattr(args, 'cluster_nac', False) or args.tier_4_ts or args.dft):
                 return int(bool(workflow_failures))
 
@@ -1056,6 +1239,13 @@ def main(argv=None):
             cluster_rep = None
 
             if args.trajectory and args.topology:
+                if args.cluster_nac:
+                    update_workflow_stage(
+                        args.work_dir,
+                        "trajectory_clustering",
+                        status="running",
+                        validation="pending",
+                    )
                 if args.full_gold_standard or getattr(args, 'cluster_nac', False):
                     report_stage_progress(3, 8, "Trajectory Clustering & Dynamic NAC Sampling (Pillar 2)", f"Daura RMSD clustering (cutoff: {args.cluster_cutoff} Å)")
                 from .analysis.trajectory_cluster import cluster_trajectory
@@ -1120,6 +1310,18 @@ def main(argv=None):
                     'trajectory_file': str(Path(args.trajectory).resolve()) if getattr(args, 'trajectory', None) else None,
                     'run_dir': str(Path(args.trajectory).resolve().parent) if getattr(args, 'trajectory', None) else None,
                 }
+                if args.cluster_nac:
+                    update_workflow_stage(
+                        args.work_dir,
+                        "trajectory_clustering",
+                        status="completed",
+                        validation="validated",
+                        details={
+                            "sampled_frames": cluster_rep.total_sampled_frames,
+                            "clusters": cluster_rep.num_clusters,
+                            "reactive_frames": cluster_rep.reactive_frame_count,
+                        },
+                    )
 
             if args.full_gold_standard:
                 report_stage_progress(4, 8, "Active-Site Pocket Conceptual DFT & Bürgi-Dunitz Matching", f"Target residue: {args.target_residue or 'Auto-detect'}")
@@ -1315,6 +1517,7 @@ def main(argv=None):
                     covalent_summary['target_residue_atoms'] = cluster_res_atoms
 
             if args.orca_cluster_sp:
+                update_workflow_stage(args.work_dir, "cluster_qm", status="running", validation="pending")
                 if args.full_gold_standard:
                     report_stage_progress(5, 8, "Active-Site Cluster QM Single-Point (Pillar 3)", f"Method: {args.theory} | Solvent: {args.solvent}")
                 if args.work_dir:
@@ -1337,12 +1540,32 @@ def main(argv=None):
                 )
                 if cluster_qm_res.success:
                     print(f"[CLUSTER QM] ORCA single-point completed in {cluster_qm_res.execution_time_s:.1f} s: HOMO (MO {cluster_qm_res.homo_idx}) = {cluster_qm_res.homo_energy_ev:.2f} eV, LUMO (MO {cluster_qm_res.lumo_idx}) = {cluster_qm_res.lumo_energy_ev:.2f} eV, Gap = {cluster_qm_res.gap_ev:.2f} eV")
+                    update_workflow_stage(
+                        args.work_dir,
+                        "cluster_qm",
+                        status="completed",
+                        validation="validated",
+                        details={"execution_time_s": cluster_qm_res.execution_time_s},
+                    )
                 else:
                     print(f"[NOTE] Cluster QM single-point skipped or failed: {cluster_qm_res.error_message}")
+                    update_workflow_stage(
+                        args.work_dir,
+                        "cluster_qm",
+                        status="failed",
+                        validation="failed",
+                        reason=cluster_qm_res.error_message,
+                    )
                     if args.execute:
                         workflow_failures.append(f"Cluster QM failed: {cluster_qm_res.error_message or 'unknown error'}")
 
             if args.tier_4_ts:
+                update_workflow_stage(
+                    args.work_dir,
+                    "tier_4",
+                    status="running" if args.execute else "preparing",
+                    validation="pending" if args.execute else "not_evaluated",
+                )
                 if args.full_gold_standard:
                     report_stage_progress(6, 8, "Tier 4 Transition State Modeling (Pillar 3)", f"Scan: {args.scan_steps} steps | OptTS + Freq verification")
                 if args.work_dir:
@@ -1391,6 +1614,13 @@ def main(argv=None):
                 tier4_blocked = val_res.severity == "BLOCKING"
                 if tier4_blocked:
                     print(f"[TIER 4] [SKIPPED] {val_res.message}", file=sys.stderr)
+                    update_workflow_stage(
+                        args.work_dir,
+                        "tier_4",
+                        status="skipped",
+                        validation="not_evaluated",
+                        reason=val_res.message,
+                    )
 
                 fp = compute_tier4_fingerprint(
                     cluster_atoms=cluster.atoms,
@@ -1484,6 +1714,13 @@ def main(argv=None):
                     orca_bin = find_orca(allow_none=True)
                     if not orca_bin:
                         print("[ERROR] ORCA executable not found in PATH or standard location", file=sys.stderr)
+                        update_workflow_stage(
+                            args.work_dir,
+                            "tier_4",
+                            status="failed",
+                            validation="failed",
+                            reason="ORCA executable not found",
+                        )
                         return 1
 
                     orca_real = str(orca_bin)
@@ -1525,6 +1762,13 @@ def main(argv=None):
                         )
                         if p_scan.returncode != 0 or not p_scan.terminated_normally or not scan_is_complete:
                             print(f"[ERROR] Coordinate scan failed: {p_scan.error or f'code {p_scan.returncode}'}", file=sys.stderr)
+                            update_workflow_stage(
+                                args.work_dir,
+                                "tier_4",
+                                status="failed",
+                                validation="failed",
+                                reason=p_scan.error or "Coordinate scan did not complete",
+                            )
                             return p_scan.returncode if p_scan.returncode != 0 else 1
                         scan_res.converged = True
                         try:
@@ -1741,6 +1985,14 @@ def main(argv=None):
                             'is_first_order_ts': ts_verif.is_valid_first_order_saddle_point if ts_verif else False,
                             'warnings': profile.warnings,
                         }
+                    tier4_valid = bool(ts_verif and ts_verif.is_valid_first_order_saddle_point)
+                    update_workflow_stage(
+                        args.work_dir,
+                        "tier_4",
+                        status="completed" if tier4_valid else "invalid",
+                        validation="validated" if tier4_valid else "failed",
+                        reason=None if tier4_valid else "First-order transition state was not verified",
+                    )
                 elif not tier4_blocked:
                     optts_candidate = ts_work_dir / '02_optts.out'
                     if not optts_candidate.is_file() and (ts_work_dir / '02_optts_resume.out').is_file():
@@ -1800,6 +2052,12 @@ def main(argv=None):
                                 'model_type': cluster.model_type,
                                 'summary': f"Tier 4 workflow prepared at {ts_work_dir}. Awaiting execution.",
                             }
+                        update_workflow_stage(
+                            args.work_dir,
+                            "tier_4",
+                            status="prepared",
+                            validation="not_evaluated",
+                        )
                 else:
                     if covalent_summary is not None:
                         covalent_summary['transition_state'] = {
@@ -2021,6 +2279,12 @@ def main(argv=None):
                 print(f"[NOTE] Could not generate 3Dmol adduct viewer: {e}")
 
         if args.dft:
+            update_workflow_stage(
+                args.work_dir,
+                "ligand_dft",
+                status="running" if args.execute else "preparing",
+                validation="pending" if args.execute else "not_evaluated",
+            )
             if args.full_gold_standard:
                 report_stage_progress(8, 8, "Isolated Ligand DFT & Frontier Orbitals", f"Theory: {args.theory} | Solvent: {args.solvent}")
             host_cpus = len(os.sched_getaffinity(0)) if hasattr(os, 'sched_getaffinity') else (os.cpu_count() or 1)
@@ -2057,6 +2321,19 @@ def main(argv=None):
                         'softness_ev': desc.softness_ev,
                     }
             qm_summary = {'jobs': records}
+            dft_complete = bool(records) and all(
+                record.get("status") == "completed"
+                and record.get("orbital_export", {}).get("status") != "failed"
+                for record in records
+            )
+            update_workflow_stage(
+                args.work_dir,
+                "ligand_dft",
+                status=("completed" if dft_complete else "failed") if args.execute else "prepared",
+                validation=("validated" if dft_complete else "failed") if args.execute else "not_evaluated",
+                reason=(None if dft_complete else "One or more ligand calculations or orbital exports failed") if args.execute else None,
+                details={"completed_jobs": sum(record.get("status") == "completed" for record in records), "total_jobs": len(records)},
+            )
             if args.execute:
                 for record in records:
                     if record.get('status') != 'completed':

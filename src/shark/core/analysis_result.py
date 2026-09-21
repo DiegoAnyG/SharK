@@ -203,7 +203,9 @@ class SharKAnalysisResult:
             "completeness": self.completeness,
             "provenance": self.provenance,
         }
-        p.write_text(json.dumps(manifest_data, indent=2), encoding="utf-8")
+        temporary = p.with_suffix(p.suffix + ".tmp")
+        temporary.write_text(json.dumps(manifest_data, indent=2) + "\n", encoding="utf-8")
+        temporary.replace(p)
         return p
 
     @classmethod
@@ -238,4 +240,3 @@ class SharKAnalysisResult:
         else:
             content = str(s)
         return cls.from_dict(json.loads(content))
-
