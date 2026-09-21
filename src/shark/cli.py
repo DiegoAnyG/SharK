@@ -1725,7 +1725,8 @@ def main(argv=None):
             d_score = p_top.score if (p_top and math.isfinite(p_top.score)) else None
             p_nac_val = clustering_info.get('p_nac') if clustering_info else None
             ts_res = covalent_summary.get('transition_state', {})
-            dg_val = (ts_res.get('delta_g_activation_kcal') or ts_res.get('activation_barrier_kcal')) if ts_res else None
+            ts_valid = ts_res.get('is_first_order_ts', False) if ts_res else False
+            dg_val = (ts_res.get('delta_g_activation_kcal') or ts_res.get('activation_barrier_kcal')) if (ts_res and ts_valid) else None
             static_cfi = all_contacts[0].get('composite_feasibility') if all_contacts else None
 
             tot_feas = compute_total_covalent_feasibility(
