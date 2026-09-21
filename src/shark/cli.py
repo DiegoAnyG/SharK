@@ -1869,12 +1869,14 @@ def main(argv=None):
         if args.dft:
             if args.full_gold_standard:
                 report_stage_progress(8, 8, "Isolated Ligand DFT & Frontier Orbitals", f"Theory: {args.theory} | Solvent: {args.solvent}")
+            dft_nprocs = args.nprocs if args.nprocs is not None else (len(os.sched_getaffinity(0)) if hasattr(os, 'sched_getaffinity') else (os.cpu_count() or 1))
+            dft_maxcore = _get_safe_maxcore_mb(dft_nprocs, args.maxcore)
             jobs = prepare_ligand_jobs(
                 session, Path(args.work_dir) / 'quantum', top=args.top, target=args.target, compounds=args.compound,
                 pareto=args.pareto, include_controls=args.include_controls, method=args.theory,
                 solvent=None if args.solvent.lower() == 'gas' else args.solvent,
                 optimize=not args.single_point, frequencies=args.frequencies, charge=args.charge,
-                multiplicity=args.multiplicity, seed=args.seed, nprocs=args.nprocs, maxcore=args.maxcore,
+                multiplicity=args.multiplicity, seed=args.seed, nprocs=args.nprocs, maxcore=dft_maxcore,
                 geometry=args.geometry, orbital_grid=None if args.no_orbital_plots else args.orbital_grid)
             records = []
             for job in jobs:
