@@ -64,16 +64,20 @@ def _clean_user_path(raw: Optional[str]) -> Optional[Path]:
 
 def _get_safe_maxcore_mb(nprocs: int, requested_maxcore: Optional[int] = None, safety_fraction: float = 0.65) -> int:
     """Calculates a safe per-process maxcore MB allocation based on available RAM (Auditor Spec Section 8)."""
-    if requested_maxcore is not None:
-        return requested_maxcore
+    if nprocs < 1:
+        raise ValueError('Requested CPU allocation must be positive')
     try:
         import psutil
         avail_mb = psutil.virtual_memory().available / (1024 * 1024)
     except Exception:
         avail_mb = 6000.0
-    budget_mb = int(avail_mb * safety_fraction)
-    safe_core = max(256, budget_mb // max(1, nprocs))
-    return min(4000, safe_core)
+    if requested_maxcore is not None:
+        safe_core = requested_maxcore
+    else:
+        budget_mb = int(avail_mb * safety_fraction)
+        safe_core = min(4000, max(256, budget_mb // nprocs))
+    from .workflows.ligand_qm import _resources
+    return _resources(nprocs, safe_core)[1]
 
 
 def _safe_float(val) -> Optional[float]:
@@ -709,7 +713,12 @@ def main(argv=None):
     parser.add_argument('--no-orbital-plots', action='store_true', help='Extract orbital energies without 3D exports')
     parser.add_argument('--nprocs', type=int)
     parser.add_argument('--maxcore', type=int, help='ORCA memory in MB per process')
-    parser.add_argument('--timeout', type=float, help='Maximum seconds per ORCA job')
+    parser.add_argument(
+        '--timeout',
+        type=float,
+        default=os.environ.get('SHARK_STAGE_TIMEOUT', '86400'),
+        help='Maximum seconds per external calculation stage (ORCA or GROMACS; default: 86400)',
+    )
     parser.add_argument('--work-dir', help='New or empty output directory; defaults to SHARK_SCRATCH')
     parser.add_argument('--html', '--generate-dossier', dest='html', help='Output HTML dossier path')
     parser.add_argument('--run-md', '--md', dest='run_md', action='store_true', help='Prepare or launch GROMACS MD simulation using raw receptor')
@@ -742,6 +751,16 @@ def main(argv=None):
     parser.add_argument('--report-from-evidence', help='Generate HTML dossier directly from an existing evidence.json file without running calculations')
     parser.add_argument('--kill-orphans', action='store_true', help='Scan and safely terminate any orphaned or stuck background ORCA/OpenMPI processes.')
     args = parser.parse_args(arguments)
+    if args.timeout is not None and (not math.isfinite(args.timeout) or args.timeout <= 0):
+        parser.error('--timeout must be a finite positive number of seconds')
+    if args.nprocs is not None and args.nprocs < 1:
+        parser.error('--nprocs must be positive')
+    if args.maxcore is not None and args.maxcore < 1:
+        parser.error('--maxcore must be positive')
+    if args.run_md and (not math.isfinite(args.time_ns) or args.time_ns <= 0):
+        parser.error('--time-ns must be a finite positive number')
+    if args.tier_4_ts and args.scan_steps < 2:
+        parser.error('--scan-steps must be at least 2')
     if args.kill_orphans:
         from .core.runner import cleanup_orphan_orca_processes
         killed = cleanup_orphan_orca_processes()
@@ -984,6 +1003,7 @@ def main(argv=None):
             return poses
 
         last_md_res = None
+        workflow_failures = []
         if args.run_md:
             if args.full_gold_standard:
                 report_stage_progress(2, 8, "Classical Molecular Dynamics Simulation (GROMACS)", f"{args.time_ns:.1f} ns solvated production")
@@ -1003,10 +1023,13 @@ def main(argv=None):
                     sim_time_ns=args.time_ns,
                     run_now=args.execute,
                     pipeline_dir=args.pipeline_dir,
-                    work_dir=Path(args.work_dir) / 'md' if (args.work_dir and not args.pipeline_dir) else None
+                    work_dir=Path(args.work_dir) / 'md' if (args.work_dir and not args.pipeline_dir) else None,
+                    timeout=args.timeout,
                 )
                 last_md_res = res
                 print(f"[MD] Status: {res.status} | Directory: {res.run_dir}")
+                if args.execute and res.status != 'completed':
+                    workflow_failures.append(f"MD {res.status}: {res.error_message or 'external pipeline did not complete'}")
                 if res.dashboard_path:
                     print(f"[MD] Dashboard: {res.dashboard_path}")
                 if (args.full_gold_standard or args.covalent or getattr(args, 'cluster_nac', False)) and res.status == 'completed':
@@ -1021,7 +1044,7 @@ def main(argv=None):
                         args.trajectory = str(xtc_cand)
                         print(f'[MD] Linking trajectory for clustering: {xtc_cand}')
             if not (args.full_gold_standard or args.covalent or getattr(args, 'cluster_nac', False) or args.tier_4_ts or args.dft):
-                return 0
+                return int(bool(workflow_failures))
 
         covalent_summary = None
         if args.covalent:
@@ -1299,7 +1322,8 @@ def main(argv=None):
                 else:
                     cluster_work_dir = Path.cwd() / 'shark_jobs' / f"cluster_sp_{target_residue}_{args.qm_model}"
                 cluster_work_dir.mkdir(parents=True, exist_ok=True)
-                sp_nprocs = args.nprocs or 8
+                host_cpus = len(os.sched_getaffinity(0)) if hasattr(os, 'sched_getaffinity') else (os.cpu_count() or 1)
+                sp_nprocs = args.nprocs or min(8, host_cpus)
                 sp_maxcore = _get_safe_maxcore_mb(sp_nprocs, args.maxcore)
                 cluster_qm_res = run_cluster_single_point(
                     cluster=cluster,
@@ -1309,11 +1333,14 @@ def main(argv=None):
                     nprocs=sp_nprocs,
                     maxcore_mb=sp_maxcore,
                     grid=args.orbital_grid if args.orbital_grid else 40,
+                    timeout=args.timeout,
                 )
                 if cluster_qm_res.success:
                     print(f"[CLUSTER QM] ORCA single-point completed in {cluster_qm_res.execution_time_s:.1f} s: HOMO (MO {cluster_qm_res.homo_idx}) = {cluster_qm_res.homo_energy_ev:.2f} eV, LUMO (MO {cluster_qm_res.lumo_idx}) = {cluster_qm_res.lumo_energy_ev:.2f} eV, Gap = {cluster_qm_res.gap_ev:.2f} eV")
                 else:
                     print(f"[NOTE] Cluster QM single-point skipped or failed: {cluster_qm_res.error_message}")
+                    if args.execute:
+                        workflow_failures.append(f"Cluster QM failed: {cluster_qm_res.error_message or 'unknown error'}")
 
             if args.tier_4_ts:
                 if args.full_gold_standard:
@@ -1324,7 +1351,8 @@ def main(argv=None):
                     ts_work_dir = Path.cwd() / 'runs' / f"ts_{p.ligand_id}_{target_residue}_{args.qm_model}"
                 ts_work_dir.mkdir(parents=True, exist_ok=True)
 
-                ts_nprocs = args.nprocs or (min(8, os.cpu_count() or 4))
+                host_cpus = len(os.sched_getaffinity(0)) if hasattr(os, 'sched_getaffinity') else (os.cpu_count() or 1)
+                ts_nprocs = args.nprocs or min(8, host_cpus)
                 ts_maxcore = _get_safe_maxcore_mb(ts_nprocs, args.maxcore)
 
                 from .analysis.reaction_validation import validate_reaction_pair, write_reaction_definition_json, compute_tier4_fingerprint
@@ -1475,6 +1503,7 @@ def main(argv=None):
                                 input_file='00_reactant_freq.inp',
                                 output_file='00_reactant_freq.out',
                                 cwd=ts_work_dir,
+                                timeout=args.timeout,
                                 check_normal_termination=True,
                             )
                     if scan_res and scan_res.points and scan_is_complete:
@@ -1486,6 +1515,7 @@ def main(argv=None):
                             input_file='01_scan.inp',
                             output_file='01_scan.out',
                             cwd=ts_work_dir,
+                            timeout=args.timeout,
                             check_normal_termination=True,
                         )
                         scan_res = parse_orca_scan_output(ts_work_dir / '01_scan.out', work_dir=ts_work_dir)
@@ -1553,6 +1583,7 @@ def main(argv=None):
                             input_file='02_optts.inp',
                             output_file='02_optts.out',
                             cwd=ts_work_dir,
+                            timeout=args.timeout,
                             check_normal_termination=True,
                         )
                         optts_out = ts_work_dir / '02_optts.out'
@@ -1599,6 +1630,7 @@ def main(argv=None):
                                 input_file='03_adduct_opt.inp',
                                 output_file='03_adduct_opt.out',
                                 cwd=ts_work_dir,
+                                timeout=args.timeout,
                                 check_normal_termination=True,
                             )
 
@@ -1991,14 +2023,15 @@ def main(argv=None):
         if args.dft:
             if args.full_gold_standard:
                 report_stage_progress(8, 8, "Isolated Ligand DFT & Frontier Orbitals", f"Theory: {args.theory} | Solvent: {args.solvent}")
-            dft_nprocs = args.nprocs if args.nprocs is not None else (len(os.sched_getaffinity(0)) if hasattr(os, 'sched_getaffinity') else (os.cpu_count() or 1))
+            host_cpus = len(os.sched_getaffinity(0)) if hasattr(os, 'sched_getaffinity') else (os.cpu_count() or 1)
+            dft_nprocs = args.nprocs if args.nprocs is not None else min(8, host_cpus)
             dft_maxcore = _get_safe_maxcore_mb(dft_nprocs, args.maxcore)
             jobs = prepare_ligand_jobs(
                 session, Path(args.work_dir) / 'quantum', top=args.top, target=args.target, compounds=args.compound,
                 pareto=args.pareto, include_controls=args.include_controls, method=args.theory,
                 solvent=None if args.solvent.lower() == 'gas' else args.solvent,
                 optimize=not args.single_point, frequencies=args.frequencies, charge=args.charge,
-                multiplicity=args.multiplicity, seed=args.seed, nprocs=args.nprocs, maxcore=dft_maxcore,
+                multiplicity=args.multiplicity, seed=args.seed, nprocs=dft_nprocs, maxcore=dft_maxcore,
                 geometry=args.geometry, orbital_grid=None if args.no_orbital_plots else args.orbital_grid)
             records = []
             for job in jobs:
@@ -2024,6 +2057,12 @@ def main(argv=None):
                         'softness_ev': desc.softness_ev,
                     }
             qm_summary = {'jobs': records}
+            if args.execute:
+                for record in records:
+                    if record.get('status') != 'completed':
+                        workflow_failures.append(
+                            f"Ligand DFT {record.get('status', 'failed')}: {record.get('error', 'calculation did not complete')}"
+                        )
             if not (args.full_gold_standard or args.covalent or getattr(args, 'cluster_nac', False) or args.run_md):
                 generate_html_dossier(session.project_name, [], out_file, qm_summary={'jobs': records},
                                       covalent_summary=covalent_summary)
@@ -2127,8 +2166,8 @@ def main(argv=None):
                 'requested': req_wf,
                 'executed': req_wf,
                 'status': 'completed',
-                'degraded': False,
-                'degradation_reason': None,
+                'degraded': bool(workflow_failures),
+                'degradation_reason': '; '.join(workflow_failures) if workflow_failures else None,
             },
             binding={
                 'docking_score': d_score if 'd_score' in locals() else None,
@@ -2168,6 +2207,8 @@ def main(argv=None):
                 'run_id': last_md_res.run_id,
                 'sim_time_ns': last_md_res.sim_time_ns,
                 'status': last_md_res.status,
+                'execution_time_s': last_md_res.execution_time_s,
+                'error_message': last_md_res.error_message,
                 'run_dir': str(last_md_res.run_dir),
                 'plots': md_plots,
                 'dashboard_path': str(last_md_res.dashboard_path) if last_md_res.dashboard_path else md_plots.get('md_analysis_dashboard.png'),
@@ -2230,7 +2271,7 @@ def main(argv=None):
             pass
 
         print(f'[REPORT] {out_file}')
-        return 0
+        return int(bool(workflow_failures))
     except KeyboardInterrupt:
         print('[STOPPED] Execution interrupted; job state and logs preserved', file=sys.stderr)
         return 130

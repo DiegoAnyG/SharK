@@ -116,7 +116,13 @@ def test_safe_maxcore_available_ram():
     core = _get_safe_maxcore_mb(4)
     assert 256 <= core <= 4000
     # Explicit requested maxcore overrides auto-calculation
-    assert _get_safe_maxcore_mb(4, requested_maxcore=1500) == 1500
+    assert _get_safe_maxcore_mb(4, requested_maxcore=256) == 256
+    with pytest.raises(ValueError):
+        _get_safe_maxcore_mb(0)
+    with pytest.raises(ValueError):
+        _get_safe_maxcore_mb(1, requested_maxcore=0)
+    with pytest.raises(ValueError):
+        _get_safe_maxcore_mb(1, requested_maxcore=10**9)
 
 
 def test_cli_orca_completion_helpers_require_scientific_completion_markers():

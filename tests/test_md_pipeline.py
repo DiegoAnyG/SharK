@@ -3,6 +3,7 @@
 import json
 import os
 from pathlib import Path
+import time
 import zipfile
 import pytest
 
@@ -12,6 +13,7 @@ from shark.workflows.md_pipeline import (
     run_md_from_session,
     MDRunResult,
 )
+from shark.workflows.md_bridge import resolve_gromacs_tool_paths
 from shark.core.session import read_poliscreen_session
 
 
@@ -52,6 +54,13 @@ def test_find_gromacs_pipeline(mock_pipeline_dir, monkeypatch):
     assert found_env == mock_pipeline_dir.resolve()
 
 
+def test_md_tool_paths_require_explicit_configuration(tmp_path, monkeypatch):
+    configured = tmp_path / "md-bin"
+    configured.mkdir()
+    monkeypatch.setenv("SHARK_GROMACS_BIN_DIRS", str(configured))
+    assert resolve_gromacs_tool_paths() == [configured.resolve()]
+
+
 def test_setup_and_launch_md_prepared(mock_pipeline_dir, tmp_path):
     rec_pdb = tmp_path / "receptor_raw.pdb"
     rec_pdb.write_text("ATOM      1  N   MET A   1      10.0  10.0  10.0\nEND\n", encoding="utf-8")
@@ -77,6 +86,7 @@ def test_setup_and_launch_md_prepared(mock_pipeline_dir, tmp_path):
     cfg = (result.run_dir / "config.env").read_text()
     assert "SIM_TIME_NS=5.0" in cfg
     assert 'LIGAND_NAME="TEST_LIG"' in cfg
+    assert 'CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"' in cfg
 
 
 def test_run_md_from_session_selects_raw_receptor(mock_pipeline_dir, mock_session_with_receptors, tmp_path):
@@ -103,7 +113,7 @@ def test_run_md_from_session_selects_raw_receptor(mock_pipeline_dir, mock_sessio
     assert 'PROTEIN_FF="amber99sb-ildn"' in cfg_text
     assert 'WATER_MODEL="spce"' in cfg_text
     assert (mock_pipeline_dir / "inputs" / "run_LIG1_2ns_receptor.pdb").is_file()
-    assert (mock_pipeline_dir / "config" / "config.env").is_file()
+    assert not (mock_pipeline_dir / "config" / "config.env").exists()
 
 
 def test_run_md_from_session_with_reference_ligand(mock_pipeline_dir, tmp_path):
@@ -208,3 +218,54 @@ def test_setup_and_launch_md_live_execution_with_progress(mock_pipeline_dir, tmp
     assert "Production MD" in captured.out
 
 
+def test_setup_and_launch_md_missing_runner_is_failed(mock_pipeline_dir, tmp_path):
+    rec_pdb = tmp_path / "rec.pdb"
+    rec_pdb.write_text("ATOM      1  N   MET A   1      10.0  10.0  10.0\nEND\n", encoding="utf-8")
+    lig_pdb = tmp_path / "lig.pdb"
+    lig_pdb.write_text("ATOM      1  C1  LIG A   1      12.0  12.0  12.0\nEND\n", encoding="utf-8")
+    (mock_pipeline_dir / "scripts" / "run_pipeline.sh").unlink()
+
+    result = setup_and_launch_md(
+        receptor_pdb=rec_pdb,
+        ligand_pose_file=lig_pdb,
+        ligand_name="LIG_NO_RUNNER",
+        pipeline_dir=mock_pipeline_dir,
+        run_now=True,
+    )
+
+    assert result.status == "failed"
+    assert result.error_message == "Configured GROMACS pipeline is missing scripts/run_pipeline.sh"
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX process-group boundary")
+def test_setup_and_launch_md_timeout_kills_process_group(mock_pipeline_dir, tmp_path):
+    rec_pdb = tmp_path / "rec.pdb"
+    rec_pdb.write_text("ATOM      1  N   MET A   1      10.0  10.0  10.0\nEND\n", encoding="utf-8")
+    lig_pdb = tmp_path / "lig.pdb"
+    lig_pdb.write_text("ATOM      1  C1  LIG A   1      12.0  12.0  12.0\nEND\n", encoding="utf-8")
+
+    script_sh = mock_pipeline_dir / "scripts" / "run_pipeline.sh"
+    script_sh.write_text(
+        "#!/bin/bash\n"
+        "sleep 60 &\n"
+        "echo $! > child.pid\n"
+        "wait\n",
+        encoding="utf-8",
+    )
+
+    res = setup_and_launch_md(
+        receptor_pdb=rec_pdb,
+        ligand_pose_file=lig_pdb,
+        ligand_name="LIG_TIMEOUT",
+        sim_time_ns=1.0,
+        pipeline_dir=mock_pipeline_dir,
+        run_now=True,
+        timeout=0.25,
+    )
+    assert res.status == "timed_out"
+    assert res.error_message and "timed out" in res.error_message
+    pid = int((res.run_dir / "child.pid").read_text())
+    time.sleep(0.1)
+    proc_status = Path(f"/proc/{pid}/stat")
+    if proc_status.exists():
+        assert proc_status.read_text().split()[2] in ("Z", "X", "T")

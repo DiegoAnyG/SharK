@@ -985,6 +985,7 @@ def run_cluster_single_point(
     maxcore_mb: Optional[int] = None,
     grid: int = 40,
     reuse_existing: bool = True,
+    timeout: Optional[float] = None,
 ) -> ClusterQMResult:
     """Executes a genuine ab initio ORCA single-point calculation on an active-site QM cluster.
 
@@ -1044,6 +1045,7 @@ def run_cluster_single_point(
             input_file="cluster.inp",
             output_file="cluster.out",
             cwd=w_path,
+            timeout=timeout,
             check_normal_termination=True,
         )
         if not proc_res.terminated_normally or proc_res.returncode != 0:
@@ -1096,6 +1098,7 @@ def run_cluster_single_point(
                     cwd=w_path,
                     extra_args=["-i"],
                     stdin_content=plot_cmd,
+                    timeout=timeout,
                     check_normal_termination=False,
                 )
 
@@ -1128,5 +1131,4 @@ def run_cluster_single_point(
         execution_time_s=exec_time,
         success=True,
     )
-
 

@@ -49,6 +49,21 @@ def test_cluster_extraction(sample_structures, tmp_path):
     assert "* xyz" in content
 
 
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        ["--timeout", "0"],
+        ["--nprocs", "0"],
+        ["--maxcore", "0"],
+        ["--run-md", "--time-ns", "0"],
+        ["--tier-4-ts", "--scan-steps", "1"],
+    ],
+)
+def test_cli_rejects_invalid_resource_limits_before_work(arguments):
+    with pytest.raises(SystemExit):
+        cli_main(arguments)
+
+
 def test_html_dossier_generation(tmp_path):
     out_html = tmp_path / "test_dossier.html"
     poses = [
@@ -135,4 +150,18 @@ def test_cli_covalent_and_run_md(tmp_path):
     ])
     assert err_code == 1
 
-
+    # 5. A timed-out MD process tree is reported as a failed CLI execution.
+    (mock_pipeline / "scripts" / "run_pipeline.sh").write_text(
+        "#!/bin/bash\nsleep 60\n",
+        encoding="utf-8",
+    )
+    timeout_code = cli_main([
+        "--session", str(archive),
+        "--compound", "LIG1",
+        "--run-md",
+        "--execute",
+        "--pipeline-dir", str(mock_pipeline),
+        "--time-ns", "5.0",
+        "--timeout", "0.1",
+    ])
+    assert timeout_code == 1

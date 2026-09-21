@@ -15,7 +15,7 @@ import subprocess
 import sys
 import threading
 import time
-from typing import Optional
+from typing import Callable, Optional, Sequence
 
 from .frontier import file_hash, read_orbital_metadata, discover_frontier_fields
 
@@ -223,6 +223,135 @@ class ProcessResult:
     execution_time_s: float = 0.0
 
 
+def run_external_process(
+    command: Sequence[str | Path],
+    output_file: str | Path,
+    cwd: str | Path = ".",
+    *,
+    timeout: Optional[float] = None,
+    env: Optional[dict] = None,
+    stdin_content: Optional[str] = None,
+    completion_marker: Optional[str] = None,
+    output_mode: str = "w",
+    show_progress: bool = False,
+    progress_formatter: Optional[Callable[[Path, float], str]] = None,
+    process_name: str = "External process",
+) -> ProcessResult:
+    """Run an external command in an isolated process group with bounded lifetime."""
+    if not command:
+        raise ValueError("External command must not be empty")
+    if timeout is not None and (not math.isfinite(timeout) or timeout <= 0):
+        raise ValueError("Timeout must be a finite positive number")
+
+    work_dir = Path(cwd).resolve()
+    work_dir.mkdir(parents=True, exist_ok=True)
+    out_arg = Path(output_file)
+    out_p = (work_dir / out_arg).resolve() if not out_arg.is_absolute() else out_arg.resolve()
+    out_p.parent.mkdir(parents=True, exist_ok=True)
+    cmd = [str(part) for part in command]
+    run_env = os.environ.copy() if env is None else env.copy()
+    options = dict(start_new_session=True) if os.name == "posix" else dict(
+        creationflags=subprocess.CREATE_NEW_PROCESS_GROUP
+    )
+
+    proc = None
+    old_term = None
+    start_t = time.monotonic()
+    timed_out = False
+    interrupted = False
+    error = None
+    last_status_len = 0
+
+    try:
+        if os.name == "posix" and threading.current_thread() is threading.main_thread():
+            def sigterm_handler(signum, frame):
+                raise KeyboardInterrupt
+            old_term = signal.signal(signal.SIGTERM, sigterm_handler)
+
+        with open(out_p, output_mode, encoding="utf-8") as out_f:
+            proc = subprocess.Popen(
+                cmd,
+                cwd=work_dir,
+                stdin=subprocess.PIPE if stdin_content is not None else None,
+                stdout=out_f,
+                stderr=subprocess.STDOUT,
+                env=run_env,
+                text=True if stdin_content is not None else False,
+                **options,
+            )
+            try:
+                if stdin_content is not None:
+                    proc.communicate(input=stdin_content, timeout=timeout)
+                else:
+                    while proc.poll() is None:
+                        elapsed_s = time.monotonic() - start_t
+                        if timeout is not None and elapsed_s > timeout:
+                            raise subprocess.TimeoutExpired(cmd, timeout)
+                        if show_progress and progress_formatter is not None and out_p.is_file():
+                            status_str = progress_formatter(out_p, elapsed_s)
+                            if status_str:
+                                pad = " " * max(0, last_status_len - len(status_str))
+                                sys.stderr.write(f"\r{status_str}{pad}")
+                                sys.stderr.flush()
+                                last_status_len = len(status_str)
+                        time.sleep(1.0)
+            except subprocess.TimeoutExpired:
+                timed_out = True
+                _stop_process_tree(proc)
+                error = f"{process_name} timed out after {timeout} seconds"
+            except KeyboardInterrupt:
+                interrupted = True
+                _stop_process_tree(proc)
+                raise
+    except KeyboardInterrupt:
+        interrupted = True
+        if proc is not None:
+            _stop_process_tree(proc)
+        raise
+    except Exception as exc:
+        if proc is not None:
+            _stop_process_tree(proc)
+        error = str(exc)
+        return ProcessResult(
+            returncode=-1,
+            terminated_normally=False,
+            timed_out=timed_out,
+            interrupted=interrupted,
+            error=error,
+            execution_time_s=time.monotonic() - start_t,
+        )
+    finally:
+        if last_status_len > 0:
+            sys.stderr.write("\r" + " " * last_status_len + "\r")
+            sys.stderr.flush()
+        if old_term is not None:
+            signal.signal(signal.SIGTERM, old_term)
+
+    elapsed = time.monotonic() - start_t
+    ret = proc.returncode if proc is not None else -1
+    terminated_normally = False
+    if ret == 0 and not timed_out and not interrupted:
+        if completion_marker is None:
+            terminated_normally = True
+        elif out_p.is_file() and completion_marker in out_p.read_text(encoding="utf-8", errors="replace"):
+            terminated_normally = True
+        elif not out_p.is_file():
+            error = f"{process_name} output file was not created"
+        else:
+            error = f"{process_name} exited with code 0 but its completion marker is missing"
+    elif not error:
+        error = f"{process_name} exited with return code {ret}"
+
+    return ProcessResult(
+        returncode=ret,
+        terminated_normally=terminated_normally,
+        timed_out=timed_out,
+        interrupted=interrupted,
+        error=error,
+        execution_time_s=elapsed,
+    )
+
+
 def run_orca_process(
     executable: str | Path | None = None,
     input_file: str | Path = "",
@@ -267,12 +396,7 @@ def run_orca_process(
     ProcessResult
         Execution status, return code, normal termination flag, and elapsed time.
     """
-    if timeout is not None and (not math.isfinite(timeout) or timeout <= 0):
-        raise ValueError("Timeout must be a finite positive number")
-
     work_dir = Path(cwd).resolve()
-    work_dir.mkdir(parents=True, exist_ok=True)
-
     if executable is None:
         exe = find_orca()
     else:
@@ -283,9 +407,6 @@ def run_orca_process(
     run_env = os.environ.copy() if env is None else env.copy()
     run_env["PATH"] = str(exe.parent) + os.pathsep + run_env.get("PATH", "")
 
-    out_p = (work_dir / output_file).resolve() if not Path(output_file).is_absolute() else Path(output_file).resolve()
-    out_p.parent.mkdir(parents=True, exist_ok=True)
-
     cmd = [str(exe)]
     if input_file:
         inp_p = Path(input_file)
@@ -293,117 +414,27 @@ def run_orca_process(
     if extra_args:
         cmd.extend(extra_args)
 
-    options = dict(start_new_session=True) if os.name == "posix" else dict(
-        creationflags=subprocess.CREATE_NEW_PROCESS_GROUP
+    result = run_external_process(
+        command=cmd,
+        output_file=output_file,
+        cwd=work_dir,
+        timeout=timeout,
+        env=run_env,
+        stdin_content=stdin_content,
+        completion_marker="ORCA TERMINATED NORMALLY" if check_normal_termination else None,
+        output_mode=output_mode,
+        show_progress=show_progress,
+        progress_formatter=lambda path, elapsed: _extract_orca_progress_status(path, elapsed, input_file),
+        process_name="ORCA",
     )
-
-    proc = None
-    old_term = None
-    start_t = time.monotonic()
-    timed_out = False
-    interrupted = False
-    error = None
-
-    try:
-        if os.name == "posix" and threading.current_thread() is threading.main_thread():
-            def sigterm_handler(signum, frame):
-                raise KeyboardInterrupt
-            old_term = signal.signal(signal.SIGTERM, sigterm_handler)
-
-        with open(out_p, output_mode, encoding="utf-8") as out_f:
-            proc = subprocess.Popen(
-                cmd,
-                cwd=work_dir,
-                stdin=subprocess.PIPE if stdin_content is not None else None,
-                stdout=out_f,
-                stderr=subprocess.STDOUT,
-                env=run_env,
-                text=True if stdin_content is not None else False,
-                **options,
-            )
-            try:
-                if stdin_content is not None:
-                    proc.communicate(input=stdin_content, timeout=timeout)
-                else:
-                    last_status_len = 0
-                    while True:
-                        ret_poll = proc.poll()
-                        if ret_poll is not None:
-                            break
-                        now = time.monotonic()
-                        elapsed_s = now - start_t
-                        if timeout is not None and elapsed_s > timeout:
-                            raise subprocess.TimeoutExpired(cmd, timeout)
-
-                        if show_progress and out_p.is_file():
-                            status_str = _extract_orca_progress_status(out_p, elapsed_s, input_file)
-                            if status_str:
-                                pad = " " * max(0, last_status_len - len(status_str))
-                                sys.stderr.write(f"\r{status_str}{pad}")
-                                sys.stderr.flush()
-                                last_status_len = len(status_str)
-                        time.sleep(1.0)
-
-                    if show_progress and last_status_len > 0:
-                        sys.stderr.write("\r" + " " * last_status_len + "\r")
-                        sys.stderr.flush()
-            except subprocess.TimeoutExpired:
-                timed_out = True
-                _stop_process_tree(proc)
-                error = f"ORCA execution timed out after {timeout} seconds"
-            except KeyboardInterrupt:
-                interrupted = True
-                _stop_process_tree(proc)
-                error = "ORCA execution was interrupted by user"
-                raise
-    except KeyboardInterrupt:
-        interrupted = True
-        if proc is not None:
-            _stop_process_tree(proc)
-        raise
-    except Exception as exc:
-        if proc is not None:
-            _stop_process_tree(proc)
-        error = str(exc)
-        return ProcessResult(
-            returncode=-1,
-            terminated_normally=False,
-            timed_out=timed_out,
-            interrupted=interrupted,
-            error=error,
-            execution_time_s=time.monotonic() - start_t,
-        )
-    finally:
-        if old_term is not None:
-            signal.signal(signal.SIGTERM, old_term)
-
-    elapsed = time.monotonic() - start_t
-    ret = proc.returncode if proc is not None else -1
-
-    terminated_normally = False
-    if ret == 0 and not timed_out and not interrupted:
-        if check_normal_termination:
-            if out_p.is_file():
-                text = out_p.read_text(encoding="utf-8", errors="replace")
-                if "ORCA TERMINATED NORMALLY" in text:
-                    terminated_normally = True
-                else:
-                    error = "ORCA process exited with code 0 but missing 'ORCA TERMINATED NORMALLY'"
-            else:
-                error = "Output file not found after process completion"
-        else:
-            terminated_normally = True
-    elif not error:
-        error = f"ORCA exited with return code {ret}"
-
-    return ProcessResult(
-        returncode=ret,
-        terminated_normally=terminated_normally,
-        timed_out=timed_out,
-        interrupted=interrupted,
-        error=error,
-        execution_time_s=elapsed,
-    )
+    if (
+        check_normal_termination
+        and result.returncode == 0
+        and not result.terminated_normally
+        and not result.timed_out
+    ):
+        result.error = "ORCA process exited with code 0 but missing 'ORCA TERMINATED NORMALLY'"
+    return result
 
 
 def _export_frontiers(job, exe, results, grid, timeout):
