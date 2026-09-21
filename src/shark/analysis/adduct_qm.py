@@ -176,8 +176,6 @@ class CovalentBondNatureResult:
     def __post_init__(self):
         if self.distance_based_bond_order_proxy is None and self.wiberg_bond_order is not None:
             self.distance_based_bond_order_proxy = self.wiberg_bond_order
-        elif self.wiberg_bond_order is None and self.distance_based_bond_order_proxy is not None:
-            self.wiberg_bond_order = self.distance_based_bond_order_proxy
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -410,9 +408,9 @@ def evaluate_covalent_bond_nature(
         1.82 if "S" in (nucleophile_element, electrophile_element) else 1.47
     )
 
-    # If is_optimized_adduct is not explicitly specified, infer from distance
+    # A short distance alone is not proof that an adduct optimization was run.
     if is_optimized_adduct is None:
-        is_optimized_adduct = (bond_distance_angstrom <= 2.0)
+        is_optimized_adduct = False
 
     # Heuristic distance-based proxy
     b_order = max(0.05, min(1.20, math.exp(-1.4 * (bond_distance_angstrom - ref_d))))
@@ -438,32 +436,31 @@ def evaluate_covalent_bond_nature(
             warnings=["Bond order calculation requires optimized adduct QM calculation; not evaluated."],
         )
 
-    covalency_pct = min(100.0, max(10.0, b_order * 100.0))
-    chi = {"H": 2.20, "C": 2.55, "N": 3.04, "O": 3.44, "S": 2.58}
-    d_chi = abs(chi.get(nucleophile_element, 3.44) - chi.get(electrophile_element, 2.55))
-    q_transfer = -(0.18 + 0.12 * d_chi)
-
-    bond_type = f"Polar covalent sigma-bond ({nucleophile_element}-{electrophile_element})"
-    reversibility_str = "Reversible covalent bond" if is_reversible_warhead else "Predicted stable covalent adduct"
+    formed_geometry = bond_distance_angstrom <= ref_d * 1.30
+    bond_type = (
+        f"Optimized {nucleophile_element}-{electrophile_element} bond geometry"
+        if formed_geometry else "Optimized unbound geometry"
+    )
     explanation = (
-        f"Adduct {nucleophile_element}-{electrophile_element} geometry at {bond_distance_angstrom:.2f} A "
-        f"exhibits an estimated bond order of {b_order:.2f}, consistent with a single covalent bond "
-        f"with {abs(q_transfer):.2f} e charge transfer. {reversibility_str}."
+        f"The optimized {nucleophile_element}-{electrophile_element} distance is "
+        f"{bond_distance_angstrom:.2f} A. The distance-based bond-likelihood proxy is {b_order:.2f}; "
+        "no Wiberg bond order or charge transfer was calculated."
     )
 
     return CovalentBondNatureResult(
         bond_type=bond_type,
         equilibrium_distance_angstrom=bond_distance_angstrom,
-        wiberg_bond_order=round(b_order, 3),
-        charge_transfer_e=round(q_transfer, 3),
-        bond_covalency_percent=round(covalency_pct, 1),
+        distance_based_bond_order_proxy=round(b_order, 3),
+        wiberg_bond_order=None,
+        charge_transfer_e=None,
+        bond_covalency_percent=None,
         bond_likelihood_proxy=round(b_order, 3),
         is_reversible=is_reversible_warhead,
-        is_calculated=True,
-        status="computed",
+        is_calculated=False,
+        status="geometry_optimized" if formed_geometry else "optimized_unbound",
         evidence_type="model_derived",
         explanation=explanation,
-        warnings=[],
+        warnings=["Distance proxy is not a computed bond order or charge-transfer analysis."],
     )
 
 

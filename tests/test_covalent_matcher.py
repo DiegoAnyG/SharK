@@ -124,6 +124,23 @@ def test_target_residue_filter(synthetic_complex):
     assert rep2.has_nac is False
 
 
+def test_default_matching_excludes_ligand_oxygen_as_electrophile(tmp_path):
+    receptor = tmp_path / "receptor.pdb"
+    receptor.write_text(
+        "ATOM      1  OG1 THR A 309       0.000   0.000   0.000  1.00 20.00           O\nEND\n",
+        encoding="utf-8",
+    )
+    ligand = tmp_path / "ligand.pdb"
+    ligand.write_text(
+        "HETATM    1  O1  LIG A   1       0.000   0.000   3.000  1.00 20.00           O\n"
+        "HETATM    2  C1  LIG A   1       0.000   0.000   3.400  1.00 20.00           C\nEND\n",
+        encoding="utf-8",
+    )
+    report = match_covalent_pocket(receptor, ligand, target_residue="THR309")
+    assert report.best_match is not None
+    assert report.best_match.ligand_atom_element == "C"
+
+
 def test_compute_total_covalent_feasibility():
     from shark.analysis.covalent_matcher import compute_total_covalent_feasibility, TotalCovalentFeasibility
 
@@ -157,4 +174,3 @@ def test_compute_total_covalent_feasibility():
     )
     assert res_no_ts.ts_score is None
     assert res_high.cfi_total > 0
-

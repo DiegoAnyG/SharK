@@ -164,8 +164,18 @@ def validate_reaction_pair(
     # Check 2: Initial distance validity
     if initial_distance_angstrom is not None:
         if initial_distance_angstrom > 5.5:
-            warnings.append(
-                f"Initial distance ({initial_distance_angstrom:.2f} Å) is very distant from reactive contact region (d > 5.5 Å)."
+            return ReactionPairValidation(
+                valid=False,
+                severity="BLOCKING",
+                message=(
+                    f"Initial distance ({initial_distance_angstrom:.2f} Å) is outside the "
+                    "reactive-contact region (d > 5.5 Å); Tier 4 cannot define a "
+                    "defensible reaction coordinate from this structure."
+                ),
+                warnings=["Select a reactive MD frame or provide a closer validated starting geometry."],
+                proposed_bond_type=proposed_bond,
+                nucleophile_label=nucleophile_label,
+                electrophile_label=electrophile_label,
             )
         elif initial_distance_angstrom < 1.1:
             return ReactionPairValidation(
@@ -246,6 +256,7 @@ def compute_tier4_fingerprint(
 ) -> str:
     """Computes a deterministic SHA-256 fingerprint of the chemical and numerical Tier 4 setup."""
     payload: dict[str, Any] = {
+        "workflow_version": 2,
         "num_atoms": len(cluster_atoms),
         "atom_symbols": [getattr(a, "element", str(a)) for a in cluster_atoms],
         "nu_idx": nucleophile_idx,
@@ -301,4 +312,3 @@ def write_reaction_definition_json(
     }
     p.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
     return p
-

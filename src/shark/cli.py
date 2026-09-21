@@ -13,7 +13,7 @@ import zipfile
 
 from .core.session import read_poliscreen_session, match_receptor_id
 from .core.runner import run_orca_job, run_orca_process, find_orca
-from .reports.dossier import generate_html_dossier
+from .reports.dossier import generate_html_dossier, _sanitize_covalent_summary
 from .workflows.ligand_qm import prepare_ligand_jobs
 
 
@@ -45,7 +45,7 @@ def interactive_session_picker() -> Path | None:
 def _clean_user_path(raw: Optional[str]) -> Optional[Path]:
     """Sanitize user-provided file or directory paths across OS/shell formats.
 
-    Handles Windows backslashes (\ -> /), surrounding quotes, home directories,
+    Handles Windows backslashes (\\ -> /), surrounding quotes, home directories,
     and missing leading root slashes.
     """
     if not raw:
@@ -84,6 +84,25 @@ def _safe_float(val) -> Optional[float]:
         return f if math.isfinite(f) else None
     except (TypeError, ValueError):
         return None
+
+
+def _orca_optimization_completed(text: str) -> bool:
+    """Return true only for an explicitly converged ORCA optimization."""
+    return (
+        "ORCA TERMINATED NORMALLY" in text
+        and "THE OPTIMIZATION HAS CONVERGED" in text
+        and "optimization did not converge" not in text.lower()
+    )
+
+
+def _orca_scan_completed(text: str, point_count: int, expected_points: int) -> bool:
+    """Reject partial scans even when an intermediate ORCA module terminated normally."""
+    return (
+        "ORCA TERMINATED NORMALLY" in text
+        and "ORCA finished by error termination" not in text
+        and "RELAXED SURFACE SCAN RESULTS" in text
+        and point_count >= expected_points
+    )
 
 
 def interactive_receptor_picker(session) -> Optional[str]:
@@ -745,7 +764,6 @@ def main(argv=None):
                 ev_file.parent / 'dft',
                 ev_file.parent / 'dft_benzofuroxan',
                 Path.cwd() / 'dft_benzofuroxan',
-                Path('/home/diego/SharK/dft_benzofuroxan'),
                 Path(__file__).resolve().parent.parent.parent / 'dft_benzofuroxan',
             ]
             for d_cand in dft_cands:
@@ -764,6 +782,7 @@ def main(argv=None):
         if cf_path.is_file():
             try:
                 cov_summary = json.loads(cf_path.read_text(encoding='utf-8'))
+                cov_summary = _sanitize_covalent_summary(cov_summary, ev_file.parent)
             except Exception:
                 pass
 
@@ -1341,9 +1360,9 @@ def main(argv=None):
                 print(f"  Validation Status:  {val_res.severity} - {val_res.message}")
                 print("=" * 65)
 
-                if val_res.severity == "BLOCKING":
-                    print(f"[ERROR] Tier 4 aborted: {val_res.message}", file=sys.stderr)
-                    return 1
+                tier4_blocked = val_res.severity == "BLOCKING"
+                if tier4_blocked:
+                    print(f"[TIER 4] [SKIPPED] {val_res.message}", file=sys.stderr)
 
                 fp = compute_tier4_fingerprint(
                     cluster_atoms=cluster.atoms,
@@ -1423,14 +1442,17 @@ def main(argv=None):
                         scan_text = scan_out_path.read_text(encoding='utf-8', errors='ignore')
                         scan_res = parse_orca_scan_output(scan_out_path, work_dir=ts_work_dir)
                         if scan_res and scan_res.points:
-                            if "ORCA TERMINATED NORMALLY" in scan_text or len(scan_res.points) >= (args.scan_steps - 1):
-                                scan_is_complete = True
+                            scan_is_complete = _orca_scan_completed(
+                                scan_text, len(scan_res.points), args.scan_steps
+                            )
+                            if scan_is_complete:
+                                scan_res.converged = True
                             else:
                                 print(f"[TIER 4] [NOTE] Existing scan output is partial ({len(scan_res.points)}/{args.scan_steps} steps).")
                     except Exception:
                         scan_res = None
 
-                if args.execute:
+                if args.execute and not tier4_blocked:
                     orca_bin = find_orca(allow_none=True)
                     if not orca_bin:
                         print("[ERROR] ORCA executable not found in PATH or standard location", file=sys.stderr)
@@ -1442,7 +1464,7 @@ def main(argv=None):
                         rf_done = False
                         if rf_out.is_file():
                             txt = rf_out.read_text(encoding='utf-8', errors='ignore')
-                            if "VIBRATIONAL FREQUENCIES" in txt and ("ORCA TERMINATED NORMALLY" in txt or "SUCCESS" in txt or "TOTAL RUN TIME" in txt):
+                            if "VIBRATIONAL FREQUENCIES" in txt and _orca_optimization_completed(txt):
                                 rf_done = True
                         if rf_done:
                             print(f"[TIER 4] [Step 0/4] Found existing completed reactant frequency calculation ({rf_out.name}), skipping re-run.")
@@ -1453,7 +1475,7 @@ def main(argv=None):
                                 input_file='00_reactant_freq.inp',
                                 output_file='00_reactant_freq.out',
                                 cwd=ts_work_dir,
-                                check_normal_termination=False,
+                                check_normal_termination=True,
                             )
                     if scan_res and scan_res.points and scan_is_complete:
                         print(f"[TIER 4] [Step 1/3] Found existing completed coordinate scan ({len(scan_res.points)} steps), skipping re-run.")
@@ -1464,13 +1486,17 @@ def main(argv=None):
                             input_file='01_scan.inp',
                             output_file='01_scan.out',
                             cwd=ts_work_dir,
-                            check_normal_termination=False,
+                            check_normal_termination=True,
                         )
                         scan_res = parse_orca_scan_output(ts_work_dir / '01_scan.out', work_dir=ts_work_dir)
-                        if not scan_res.points:
+                        scan_text = (ts_work_dir / '01_scan.out').read_text(encoding='utf-8', errors='ignore')
+                        scan_is_complete = _orca_scan_completed(
+                            scan_text, len(scan_res.points), args.scan_steps
+                        )
+                        if p_scan.returncode != 0 or not p_scan.terminated_normally or not scan_is_complete:
                             print(f"[ERROR] Coordinate scan failed: {p_scan.error or f'code {p_scan.returncode}'}", file=sys.stderr)
                             return p_scan.returncode if p_scan.returncode != 0 else 1
-                        scan_is_complete = p_scan.terminated_normally
+                        scan_res.converged = True
                         try:
                             scan_meta_path.write_text(json.dumps({
                                 "fingerprint": fp,
@@ -1515,7 +1541,7 @@ def main(argv=None):
                     already_converged_ts = False
                     if optts_out.is_file() and cached_ts_valid:
                         txt = optts_out.read_text(encoding='utf-8', errors='ignore')
-                        if "VIBRATIONAL FREQUENCIES" in txt and ("SUCCESS" in txt or "ORCA TERMINATED NORMALLY" in txt or "TOTAL RUN TIME" in txt):
+                        if "VIBRATIONAL FREQUENCIES" in txt and _orca_optimization_completed(txt):
                             already_converged_ts = True
 
                     if already_converged_ts:
@@ -1527,13 +1553,18 @@ def main(argv=None):
                             input_file='02_optts.inp',
                             output_file='02_optts.out',
                             cwd=ts_work_dir,
-                            check_normal_termination=False,
+                            check_normal_termination=True,
                         )
                         optts_out = ts_work_dir / '02_optts.out'
+                        ts_completed = False
+                        if optts_out.is_file():
+                            ts_completed = _orca_optimization_completed(
+                                optts_out.read_text(encoding='utf-8', errors='ignore')
+                            )
                         try:
                             optts_meta_path.write_text(json.dumps({
                                 "fingerprint": fp,
-                                "completed": p_ts.terminated_normally,
+                                "completed": ts_completed,
                                 "method": args.theory,
                                 "nprocs": ts_nprocs,
                                 "maxcore_mb": ts_maxcore,
@@ -1556,22 +1587,27 @@ def main(argv=None):
                                     header = tmpl.split('* xyz')[0]
                                     coords_str = '\n'.join(['  ' + ln for ln in xyz_lines if ln.strip()])
                                     adduct_inp.write_text(f"{header}* xyz {cluster.charge} {cluster.effective_multiplicity}\n{coords_str}\n*\n", encoding='utf-8')
-                        if adduct_inp.is_file() and not adduct_out.is_file():
+                        adduct_completed = False
+                        if adduct_out.is_file():
+                            adduct_completed = _orca_optimization_completed(
+                                adduct_out.read_text(encoding='utf-8', errors='ignore')
+                            )
+                        if adduct_inp.is_file() and not adduct_completed:
                             print(f"[TIER 4] [Step 4/4] Executing covalent product adduct optimization with {orca_real}...")
                             run_orca_process(
                                 executable=orca_real,
                                 input_file='03_adduct_opt.inp',
                                 output_file='03_adduct_opt.out',
                                 cwd=ts_work_dir,
-                                check_normal_termination=False,
+                                check_normal_termination=True,
                             )
 
                     def _extract_tier4_energies(t_dir, s_res, t_verif):
-                        r_el = s_res.points[0].energy_hartree if s_res and s_res.points else None
+                        r_el = s_res.points[0].energy_hartree if s_res and s_res.converged and s_res.points else None
                         r_g = None
-                        t_el = t_verif.electronic_energy_hartree if t_verif and t_verif.electronic_energy_hartree != 0.0 else (s_res.max_energy_hartree if s_res else None)
+                        t_el = t_verif.electronic_energy_hartree if t_verif and t_verif.electronic_energy_hartree != 0.0 else (s_res.max_energy_hartree if s_res and s_res.converged else None)
                         t_g = t_verif.gibbs_free_energy_hartree if t_verif and t_verif.gibbs_free_energy_hartree != 0.0 else None
-                        p_el = s_res.points[-1].energy_hartree if s_res and s_res.points else None
+                        p_el = s_res.points[-1].energy_hartree if s_res and s_res.converged and s_res.points else None
                         p_g = None
 
                         if t_dir and Path(t_dir).is_dir():
@@ -1582,9 +1618,14 @@ def main(argv=None):
                                     try:
                                         from .core.parser import parse_orca_results
                                         r_calc = parse_orca_results(rf, name="Reactants")
-                                        if r_calc.gibbs_energy and math.isfinite(r_calc.gibbs_energy):
+                                        r_minimum = (
+                                            r_calc.optimization_converged is True
+                                            and bool(r_calc.frequencies)
+                                            and not [f for f in r_calc.frequencies if f < -15.0]
+                                        )
+                                        if r_minimum and r_calc.gibbs_energy and math.isfinite(r_calc.gibbs_energy):
                                             r_g = r_calc.gibbs_energy
-                                        if r_calc.el_energy and math.isfinite(r_calc.el_energy):
+                                        if r_minimum and r_calc.el_energy and math.isfinite(r_calc.el_energy):
                                             r_el = r_calc.el_energy
                                         break
                                     except Exception:
@@ -1596,9 +1637,15 @@ def main(argv=None):
                                     try:
                                         from .core.parser import parse_orca_results
                                         p_calc = parse_orca_results(pf, name="Product_Adduct")
-                                        if p_calc.gibbs_energy and math.isfinite(p_calc.gibbs_energy):
+                                        p_optimized = p_calc.optimization_converged is True
+                                        p_minimum = (
+                                            p_optimized
+                                            and bool(p_calc.frequencies)
+                                            and not [f for f in p_calc.frequencies if f < -15.0]
+                                        )
+                                        if p_minimum and p_calc.gibbs_energy and math.isfinite(p_calc.gibbs_energy):
                                             p_g = p_calc.gibbs_energy
-                                        if p_calc.el_energy and math.isfinite(p_calc.el_energy):
+                                        if p_optimized and p_calc.el_energy and math.isfinite(p_calc.el_energy):
                                             p_el = p_calc.el_energy
                                         break
                                     except Exception:
@@ -1630,7 +1677,10 @@ def main(argv=None):
                     )
                     print("=" * 65)
                     print(f" [TIER 4] REACTION THERMOCHEMISTRY & KINETICS ({profile.energy_basis.upper()})")
-                    print(f"  Activation Barrier ({profile.barrier_symbol}): {profile.activation_barrier_kcal:.2f} kcal/mol")
+                    if profile.activation_barrier_kcal is not None:
+                        print(f"  Activation Barrier ({profile.barrier_symbol}): {profile.activation_barrier_kcal:.2f} kcal/mol")
+                    else:
+                        print("  Activation Barrier:           Not available (first-order TS not verified)")
                     if profile.reaction_energy_kcal is not None:
                         print(f"  Reaction Energy ({profile.reaction_energy_symbol}): {profile.reaction_energy_kcal:.2f} kcal/mol")
                     k_str = f"{profile.rate_constant_s:.3e} s^-1" if profile.rate_constant_s is not None else "Not available (requires Gibbs free energy)"
@@ -1641,6 +1691,7 @@ def main(argv=None):
 
                     if covalent_summary is not None:
                         covalent_summary['transition_state'] = {
+                            'status': 'completed' if (ts_verif and ts_verif.is_valid_first_order_saddle_point) else 'invalid',
                             'structure_provenance': structure_provenance,
                             'energy_basis': profile.energy_basis,
                             'barrier_symbol': profile.barrier_symbol,
@@ -1658,14 +1709,14 @@ def main(argv=None):
                             'is_first_order_ts': ts_verif.is_valid_first_order_saddle_point if ts_verif else False,
                             'warnings': profile.warnings,
                         }
-                else:
+                elif not tier4_blocked:
                     optts_candidate = ts_work_dir / '02_optts.out'
                     if not optts_candidate.is_file() and (ts_work_dir / '02_optts_resume.out').is_file():
                         optts_candidate = ts_work_dir / '02_optts_resume.out'
                     has_completed_ts = False
                     if optts_candidate.is_file():
                         txt = optts_candidate.read_text(encoding='utf-8', errors='ignore')
-                        if "VIBRATIONAL FREQUENCIES" in txt and ("SUCCESS" in txt or "ORCA TERMINATED NORMALLY" in txt or "TOTAL RUN TIME" in txt):
+                        if "VIBRATIONAL FREQUENCIES" in txt and _orca_optimization_completed(txt):
                             has_completed_ts = True
 
                     if scan_res and scan_res.points and has_completed_ts:
@@ -1689,6 +1740,7 @@ def main(argv=None):
                         )
                         if covalent_summary is not None:
                             covalent_summary['transition_state'] = {
+                                'status': 'completed' if (ts_verif and ts_verif.is_valid_first_order_saddle_point) else 'invalid',
                                 'structure_provenance': structure_provenance,
                                 'energy_basis': profile.energy_basis,
                                 'barrier_symbol': profile.barrier_symbol,
@@ -1711,10 +1763,24 @@ def main(argv=None):
                         print(f"         bash {wf['run_script']}")
                         if covalent_summary is not None and 'transition_state' not in covalent_summary:
                             covalent_summary['transition_state'] = {
+                                'status': 'prepared',
                                 'structure_provenance': structure_provenance,
                                 'model_type': cluster.model_type,
                                 'summary': f"Tier 4 workflow prepared at {ts_work_dir}. Awaiting execution.",
                             }
+                else:
+                    if covalent_summary is not None:
+                        covalent_summary['transition_state'] = {
+                            'status': 'not_evaluated',
+                            'structure_provenance': structure_provenance,
+                            'model_type': cluster.model_type,
+                            'is_first_order_ts': False,
+                            'activation_barrier_kcal': None,
+                            'delta_g_activation_kcal': None,
+                            'kinetic_feasibility': 'Not evaluated',
+                            'summary': f"Tier 4 was skipped during preflight: {val_res.message}",
+                            'warnings': val_res.warnings or [val_res.message],
+                        }
 
         if covalent_summary is not None:
             from .analysis.covalent_matcher import compute_total_covalent_feasibility
@@ -1762,31 +1828,80 @@ def main(argv=None):
                 from .analysis.adduct_qm import compute_adduct_quantum_profile
                 target_res = args.target_residue or 'THR309'
                 best_c = all_contacts[0] if all_contacts else None
+                reaction_c = best_c
+                reaction_el_idx = None
+                if (
+                    'cluster' in locals() and cluster
+                    and cluster.nucleophile_idx is not None
+                    and cluster.electrophile_idx is not None
+                ):
+                    nu_atom = cluster.atoms[cluster.nucleophile_idx]
+                    el_atom = cluster.atoms[cluster.electrophile_idx]
+                    matching_ligand_atoms = [
+                        atom for atom in all_lig_atoms
+                        if str(atom.get('element', '')).upper() == el_atom.element.upper()
+                    ]
+                    if matching_ligand_atoms:
+                        matched_atom = min(
+                            matching_ligand_atoms,
+                            key=lambda atom: math.dist(
+                                el_atom.coords,
+                                (atom['x'], atom['y'], atom['z']),
+                            ),
+                        )
+                        reaction_el_idx = int(matched_atom['index'])
+                        reaction_c = next(
+                            (
+                                contact for contact in all_contacts
+                                if contact.get('ligand_atom_index') == reaction_el_idx
+                                and contact.get('nucleophile_atom') == nu_atom.atom_name
+                            ),
+                            None,
+                        )
+                    if reaction_c is None:
+                        reaction_c = {
+                            'residue': target_res,
+                            'nucleophile_atom': nu_atom.atom_name,
+                            'ligand_atom_index': reaction_el_idx,
+                            'ligand_atom_element': el_atom.element,
+                            'distance_angstrom': math.dist(nu_atom.coords, el_atom.coords),
+                            'burgi_dunitz_angle': None,
+                        }
                 nucl_crd = None
                 el_crd = None
-                if all_nucl_atoms and best_c:
+                if 'cluster' in locals() and cluster and cluster.nucleophile_idx is not None:
+                    nucl_crd = cluster.atoms[cluster.nucleophile_idx].coords
+                elif all_nucl_atoms and reaction_c:
                     for na in all_nucl_atoms:
-                        if na['residue'] == best_c.get('residue') and na['atom'] == best_c.get('nucleophile_atom'):
+                        if na['residue'] == reaction_c.get('residue') and na['atom'] == reaction_c.get('nucleophile_atom'):
                             nucl_crd = (na['x'], na['y'], na['z'])
                             break
-                if all_lig_atoms and best_c:
+                if 'cluster' in locals() and cluster and cluster.electrophile_idx is not None:
+                    el_crd = cluster.atoms[cluster.electrophile_idx].coords
+                elif all_lig_atoms and reaction_c:
                     for la in all_lig_atoms:
-                        if la['index'] == best_c.get('ligand_atom_index'):
+                        if la['index'] == reaction_c.get('ligand_atom_index'):
                             el_crd = (la['x'], la['y'], la['z'])
                             break
 
                 # Compute quantum adduct verification profile
-                att_dist = float(best_c.get('distance_angstrom', 5.0)) if (best_c and best_c.get('distance_angstrom') is not None) else 5.0
-                bd_ang = float(best_c.get('burgi_dunitz_angle', 107.0)) if (best_c and best_c.get('burgi_dunitz_angle') is not None) else 107.0
-                nucl_el_sym = str(best_c.get('nucleophile_atom', 'OG1'))[0] if best_c else 'O'
-                el_idx = int(best_c.get('ligand_atom_index', 0)) if (best_c and best_c.get('ligand_atom_index') is not None) else 0
-                el_el_sym = str(best_c.get('ligand_atom_element') or best_c.get('ligand_atom_symbol') or 'O') if best_c else 'O'
-                if all_lig_atoms and el_idx < len(all_lig_atoms):
-                    el_el_sym = all_lig_atoms[el_idx].get('element', el_el_sym)
+                att_dist = float(reaction_c.get('distance_angstrom', 5.0)) if (reaction_c and reaction_c.get('distance_angstrom') is not None) else 5.0
+                bd_ang = float(reaction_c.get('burgi_dunitz_angle', 0.0)) if (reaction_c and reaction_c.get('burgi_dunitz_angle') is not None) else 0.0
+                nucl_el_sym = (
+                    cluster.atoms[cluster.nucleophile_idx].element
+                    if 'cluster' in locals() and cluster and cluster.nucleophile_idx is not None
+                    else str(reaction_c.get('nucleophile_atom', 'OG1'))[0] if reaction_c else 'O'
+                )
+                el_idx = int(reaction_c.get('ligand_atom_index', 0)) if (reaction_c and reaction_c.get('ligand_atom_index') is not None) else 0
+                el_el_sym = (
+                    cluster.atoms[cluster.electrophile_idx].element
+                    if 'cluster' in locals() and cluster and cluster.electrophile_idx is not None
+                    else str(reaction_c.get('ligand_atom_element') or reaction_c.get('ligand_atom_symbol') or 'C') if reaction_c else 'C'
+                )
                 lig_h_atoms = [(str(la.get('element', 'C')), int(la.get('index', i))) for i, la in enumerate(all_lig_atoms) if la.get('element') != 'H'] if all_lig_atoms else None
 
                 is_rev = False
-                w_type = str(best_c.get('warhead_type', '') if best_c else '').lower()
+                w_type = str(reaction_c.get('warhead_type', '') if reaction_c else '').lower()
                 if any(k in w_type for k in ('reversible', 'pseudo', 'cyano', 'nitrile', 'furoxan', 'boron')):
                     is_rev = True
 
@@ -1805,14 +1920,20 @@ def main(argv=None):
                     adduct_opt_out = ts_work_dir / '03_adduct_opt.out'
                     if adduct_opt_out.is_file():
                         txt = adduct_opt_out.read_text(encoding='utf-8', errors='ignore')
-                        if "ORCA TERMINATED NORMALLY" in txt or "OPTIMIZATION RUN DONE" in txt or "SUCCESS" in txt:
-                            has_opt_adduct = True
-                            adduct_bond_dist = 1.45
-                    elif 'scan_res' in locals() and scan_res and scan_res.points:
-                        last_pt = scan_res.points[-1]
-                        if last_pt.coordinate_value <= 1.80 and ('scan_is_complete' in locals() and scan_is_complete):
-                            has_opt_adduct = True
-                            adduct_bond_dist = last_pt.coordinate_value
+                        if _orca_optimization_completed(txt):
+                            from .core.parser import parse_orca_results
+                            adduct_calc = parse_orca_results(adduct_opt_out, name='Product_Adduct')
+                            if (
+                                'cluster' in locals() and cluster
+                                and cluster.nucleophile_idx is not None
+                                and cluster.electrophile_idx is not None
+                                and len(adduct_calc.coordinates_angstrom) > max(cluster.nucleophile_idx, cluster.electrophile_idx)
+                            ):
+                                adduct_bond_dist = math.dist(
+                                    adduct_calc.coordinates_angstrom[cluster.nucleophile_idx],
+                                    adduct_calc.coordinates_angstrom[cluster.electrophile_idx],
+                                )
+                                has_opt_adduct = True
 
                 adduct_qm_prof = compute_adduct_quantum_profile(
                     distance_angstrom=adduct_bond_dist,
@@ -1844,7 +1965,7 @@ def main(argv=None):
                         ligand_pdb_or_xyz=lig_input,
                         receptor_pdb=rec_input,
                         target_residue=target_res,
-                        dyad_residue=best_c.get('catalytic_dyad_residue') if best_c else 'ASP199'
+                        dyad_residue=reaction_c.get('catalytic_dyad_residue') if reaction_c else 'ASP199'
                     )
                     c_qm_dict = cluster_qm_res.to_dict() if ('cluster_qm_res' in locals() and cluster_qm_res and cluster_qm_res.success) else None
                     if c_qm_dict:
@@ -1855,9 +1976,9 @@ def main(argv=None):
                         target_residue=target_res,
                         nucl_atom_coords=nucl_crd,
                         el_atom_coords=el_crd,
-                        attack_distance=best_c.get('distance_angstrom') if best_c else None,
-                        burgi_dunitz_angle=best_c.get('burgi_dunitz_angle') if best_c else None,
-                        dyad_residue=best_c.get('catalytic_dyad_residue') if best_c else 'ASP199',
+                        attack_distance=reaction_c.get('distance_angstrom') if reaction_c else None,
+                        burgi_dunitz_angle=reaction_c.get('burgi_dunitz_angle') if reaction_c else None,
+                        dyad_residue=reaction_c.get('catalytic_dyad_residue') if reaction_c else 'ASP199',
                         homo_cube_data=cluster_qm_res.homo_cube_data if ('cluster_qm_res' in locals() and cluster_qm_res) else None,
                         lumo_cube_data=cluster_qm_res.lumo_cube_data if ('cluster_qm_res' in locals() and cluster_qm_res) else None,
                         cluster_qm_data=c_qm_dict,
@@ -1939,13 +2060,12 @@ def main(argv=None):
                 cands.extend([
                     Path.cwd() / "dft_benzofuroxan",
                     Path.cwd() / "dft",
-                    Path('/home/diego/SharK/dft_benzofuroxan'),
                     Path(__file__).resolve().parent.parent.parent / "dft_benzofuroxan",
                 ])
             # If compound or project name mentions benzofuroxan or 091326
             proj_str = str(getattr(session, 'project_name', '')).casefold()
             if 'benzofuroxan' in proj_str or '091326' in proj_str:
-                for b_cand in [Path.cwd() / "dft_benzofuroxan", Path('/home/diego/SharK/dft_benzofuroxan'), Path(__file__).resolve().parent.parent.parent / "dft_benzofuroxan"]:
+                for b_cand in [Path.cwd() / "dft_benzofuroxan", Path(__file__).resolve().parent.parent.parent / "dft_benzofuroxan"]:
                     if b_cand not in cands:
                         cands.append(b_cand)
             for d_cand in cands:

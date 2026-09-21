@@ -109,14 +109,14 @@ class ReactionEnergyProfile:
     warnings: List[str] = field(default_factory=list)
 
     @property
-    def activation_barrier_kcal(self) -> float:
+    def activation_barrier_kcal(self) -> Optional[float]:
         if self.energy_basis == "gibbs" and self.delta_g_activation_kcal is not None:
             return self.delta_g_activation_kcal
         if self.delta_e_activation_kcal is not None:
             return self.delta_e_activation_kcal
         if self.delta_e_scan_activation_kcal is not None:
             return self.delta_e_scan_activation_kcal
-        return self.delta_g_activation_kcal if self.delta_g_activation_kcal is not None else 0.0
+        return self.delta_g_activation_kcal
 
     @property
     def reaction_energy_kcal(self) -> Optional[float]:
@@ -131,8 +131,11 @@ class ReactionEnergyProfile:
         rxn_val = self.reaction_energy_kcal
         prod_str = f", {self.reaction_energy_symbol}: {rxn_val:.2f} kcal/mol" if rxn_val is not None else ""
         rate_info = f"t1/2 ~ {self.estimated_half_life_str}" if self.rate_constant_s is not None else self.estimated_half_life_str
+        barrier = self.activation_barrier_kcal
+        if barrier is None:
+            return f"Reaction Profile: activation barrier not available | {self.kinetic_feasibility}"
         return (
-            f"Reaction Profile ({self.energy_basis}): {self.barrier_symbol} = {self.activation_barrier_kcal:.2f} kcal/mol{prod_str} | "
+            f"Reaction Profile ({self.energy_basis}): {self.barrier_symbol} = {barrier:.2f} kcal/mol{prod_str} | "
             f"Feasibility: {self.kinetic_feasibility} ({rate_info})"
         )
 
@@ -296,6 +299,11 @@ def parse_orca_scan_output(
                     xyz_path=step_xyz
                 ))
 
+    scan_pair = None
+    scan_pair_m = re.search(r"Bond\s*\(\s*(\d+)\s*,\s*(\d+)\s*\)\s*:\s*range=", content)
+    if scan_pair_m:
+        scan_pair = (int(scan_pair_m.group(1)), int(scan_pair_m.group(2)))
+
     # If scan block was not found in stdout, check for allxyz/xyzall trajectory or parse step blocks
     if not points:
         allxyz_file = directory / f"{base_stem}.allxyz"
@@ -330,9 +338,9 @@ def parse_orca_scan_output(
                                 step_xyz = step_xyz_alt[0] if step_xyz_alt else None
 
                             coord_val = 0.0
-                            if len(coords) >= 32:
-                                c1 = coords[31]
-                                c2 = coords[10]
+                            if scan_pair and max(scan_pair) < len(coords):
+                                c1 = coords[scan_pair[0]]
+                                c2 = coords[scan_pair[1]]
                                 coord_val = round(math.sqrt(sum((a - b) ** 2 for a, b in zip(c1, c2))), 3)
 
                             if energy_eh is not None:
@@ -425,10 +433,11 @@ def parse_orca_ts_output(
     # Standard threshold: nu < -15 cm^-1
     genuine_imag = [f for f in calc.frequencies if f < -15.0]
 
-    # Valid first-order saddle point requires BOTH optimization convergence and exactly 1 genuine imaginary frequency
-    is_valid_ts = bool(calc.converged and len(genuine_imag) == 1)
+    # Normal program termination does not prove that an OptTS geometry converged.
+    optimization_converged = calc.optimization_converged is True
+    is_valid_ts = bool(calc.converged and optimization_converged and len(genuine_imag) == 1)
 
-    if not calc.converged:
+    if not calc.converged or not optimization_converged:
         summary_str = f"Invalid TS: Optimization did not converge ({len(genuine_imag)} imaginary mode(s))"
     elif is_valid_ts:
         summary_str = f"Valid 1st-Order TS (converged, nu_i = {genuine_imag[0]:.1f} cm^-1)"
@@ -437,7 +446,7 @@ def parse_orca_ts_output(
 
     return TSVerificationResult(
         name=name,
-        converged=calc.converged,
+        converged=optimization_converged,
         n_imaginary_frequencies=len(genuine_imag),
         imaginary_modes=genuine_imag,
         all_frequencies=calc.frequencies,
@@ -537,6 +546,28 @@ def compute_reaction_profile(
         product_gibbs=product_gibbs,
         temperature_k=temperature_k,
     )
+
+    if not is_first_order_ts:
+        return ReactionEnergyProfile(
+            reactants_gibbs=reactants_gibbs,
+            ts_gibbs=ts_gibbs,
+            product_gibbs=product_gibbs,
+            reactants_electronic=reactants_electronic,
+            ts_electronic=ts_electronic,
+            product_electronic=product_electronic,
+            energy_basis=basis_sel["basis"] if basis_sel["is_valid"] else "inconsistent",
+            barrier_symbol="N/A",
+            reaction_energy_symbol="N/A",
+            rate_constant_s=None,
+            estimated_half_life_str="Not available",
+            kinetic_feasibility="Not evaluated (first-order TS not verified)",
+            temperature_k=temperature_k,
+            is_first_order_ts=False,
+            notes="A candidate structure without a converged first-order saddle point cannot define an activation barrier.",
+            warnings=list(basis_sel.get("warnings", [])) + [
+                "Activation barrier rejected: transition state is not a converged first-order saddle point."
+            ],
+        )
 
     if not basis_sel["is_valid"]:
         msg = f"Cannot compute reaction profile: {'; '.join(basis_sel.get('warnings', ['Inconsistent energy basis (INV-006)']))}"
@@ -701,10 +732,10 @@ def prepare_ts_workflow_directory(
     # 1. Write initial cluster geometry
     xyz_path = cluster.write_xyz(out_path / "00_initial_cluster.xyz")
 
-    # 1b. Write reactant vibrational frequency calculation (for Gibbs free energy G_reactant)
+    # 1b. Optimize and verify the reactant minimum before using its Gibbs free energy.
     reactant_freq_path = out_path / "00_reactant_freq.inp"
     reactant_freq_content = cluster.to_orca_input(
-        job_type="freq",
+        job_type="opt_freq",
         method=method,
         solvent=solvent,
         nprocs=nprocs,
@@ -840,4 +871,3 @@ echo "Tier 4 workflow (Scan, TS, and Adduct) completed successfully."
         "run_script": run_sh_path,
         "cluster": cluster,
     }
-

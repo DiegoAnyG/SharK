@@ -1,5 +1,6 @@
 """Portability and trust boundaries for embedded local orbital reports."""
 import hashlib
+import json
 import os
 import shutil
 from pathlib import Path
@@ -164,3 +165,39 @@ def test_covalent_dossier_with_adduct_qm(tmp_path):
     assert "3. Regiospecificity" in text
     assert "4. Formed Bond Nature" in text
     assert "Wiberg Bond Order" in text
+
+
+def test_legacy_invalid_tier4_claims_are_removed(tmp_path):
+    from shark.reports.dossier import _sanitize_covalent_summary
+
+    ts_dir = tmp_path / "transition_state"
+    ts_dir.mkdir()
+    (ts_dir / "reaction_definition.json").write_text(json.dumps({
+        "electrophile": {"index": 11, "element": "C", "label": "LIG:C5"},
+    }), encoding="utf-8")
+    summary = {
+        "contacts": [
+            {"ligand_atom_index": 10, "ligand_atom_element": "O"},
+            {"ligand_atom_index": 11, "ligand_atom_element": "C"},
+        ],
+        "transition_state": {
+            "is_first_order_ts": False,
+            "activation_barrier_kcal": -147.81,
+            "delta_g_activation_kcal": -147.81,
+        },
+        "total_feasibility": {"delta_g_ts": -147.81, "ts_score": 1.0},
+        "adduct_viewer_html": "invalid O-O viewer",
+        "adduct_qm": {"bond_nature": {
+            "evidence_type": "model_derived",
+            "wiberg_bond_order": 1.03,
+            "bond_type": "O-O",
+        }},
+    }
+
+    clean = _sanitize_covalent_summary(summary, tmp_path)
+
+    assert clean["transition_state"]["activation_barrier_kcal"] is None
+    assert clean["total_feasibility"]["delta_g_ts"] is None
+    assert clean["adduct_qm"] is None
+    assert "adduct_viewer_html" not in clean
+    assert clean["contacts"][0]["ligand_atom_index"] == 11

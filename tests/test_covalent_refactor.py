@@ -161,9 +161,10 @@ def test_h_wiberg_wording_no_percent_covalency():
         nucleophile_element="O",
         electrophile_element="C",
         bond_distance_angstrom=1.45,
+        is_optimized_adduct=True,
     )
     assert isinstance(res, CovalentBondNatureResult)
     assert "97% covalent character" not in res.explanation
     assert "covalent character" not in res.explanation.lower()
-    assert "consistent with a single covalent bond" in res.explanation
-
+    assert "no Wiberg bond order" in res.explanation
+    assert res.wiberg_bond_order is None

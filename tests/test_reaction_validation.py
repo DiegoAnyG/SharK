@@ -52,6 +52,18 @@ def test_validate_reaction_pair_clash():
     assert res.severity == "BLOCKING"
 
 
+def test_validate_reaction_pair_blocks_distant_starting_geometry():
+    res = validate_reaction_pair(
+        nucleophile_element="O",
+        electrophile_element="C",
+        mechanism_name="generic_covalent_addition",
+        initial_distance_angstrom=6.43,
+    )
+    assert res.valid is False
+    assert res.severity == "BLOCKING"
+    assert "reactive-contact region" in res.message
+
+
 def test_fingerprint_changes_with_chemistry():
     class DummyAtom:
         def __init__(self, element):
@@ -107,6 +119,21 @@ def test_safe_maxcore_available_ram():
     assert _get_safe_maxcore_mb(4, requested_maxcore=1500) == 1500
 
 
+def test_cli_orca_completion_helpers_require_scientific_completion_markers():
+    from shark.cli import _orca_optimization_completed, _orca_scan_completed, _safe_float
+
+    assert _safe_float("-7.5") == -7.5
+    assert _safe_float("not-a-number") is None
+    assert not _orca_optimization_completed("ORCA TERMINATED NORMALLY\noptimization did not converge")
+    assert _orca_optimization_completed("THE OPTIMIZATION HAS CONVERGED\nORCA TERMINATED NORMALLY")
+    assert not _orca_scan_completed("ORCA TERMINATED NORMALLY", point_count=1, expected_points=18)
+    assert _orca_scan_completed(
+        "RELAXED SURFACE SCAN RESULTS\nORCA TERMINATED NORMALLY",
+        point_count=18,
+        expected_points=18,
+    )
+
+
 def test_recalc_hess_configurable():
     """TS-1: Recalc_Hess is configurable in QMCluster and workflow."""
     from shark.analysis.qm_cluster import QMCluster, ClusterAtom
@@ -125,4 +152,3 @@ def test_recalc_hess_configurable():
     inp_custom = cluster.to_orca_input(job_type="optts", recalc_hess=10)
     assert "Recalc_Hess 10" in inp_custom
     assert "Recalc_Hess 25" not in inp_custom
-

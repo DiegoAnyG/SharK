@@ -12,6 +12,7 @@ class CalculationResult:
     """Structured container for quantum chemical calculation results."""
     name: str
     converged: bool = False
+    optimization_converged: Optional[bool] = None
     el_energy: float = 0.0          # Electronic energy in Hartrees (Eh)
     zpe: float = 0.0                # Zero-point vibrational energy in Hartrees
     enthalpy: float = 0.0           # Enthalpy (H) in Hartrees
@@ -36,7 +37,12 @@ class CalculationResult:
     @property
     def is_stationary_minimum(self) -> bool:
         """True if the structure converged and has zero imaginary vibrational frequencies."""
-        return self.converged and len(self.imaginary_frequencies) == 0
+        return (
+            self.converged
+            and self.optimization_converged is True
+            and bool(self.frequencies)
+            and len(self.imaginary_frequencies) == 0
+        )
 
 
 def _parse_property_file(prop_path: Path, result: CalculationResult) -> None:
@@ -171,6 +177,11 @@ def _parse_out_file(out_path: Path, result: CalculationResult) -> None:
     # Check termination status in .out
     if "ORCA TERMINATED NORMALLY" in content or "NORMAL TERMINATION" in content:
         result.converged = True
+
+    if "THE OPTIMIZATION HAS CONVERGED" in content:
+        result.optimization_converged = True
+    elif "optimization did not converge" in content.lower():
+        result.optimization_converged = False
 
     # Parse Electronic Energy fallback from .out
     if result.el_energy == 0.0:
@@ -332,6 +343,7 @@ def parse_orca_output(base_path: str | Path) -> dict:
         "lumo_ev": res.lumo_energy,
         "gap_ev": res.homo_lumo_gap,
         "converged": res.converged,
+        "optimization_converged": res.optimization_converged,
         "loewdin_charges": res.loewdin_charges,
         "mulliken_charges": res.mulliken_charges,
         "atomic_symbols": res.atomic_symbols,

@@ -71,11 +71,13 @@ def test_evaluate_covalent_bond_nature():
         nucleophile_element="O",
         electrophile_element="C",
         bond_distance_angstrom=1.45,
+        is_optimized_adduct=True,
     )
-    assert res.wiberg_bond_order > 0.85
-    assert res.bond_covalency_percent > 80.0
-    assert res.charge_transfer_e < 0.0  # partial charge transferred
-    assert "Polar covalent" in res.bond_type
+    assert res.wiberg_bond_order is None
+    assert res.distance_based_bond_order_proxy > 0.85
+    assert res.bond_covalency_percent is None
+    assert res.charge_transfer_e is None
+    assert res.status == "geometry_optimized"
 
 
 def test_compute_adduct_quantum_profile():
@@ -94,3 +96,13 @@ def test_compute_adduct_quantum_profile():
     assert "bond_nature" in d
     assert d["fmo_symmetry"]["is_allowed"] is True
     assert d["regiospecificity"]["target_rank"] == 1
+
+
+def test_short_distance_does_not_imply_optimized_adduct():
+    res = evaluate_covalent_bond_nature(
+        nucleophile_element="O",
+        electrophile_element="C",
+        bond_distance_angstrom=1.45,
+    )
+    assert res.status == "not_evaluated"
+    assert res.is_calculated is False

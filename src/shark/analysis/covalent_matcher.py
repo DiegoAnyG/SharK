@@ -575,6 +575,8 @@ def match_covalent_pocket(
                 eval_lig_atoms.append((idx, elem, crd, warhead_map[idx]))
     else:
         for idx, elem, crd in lig_atoms:
+            if elem not in ("C", "N", "S", "P", "B"):
+                continue
             eval_lig_atoms.append((idx, elem, crd, None))
 
     rec_atoms = []
@@ -998,4 +1000,3 @@ def compute_total_covalent_feasibility(
         cfi_total=cfi_total,
         percentage=pct,
     )
-

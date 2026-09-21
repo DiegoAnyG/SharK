@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from html import escape
 import base64
+import copy
 import hashlib
 import json
 import math
@@ -13,6 +14,83 @@ from urllib.parse import urlsplit
 from plotly.offline import get_plotlyjs
 from .. import __version__
 from .adduct_viewer import _get_3dmol_js, generate_adduct_viewer_html, build_adduct_pdb
+
+
+def _sanitize_covalent_summary(summary: dict | None, report_dir: Path) -> dict:
+    """Remove legacy Tier 4 claims that are not supported by converged calculations."""
+    if not summary:
+        return {}
+    clean = copy.deepcopy(summary or {})
+    ts_data = clean.get('transition_state') or {}
+    if ts_data.get('is_first_order_ts') is not True:
+        for key in ('activation_barrier_kcal', 'delta_g_activation_kcal', 'delta_e_activation_kcal'):
+            ts_data[key] = None
+        ts_data.update({
+            'status': 'not_evaluated',
+            'kinetic_feasibility': 'Not evaluated',
+            'half_life': 'Not available',
+            'summary': 'Activation barrier not reported because a first-order transition state was not verified.',
+        })
+        clean['transition_state'] = ts_data
+        total = clean.get('total_feasibility') or {}
+        for key in ('delta_g_ts', 'ts_score', 'k_chem', 'cfi_final'):
+            total[key] = None
+        clean['total_feasibility'] = total
+
+    bond = (clean.get('adduct_qm') or {}).get('bond_nature') or {}
+    legacy_distance_proxy = (
+        bond.get('evidence_type') == 'model_derived'
+        and bond.get('wiberg_bond_order') is not None
+    )
+    if legacy_distance_proxy:
+        clean['adduct_qm'] = None
+        clean.pop('adduct_viewer_html', None)
+
+    reaction_path = report_dir / 'transition_state' / 'reaction_definition.json'
+    if reaction_path.is_file():
+        try:
+            reaction = json.loads(reaction_path.read_text(encoding='utf-8'))
+            target_idx = reaction.get('electrophile', {}).get('index')
+            contacts = clean.get('contacts') or []
+            canonical = next(
+                (item for item in contacts if item.get('ligand_atom_index') == target_idx),
+                None,
+            )
+            if canonical is not None:
+                clean['contacts'] = [canonical] + [item for item in contacts if item is not canonical]
+                clean['best_match'] = canonical
+                pair = reaction.get('proposed_bond', 'reaction pair')
+                distance = reaction.get('initial_distance_angstrom')
+                distance_text = f" at {distance:.2f} A" if isinstance(distance, (int, float)) else ""
+                clean['summary'] = (
+                    f"Canonical Tier 4 {pair} coordinate{distance_text}; "
+                    "no covalent reaction is inferred from this pre-reactive geometry."
+                )
+        except (OSError, ValueError, TypeError):
+            pass
+    return clean
+
+
+def _redact_local_paths(value):
+    """Keep generated reports portable without embedding personal filesystem paths."""
+    if isinstance(value, dict):
+        return {key: _redact_local_paths(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_redact_local_paths(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_redact_local_paths(item) for item in value)
+    if not isinstance(value, str):
+        return value
+    if value.startswith('/home/'):
+        return f"<local path>/{Path(value).name}"
+    if value.startswith('\\\\') or re.match(r'^[A-Za-z]:[\\/]', value):
+        name = re.split(r'[\\/]', value.rstrip('\\/'))[-1]
+        return f"<local path>/{name}" if name else "<local path>"
+    return re.sub(
+        r'/home/[^/\s\"\'<>]+/[^\s\"\'<>]+',
+        lambda match: f"<local path>/{Path(match.group(0)).name}",
+        value,
+    )
 
 
 def _image_to_base64(img_path: str | Path) -> str:
@@ -199,7 +277,10 @@ def generate_html_dossier(project_name: str, poses_data: list[dict], out_html: s
             }
             if 'delta_g_ts' not in covalent_summary['total_feasibility'] and 'transition_state' in r_dict:
                 ts_dict = r_dict['transition_state']
-                covalent_summary['total_feasibility']['delta_g_ts'] = ts_dict.get('delta_g_activation_kcal') or ts_dict.get('activation_barrier_kcal')
+                covalent_summary['total_feasibility']['delta_g_ts'] = (
+                    ts_dict.get('delta_g_activation_kcal')
+                    if ts_dict.get('is_first_order_ts') is True else None
+                )
             if 'docking_score' not in covalent_summary['total_feasibility'] and 'binding' in r_dict:
                 covalent_summary['total_feasibility']['docking_score'] = r_dict['binding'].get('docking_score')
             if 'adduct' in r_dict and r_dict['adduct']:
@@ -231,7 +312,10 @@ def generate_html_dossier(project_name: str, poses_data: list[dict], out_html: s
             if 'delta_g_ts' not in tf or tf['delta_g_ts'] is None:
                 if 'transition_state' in r_dict:
                     ts_dict = r_dict['transition_state']
-                    tf['delta_g_ts'] = ts_dict.get('delta_g_activation_kcal') or ts_dict.get('activation_barrier_kcal')
+                    tf['delta_g_ts'] = (
+                        ts_dict.get('delta_g_activation_kcal')
+                        if ts_dict.get('is_first_order_ts') is True else None
+                    )
             if 'adduct' in r_dict and r_dict['adduct']:
                 covalent_summary['adduct_qm'] = r_dict['adduct']
             if 'transition_state' in r_dict and r_dict['transition_state']:
@@ -266,7 +350,7 @@ def generate_html_dossier(project_name: str, poses_data: list[dict], out_html: s
                 out_path.parent / 'dft',
                 out_path.parent / 'dft_benzofuroxan',
                 Path.cwd() / 'dft_benzofuroxan',
-                Path('/home/diego/SharK/dft_benzofuroxan'),
+                Path(__file__).resolve().parents[3] / 'dft_benzofuroxan',
             ]
             for cand in dft_cands:
                 if cand.is_dir() and any(cand.glob('*.out')):
@@ -302,6 +386,8 @@ def generate_html_dossier(project_name: str, poses_data: list[dict], out_html: s
                         p_item['lumo_ev'] = orb.get('lumo', {}).get('energy_eV')
                         p_item['gap_ev'] = orb.get('gap_ev')
                 poses_data.append(p_item)
+
+    covalent_summary = _sanitize_covalent_summary(covalent_summary, out_path.parent)
 
     jobs = (qm_summary or {}).get('jobs', [])
     rows, viewers, levels, methods = [], [], [], []
@@ -676,12 +762,13 @@ def generate_html_dossier(project_name: str, poses_data: list[dict], out_html: s
         ts_info = covalent_summary.get('transition_state', {})
         ts_block = ''
         if ts_info:
+            ts_verified = ts_info.get('is_first_order_ts') is True
             barrier_sym = ts_info.get('barrier_symbol', 'ΔG‡')
             rxn_sym = ts_info.get('reaction_energy_symbol', 'ΔG_rxn')
-            act_val = ts_info.get('delta_g_activation_kcal') if ts_info.get('delta_g_activation_kcal') is not None else ts_info.get('activation_barrier_kcal')
+            act_val = ts_info.get('delta_g_activation_kcal') if ts_verified else None
             if act_val is None:
-                act_val = ts_info.get('delta_e_activation_kcal')
-            act_str = f"{float(act_val):.2f} kcal/mol" if act_val is not None else "N/A"
+                act_val = ts_info.get('delta_e_activation_kcal') if ts_verified else None
+            act_str = f"{float(act_val):.2f} kcal/mol" if act_val is not None else "Not available (TS unverified)"
 
             rxn_val = ts_info.get('delta_g_reaction_kcal') if ts_info.get('delta_g_reaction_kcal') is not None else ts_info.get('reaction_energy_kcal')
             if rxn_val is None:
@@ -698,7 +785,7 @@ def generate_html_dossier(project_name: str, poses_data: list[dict], out_html: s
                 ('Kinetic feasibility', str(ts_info.get('kinetic_feasibility', 'N/A'))),
                 ('Estimated half-life (t1/2)', str(ts_info.get('half_life', 'N/A'))),
                 ('Active site model', f"{str(ts_info.get('model_type', 'minimal')).capitalize()} Model"),
-                ('First-order TS verified', 'Yes (strictly 1 imaginary frequency)' if ts_info.get('is_first_order_ts', True) else 'Unverified'),
+                ('First-order TS verified', 'Yes (strictly 1 imaginary frequency)' if ts_verified else 'No'),
             ]
             ts_block = (
                 '<div class="insight" style="margin: 16px 0; border-left: 4px solid #087b70; padding-left: 14px;">'
@@ -928,7 +1015,10 @@ def generate_html_dossier(project_name: str, poses_data: list[dict], out_html: s
                 '<span class="badge" style="background:#fef3c7;color:#92400e;border:1px solid #fde68a;">[Model-Derived Proxy]</span>'
             )
 
-            bond_is_calc = bond.get('is_calculated', False)
+            bond_is_calc = bool(
+                bond.get('is_calculated', False)
+                and bond.get('evidence_type') != 'model_derived'
+            )
             w_bo = bond.get('wiberg_bond_order')
             w_bo_str = f"{_number(w_bo, 2)}" if (w_bo is not None and bond_is_calc) else "Not calculated"
             if bond_is_calc:
@@ -939,6 +1029,15 @@ def generate_html_dossier(project_name: str, poses_data: list[dict], out_html: s
                 q_trans = bond.get('charge_transfer_e')
                 q_trans_str = f"{_number(q_trans, 2)} e" if q_trans is not None else "N/A"
                 b_type = escape(str(bond.get('bond_type', 'Covalent sigma-bond')))
+                d_eq = bond.get('equilibrium_distance_angstrom')
+                geom_str = f"{b_type} ({_number(d_eq, 2)} Å)" if d_eq is not None else b_type
+            elif bond.get('status') == 'geometry_optimized':
+                prod_status_badge = (
+                    '<span class="badge" style="background:#fef3c7;color:#92400e;border:1px solid #fde68a;">Status: GEOMETRY ONLY</span>'
+                )
+                prod_status_val = '<dd style="margin:0;font-weight:600;color:#92400e;">GEOMETRY ONLY</dd>'
+                q_trans_str = "Not calculated"
+                b_type = escape(str(bond.get('bond_type', 'Optimized geometry')))
                 d_eq = bond.get('equilibrium_distance_angstrom')
                 geom_str = f"{b_type} ({_number(d_eq, 2)} Å)" if d_eq is not None else b_type
             else:
@@ -1064,8 +1163,16 @@ def generate_html_dossier(project_name: str, poses_data: list[dict], out_html: s
     # Legacy callers may still provide an explicit mesh rather than orbital exports.
     legacy = '<section><h2>Supplied orbital mesh</h2><p>Legacy mesh: provenance and spatial convergence are not established.</p><div id="legacy-mesh"></div></section>' if orbital_mesh else ''
     public_jobs = [{k:v for k,v in job.items() if k != 'viewer_link'} for job in jobs]
-    provenance = dict(schema_version=1, shark_version=__version__, project=str(project_name), jobs=public_jobs,
-                      docking=poses_data, molecular_dynamics=md_summary, covalent=covalent_summary, notes=notes)
+    provenance = _redact_local_paths(dict(
+        schema_version=1,
+        shark_version=__version__,
+        project=str(project_name),
+        jobs=public_jobs,
+        docking=poses_data,
+        molecular_dynamics=md_summary,
+        covalent=covalent_summary,
+        notes=notes,
+    ))
     
     # Card 2: Total Covalent Feasibility (INV-004: Strict - never fallback to geometric contact score)
     card2_title = 'Total Feasibility (CFI) <span class="help-bubble" tabindex="0" data-tooltip="Unified Covalent Feasibility Index combining initial docking affinity (Pillar 1), MD trajectory near-attack persistence P_NAC (Pillar 2), and Eyring transition state barrier (Pillar 3).">?</span>'
@@ -1124,7 +1231,7 @@ def generate_html_dossier(project_name: str, poses_data: list[dict], out_html: s
 
     # Card 4: Transition State Kinetics OR Classical MD OR Quantum Verification
     ts_info = (covalent_summary.get('transition_state') or {}) if covalent_summary else {}
-    if ts_info and (ts_info.get('activation_barrier_kcal') is not None or ts_info.get('delta_g_activation_kcal') is not None):
+    if ts_info and ts_info.get('is_first_order_ts') is True and (ts_info.get('activation_barrier_kcal') is not None or ts_info.get('delta_g_activation_kcal') is not None):
         dg = ts_info.get('activation_barrier_kcal') if ts_info.get('activation_barrier_kcal') is not None else ts_info.get('delta_g_activation_kcal')
         k_ch = ts_info.get('k_chem') or (covalent_summary.get('total_feasibility', {}).get('k_chem') if covalent_summary else None)
         k_str = f" · k = {k_ch:.1e} s⁻¹" if k_ch else ""
@@ -1156,7 +1263,8 @@ def generate_html_dossier(project_name: str, poses_data: list[dict], out_html: s
                         PROVENANCE=escape(json.dumps(provenance, indent=2, default=str)),
                         DATA=_json(dict(viewers=viewers, levels=levels, tautomers=tautomers_data,
                                         energy_basis=energy_basis,
-                                        provenance=provenance, mesh=orbital_mesh, covalent=covalent_summary)),
+                                        provenance=provenance, mesh=orbital_mesh,
+                                        covalent=_redact_local_paths(covalent_summary))),
                         PLOTLY=get_plotlyjs(),
                         THREEDMOL=_get_3dmol_js())
     template = Path(__file__).with_name('dossier.html').read_text(encoding='utf-8')

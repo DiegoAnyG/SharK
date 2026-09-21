@@ -189,6 +189,7 @@ Mode   freq       eps      Int      T**2         TX        TY        TZ
    7:     55.10   0.000500    2.00  0.000005   0.001   0.001   0.001
 
 Final Gibbs free energy         ...   -678.50500000 Eh
+                    ***        THE OPTIMIZATION HAS CONVERGED     ***
                              ****ORCA TERMINATED NORMALLY****
 """
     res = parse_orca_ts_output(mock_ts_out, name="Test_TS")
@@ -209,6 +210,7 @@ VIBRATIONAL FREQUENCIES
      7:     120.40 cm**-1
 
 Final Gibbs free energy         ...   -678.54000000 Eh
+                    ***        THE OPTIMIZATION HAS CONVERGED     ***
                              ****ORCA TERMINATED NORMALLY****
 """
     res = parse_orca_ts_output(mock_min_out, name="Test_Min")
@@ -233,6 +235,47 @@ def test_compute_reaction_profile():
     assert profile.kinetic_feasibility == "Rapid Predicted Chemical Step"
     assert "minutes" in profile.estimated_half_life_str or "seconds" in profile.estimated_half_life_str
     assert profile.is_first_order_ts is True
+
+
+def test_invalid_ts_does_not_publish_activation_barrier():
+    profile = compute_reaction_profile(
+        reactants_gibbs=-500.00,
+        ts_gibbs=-500.20,
+        is_first_order_ts=False,
+    )
+    assert profile.activation_barrier_kcal is None
+    assert profile.rate_constant_s is None
+    assert "not verified" in profile.kinetic_feasibility.lower()
+
+
+def test_scan_allxyz_uses_declared_reaction_coordinate(tmp_path):
+    scan_out = tmp_path / "scan.out"
+    scan_out.write_text("Bond ( 0, 2): range= 3.0, 1.5, 2\n", encoding="utf-8")
+    (tmp_path / "scan.allxyz").write_text(
+        "3\nStep 1 E -10.0\n"
+        "O 0.0 0.0 0.0\n"
+        "C 0.0 9.0 0.0\n"
+        "N 0.0 0.0 2.0\n",
+        encoding="utf-8",
+    )
+
+    result = parse_orca_scan_output(scan_out)
+
+    assert len(result.points) == 1
+    assert result.points[0].coordinate_value == pytest.approx(2.0)
+
+
+def test_normal_termination_without_optimization_convergence_is_invalid_ts():
+    output = """
+VIBRATIONAL FREQUENCIES
+-----------------------
+     6:    -350.25 cm**-1
+The optimization did not converge but reached the maximum number of cycles.
+                             ****ORCA TERMINATED NORMALLY****
+"""
+    result = parse_orca_ts_output(output, name="Unconverged_TS")
+    assert result.converged is False
+    assert result.is_valid_first_order_saddle_point is False
 
 
 def test_prepare_ts_workflow_directory(mock_active_site, tmp_path):
@@ -264,10 +307,8 @@ def test_prepare_ts_workflow_directory_full_thermo(mock_active_site, tmp_path):
     wf_dict = prepare_ts_workflow_directory(cluster, wf_dir, full_thermo=True)
     assert wf_dict["reactant_freq_inp"].is_file()
     rf_txt = wf_dict["reactant_freq_inp"].read_text()
-    assert "! Freq" in rf_txt
+    assert "! Opt Freq" in rf_txt
     adduct_tmpl = (wf_dir / "03_adduct_opt_template.inp").read_text()
     assert "! Opt Freq" in adduct_tmpl
     sh_txt = wf_dict["run_script"].read_text()
     assert "00_reactant_freq.inp" in sh_txt
-
-
