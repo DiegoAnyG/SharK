@@ -114,6 +114,52 @@ def update_workflow_stage(
     _atomic_json(path, data)
 
 
+def record_workflow_failure(work_dir: str | Path, failure: dict[str, Any]) -> None:
+    """Append a typed failure once while preserving an atomically readable manifest."""
+    path = Path(work_dir).expanduser().resolve() / MANIFEST_NAME
+    if not path.is_file():
+        return
+    data = json.loads(path.read_text(encoding="utf-8"))
+    failures = data.setdefault("failures", [])
+    identity = (failure.get("stage"), failure.get("code"), failure.get("message"))
+    if not any((item.get("stage"), item.get("code"), item.get("message")) == identity for item in failures):
+        item = dict(failure)
+        item.setdefault("recorded_utc", _now())
+        failures.append(item)
+    data["updated_utc"] = _now()
+    _atomic_json(path, data)
+
+
+def workflow_recovery_plan(
+    manifest: dict[str, Any] | None,
+    jobs: list[dict[str, Any]],
+) -> dict[str, list[str]]:
+    """Classify recorded work without promoting process completion to scientific validation."""
+    plan = {"reusable": [], "review_required": [], "repeat_required": [], "pending": []}
+    for name, stage in (manifest or {}).get("stages", {}).items():
+        status = stage.get("observed_status", stage.get("status", "unknown"))
+        validation = stage.get("validation", "not_evaluated")
+        if status == "completed" and validation == "validated":
+            plan["reusable"].append(name)
+        elif status == "completed":
+            plan["review_required"].append(name)
+        elif status in ("failed", "invalid", "invalidated", "interrupted", "timed_out", "skipped"):
+            plan["repeat_required"].append(name)
+        else:
+            plan["pending"].append(name)
+    for job in jobs:
+        label = f"ligand_dft:{job.get('ligand', job.get('path', 'job'))}"
+        if job.get("status") == "completed":
+            plan["reusable"].append(label)
+        elif job.get("status") in ("failed", "interrupted", "invalidated", "invalid_manifest", "completed_export_failed"):
+            plan["repeat_required"].append(label)
+        else:
+            plan["pending"].append(label)
+    for key in plan:
+        plan[key] = sorted(set(plan[key]))
+    return plan
+
+
 def inspect_workflow(work_dir: str | Path) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
     """Load root stage state and verify every isolated-ligand job input fingerprint."""
     root = Path(work_dir).expanduser().resolve()

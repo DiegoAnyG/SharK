@@ -4,6 +4,8 @@ import tempfile
 import unittest
 import os
 from pathlib import Path
+import importlib.util
+import shutil
 
 from shark.core.parser import parse_orca_results
 from shark.analysis.thermo import calculate_relative_thermo
@@ -37,6 +39,12 @@ class TestSharKVisualizers(unittest.TestCase):
             self.assertGreater(res.stat().st_size, 1000)
 
     def test_orbital_panel_generation(self):
+        browser = os.environ.get('BROWSER_PATH') or next(
+            (shutil.which(name) for name in ('google-chrome', 'chromium', 'chromium-browser') if shutil.which(name)),
+            None,
+        )
+        if importlib.util.find_spec('kaleido') is None or browser is None:
+            self.skipTest('Static Plotly export requires Kaleido and Chrome/Chromium')
         t1_h = self.dft_dir / "tautomer_1_oxide.mo45a.cube"
         t1_l = self.dft_dir / "tautomer_1_oxide.mo46a.cube"
         t3_h = self.dft_dir / "tautomer_3_oxide.mo45a.cube"

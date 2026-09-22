@@ -108,6 +108,8 @@ def test_covalent_dossier_rendering(tmp_path):
 def test_load_dft_records_and_render_combined(tmp_path):
     from shark.cli import load_dft_records
     dft_dir = Path("dft_benzofuroxan")
+    if not dft_dir.is_dir():
+        pytest.skip("Private DFT benchmark directory is not part of the repository")
     records = load_dft_records(dft_dir, tmp_path)
     assert len(records) == 2
     for r in records:

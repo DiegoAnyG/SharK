@@ -20,7 +20,10 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-md = ["MDAnalysis>=2.10"]
+md = [
+    "MDAnalysis>=2.8,<2.10; python_version < '3.11'",
+    "MDAnalysis>=2.10; python_version >= '3.11'",
+]
 export = ["kaleido>=1.0"]
 dev = [
     "pytest>=7.0",

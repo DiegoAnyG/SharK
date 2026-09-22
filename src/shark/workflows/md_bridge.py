@@ -77,6 +77,7 @@ def setup_and_launch_md(
     pipeline_dir: Optional[str | Path] = None,
     work_dir: Optional[str | Path] = None,
     timeout: Optional[float] = None,
+    ligand_net_charge: Optional[int] = None,
 ) -> MDRunResult:
     """Sets up a GROMACS MD run directory and optionally executes the pipeline."""
     pipeline_root = find_gromacs_pipeline(pipeline_dir)
@@ -172,7 +173,7 @@ LIGAND_NAME="{ligand_name}"
 LIGAND_RESNAME="{ligand_name[:3].upper()}"
 LIGAND_PH="7.4"
 LIGAND_CHARGE_METHOD="bcc"
-LIGAND_NET_CHARGE="0"
+LIGAND_NET_CHARGE="{0 if ligand_net_charge is None else int(ligand_net_charge)}"
 POSRES_FORCE_CONST="1000"
 RECEPTOR_NAME="{rec_p.stem}"
 CHAIN="ALL"
@@ -298,6 +299,7 @@ def run_md_from_session(
     work_dir: Optional[str | Path] = None,
     receptor_id: Optional[str] = None,
     timeout: Optional[float] = None,
+    ligand_net_charge: Optional[int] = None,
 ) -> MDRunResult:
     """Extracts raw receptor and pose from PoliScreen session and prepares/launches MD."""
     pose = session.get_pose(ligand_id, pose_idx=pose_idx, receptor_id=receptor_id)
@@ -343,4 +345,5 @@ def run_md_from_session(
         pipeline_dir=pipeline_dir,
         work_dir=work_dir,
         timeout=timeout,
+        ligand_net_charge=ligand_net_charge,
     )

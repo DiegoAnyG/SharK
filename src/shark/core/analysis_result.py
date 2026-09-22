@@ -145,7 +145,9 @@ class SharKAnalysisResult:
         """Writes evidence.json to disk."""
         p = Path(filepath).resolve()
         p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(self.to_json(indent=2), encoding="utf-8")
+        temporary = p.with_suffix(p.suffix + ".tmp")
+        temporary.write_text(self.to_json(indent=2) + "\n", encoding="utf-8")
+        temporary.replace(p)
         return p
 
     def write_analysis_manifest(self, filepath: str | Path) -> Path:

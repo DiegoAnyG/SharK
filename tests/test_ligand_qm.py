@@ -15,7 +15,11 @@ from rdkit import Chem
 from shark.cli import main
 from shark.core.runner import read_qm_results, run_orca_job
 from shark.core.session import read_poliscreen_session
-from shark.core.workflow_state import initialize_workflow_manifest
+from shark.core.workflow_state import (
+    initialize_workflow_manifest,
+    update_workflow_stage,
+    workflow_recovery_plan,
+)
 from shark.workflows.ligand_qm import prepare_ligand_jobs, select_ligands
 
 
@@ -261,6 +265,53 @@ def test_cli_resume_refuses_changed_dft_input(session, tmp_path, capsys):
 
     assert main(['resume', '--work-dir', str(root)]) == 1
     assert 'Refusing resume' in capsys.readouterr().err
+
+
+def test_preflight_failure_writes_structured_partial_dossier(archive, tmp_path, monkeypatch):
+    work_dir = tmp_path / 'failed-workflow'
+    monkeypatch.setattr('shark.core.preflight.find_orca', lambda allow_none=True: None)
+
+    code = main([
+        '--session', str(archive), '--dft', '--execute', '--no-orbital-plots',
+        '--work-dir', str(work_dir),
+    ])
+
+    assert code == 1
+    assert (work_dir / 'preflight.json').is_file()
+    assert (work_dir / 'dossier.html').is_file()
+    evidence = json.loads((work_dir / 'evidence.json').read_text())
+    assert evidence['workflow']['status'] == 'incomplete'
+    assert any(item['code'] == 'ORCA_UNAVAILABLE' for item in evidence['workflow']['failures'])
+    assert evidence['workflow']['recovery']['repeat_required'] == ['preflight']
+    assert evidence['provenance']['work_dir'] == '.'
+    assert evidence['workflow']['failures'][0]['category'] == 'tool'
+    assert json.loads((work_dir / 'preflight.json').read_text())['ligand_charges']['lig_a'] == -1
+    dossier = (work_dir / 'dossier.html').read_text()
+    assert 'Workflow Completion and Recovery' in dossier
+    assert 'Must be repeated' in dossier
+    assert 'ORCA_UNAVAILABLE' in dossier
+
+
+def test_workflow_recovery_plan_separates_reuse_review_repeat_and_pending(tmp_path):
+    initialize_workflow_manifest(
+        tmp_path,
+        project='test',
+        session_sha256='fixture',
+        stages={name: {} for name in ('preflight', 'md', 'qm', 'report')},
+    )
+    update_workflow_stage(tmp_path, 'preflight', status='completed', validation='validated')
+    update_workflow_stage(tmp_path, 'md', status='completed', validation='process_completed')
+    update_workflow_stage(tmp_path, 'qm', status='failed', validation='failed')
+    manifest = json.loads((tmp_path / 'execution_manifest.json').read_text())
+
+    plan = workflow_recovery_plan(manifest, [])
+
+    assert plan == {
+        'reusable': ['preflight'],
+        'review_required': ['md'],
+        'repeat_required': ['qm'],
+        'pending': ['report'],
+    }
 
 
 def test_cli_status_marks_dead_recorded_process_interrupted(tmp_path, capsys):

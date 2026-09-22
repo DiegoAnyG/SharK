@@ -14,10 +14,13 @@ import zipfile
 from .core.session import read_poliscreen_session, match_receptor_id
 from .core.runner import run_orca_job, run_orca_process, find_orca
 from .core.frontier import file_hash
+from .core.preflight import run_preflight
 from .core.workflow_state import (
     initialize_workflow_manifest,
     inspect_workflow,
+    record_workflow_failure,
     update_workflow_stage,
+    workflow_recovery_plan,
 )
 from .reports.dossier import generate_html_dossier, _sanitize_covalent_summary
 from .workflows.ligand_qm import prepare_ligand_jobs
@@ -77,13 +80,32 @@ def _get_safe_maxcore_mb(nprocs: int, requested_maxcore: Optional[int] = None, s
         avail_mb = psutil.virtual_memory().available / (1024 * 1024)
     except Exception:
         avail_mb = 6000.0
-    if requested_maxcore is not None:
-        safe_core = requested_maxcore
-    else:
-        budget_mb = int(avail_mb * safety_fraction)
-        safe_core = min(4000, max(256, budget_mb // nprocs))
     from .workflows.ligand_qm import _resources
-    return _resources(nprocs, safe_core)[1]
+    if requested_maxcore is not None:
+        return _resources(nprocs, requested_maxcore)[1]
+    initial = min(4000, max(256, int(avail_mb * safety_fraction) // nprocs))
+    candidates = sorted({initial, 4000, 3072, 2048, 1536, 1024, 768, 512, 384, 256}, reverse=True)
+    for safe_core in candidates:
+        if safe_core > initial:
+            continue
+        try:
+            return _resources(nprocs, safe_core)[1]
+        except ValueError:
+            continue
+    raise ValueError('Available memory cannot safely support the requested ORCA process count')
+
+
+def _resolve_orca_resources(nprocs: int | None, maxcore: int | None) -> tuple[int, int]:
+    """Choose the largest default CPU count that also fits the validated memory budget."""
+    host_cpus = len(os.sched_getaffinity(0)) if hasattr(os, 'sched_getaffinity') else (os.cpu_count() or 1)
+    candidates = [nprocs] if nprocs is not None else list(range(min(8, host_cpus), 0, -1))
+    last_error = None
+    for candidate in candidates:
+        try:
+            return candidate, _get_safe_maxcore_mb(candidate, maxcore)
+        except ValueError as exc:
+            last_error = exc
+    raise last_error or ValueError("No valid ORCA resource allocation is available")
 
 
 def _safe_float(val) -> Optional[float]:
@@ -680,6 +702,77 @@ def report_stage_progress(current_stage: int, total_stages: int, stage_name: str
         print(f"        {detail}")
 
 
+class WorkflowStageError(RuntimeError):
+    def __init__(self, stage: str, code: str, message: str, category: str = "execution"):
+        super().__init__(message)
+        self.stage = stage
+        self.code = code
+        self.category = category
+
+
+def _failure(stage: str, code: str, message: str, category: str, action: str | None = None) -> dict:
+    return {
+        "stage": stage,
+        "code": code,
+        "category": category,
+        "severity": "error",
+        "message": message,
+        "action": action,
+    }
+
+
+def _write_partial_dossier(args, project: str, failures: list[dict], *, interrupted: bool = False) -> Optional[Path]:
+    """Best-effort incomplete dossier for a workflow that could not reach normal reporting."""
+    try:
+        from .core.analysis_result import SharKAnalysisResult
+
+        work_dir = Path(args.work_dir).expanduser().resolve()
+        out_file = Path(args.html).expanduser().resolve() if getattr(args, "html", None) else work_dir / "dossier.html"
+        manifest, jobs = inspect_workflow(work_dir)
+        recovery = workflow_recovery_plan(manifest, jobs)
+        out_file.parent.mkdir(parents=True, exist_ok=True)
+        evidence_path = out_file.parent / "evidence.json"
+        if evidence_path.is_file():
+            result = SharKAnalysisResult.from_json(evidence_path)
+            result.analysis_id = project or result.analysis_id
+        else:
+            result = SharKAnalysisResult(analysis_id=project or "Incomplete SharK Analysis")
+        result.workflow = {
+            "requested": result.workflow.get("requested", "custom"),
+            "executed": "partial",
+            "status": "interrupted" if interrupted else "incomplete",
+            "degraded": True,
+            "degradation_reason": "; ".join(item["message"] for item in failures),
+            "failures": failures,
+            "recovery": recovery,
+        }
+        result.completeness = dict(result.completeness)
+        result.completeness["recovery"] = recovery
+        result.warnings = list(dict.fromkeys([*result.warnings, *(item["message"] for item in failures)]))
+        result.provenance = {**result.provenance, "project": project, "work_dir": "."}
+        result.write_evidence_json(evidence_path)
+        result.write_analysis_manifest(out_file.parent / "analysis_manifest.json")
+        qm_jobs = []
+        for record_path in sorted((work_dir / "quantum").glob("**/job.json")):
+            try:
+                record = json.loads(record_path.read_text(encoding="utf-8"))
+                viewer = record_path.parent / "frontier_orbitals.html"
+                if viewer.is_file():
+                    record["viewer_link"] = Path(os.path.relpath(viewer, out_file.parent)).as_posix()
+                qm_jobs.append(record)
+            except (OSError, ValueError, json.JSONDecodeError):
+                continue
+        generate_html_dossier(
+            project or "Incomplete SharK Analysis", [], out_file,
+            qm_summary={"jobs": qm_jobs}, result=result,
+        )
+        print(f"[REPORT] Partial dossier: {out_file}")
+        return out_file
+    except Exception as exc:
+        print(f"[ERROR] Could not generate partial dossier: {exc}", file=sys.stderr)
+        return None
+
+
 def _workflow_control(command: str, arguments: list[str]) -> int:
     parser = argparse.ArgumentParser(prog=f"shark {command}")
     parser.add_argument("--work-dir", required=True, help="Existing SharK job directory")
@@ -706,7 +799,9 @@ def _workflow_control(command: str, arguments: list[str]) -> int:
         for job in jobs:
             changed = f" | changed={','.join(job.get('changed_inputs', []))}" if job.get("changed_inputs") else ""
             print(f"  DFT {job.get('ligand', job['path'])}: {job['status']} | {job['path']}{changed}")
-        bad = {"failed", "interrupted", "timed_out", "invalid", "invalidated", "invalid_manifest", "completed_export_failed"}
+        for failure in (manifest or {}).get("failures", []):
+            print(f"  Failure {failure.get('code', 'UNKNOWN')}: {failure.get('message', 'No message')}")
+        bad = {"failed", "interrupted", "timed_out", "invalid", "invalidated", "invalid_manifest", "completed_export_failed", "skipped"}
         stage_bad = bool(manifest and any(
             stage.get("observed_status", stage.get("status")) in bad
             for stage in manifest.get("stages", {}).values()
@@ -965,14 +1060,10 @@ def main(argv=None):
         args.covalent = True
     if args.cluster_nac:
         args.covalent = True
+    missing_simple_inputs = False
     if args.simple_gold_standard:
         if not (args.topology and args.trajectory):
-            sys.stderr.write(
-                "ERROR: --simple-gold-standard requires both --topology and --trajectory "
-                "because dynamic NAC analysis is part of this workflow. "
-                "Use --fast-analysis for static-only analysis.\n"
-            )
-            return 1
+            missing_simple_inputs = True
         args.covalent = True
         args.cluster_nac = True
     if args.orca_cluster_sp:
@@ -998,6 +1089,17 @@ def main(argv=None):
     from .core.output import create_job_directory
     if not args.work_dir:
         args.work_dir = str(create_job_directory())
+    if missing_simple_inputs:
+        message = (
+            "--simple-gold-standard requires both --topology and --trajectory because dynamic NAC "
+            "analysis is part of this workflow; use --fast-analysis for static-only analysis"
+        )
+        print(f"[ERROR] {message}", file=sys.stderr)
+        _write_partial_dossier(
+            args, Path(args.session).stem if args.session else "Incomplete SharK Analysis",
+            [_failure("preflight", "DYNAMIC_INPUTS_REQUIRED", message, "input")],
+        )
+        return 1
     if args.analyze_md:
         if args.dft or args.execute or args.run_md:
             parser.error('--analyze-md cannot launch DFT or MD')
@@ -1025,9 +1127,16 @@ def main(argv=None):
             print(f'[REPORT] {report}')
             return 0
         except KeyboardInterrupt:
+            failure = _failure(
+                "md_contact_analysis", "STAGE_INTERRUPTED",
+                "Contact analysis was interrupted; any completed output was preserved", "execution",
+            )
+            _write_partial_dossier(args, Path(args.trajectory).stem, [failure], interrupted=True)
             return 130
         except (ValueError, OSError, RuntimeError) as exc:
             print(f'[ERROR] {exc}', file=sys.stderr)
+            failure = _failure("md_contact_analysis", "MD_CONTACT_ANALYSIS_FAILED", str(exc), "execution")
+            _write_partial_dossier(args, Path(args.trajectory).stem, [failure])
             return 1
     if not args.session:
         parser.error('--session is required')
@@ -1036,6 +1145,17 @@ def main(argv=None):
     if args.top < 1:
         parser.error('--top must be positive')
     session = None
+    active_stage = "ingestion"
+    workflow_failures = []
+    structured_failures = []
+
+    def add_failure(stage: str, code: str, message: str, category: str = "execution", action: str | None = None):
+        item = _failure(stage, code, message, category, action)
+        structured_failures.append(item)
+        workflow_failures.append(message)
+        record_workflow_failure(args.work_dir, item)
+        return item
+
     try:
         session = read_poliscreen_session(args.session)
         print(f"[SharK] Session '{session.project_name}': {len(session.poses)} indexed poses")
@@ -1043,7 +1163,13 @@ def main(argv=None):
             print(f'[NOTE] {warning}')
         topology_hash = file_hash(Path(args.topology)) if args.topology and Path(args.topology).is_file() else None
         trajectory_hash = file_hash(Path(args.trajectory)) if args.trajectory and Path(args.trajectory).is_file() else None
-        stage_specs = {}
+        stage_specs = {
+            "preflight": {
+                "execute": args.execute,
+                "run_md": args.run_md,
+                "require_orca": bool(args.dft or args.orca_cluster_sp or args.tier_4_ts),
+            }
+        }
         if args.run_md:
             stage_specs["molecular_dynamics"] = {
                 "time_ns": args.time_ns,
@@ -1169,9 +1295,66 @@ def main(argv=None):
                 poses = [p for p in poses if p.pose_idx == args.pose]
             return poses
 
+        active_stage = "preflight"
+        selected_for_preflight = _get_selected_poses()
+        try:
+            preflight_nprocs, preflight_maxcore = _resolve_orca_resources(args.nprocs, args.maxcore)
+        except ValueError:
+            preflight_nprocs = args.nprocs or 1
+            preflight_maxcore = args.maxcore
+        preflight_ligand_request = None
+        if args.dft or args.run_md or args.covalent:
+            preflight_ligand_request = {
+                "top": args.top,
+                "target": args.target,
+                "compounds": args.compound,
+                "pareto": args.pareto,
+                "include_controls": args.include_controls,
+                "method": args.theory,
+                "solvent": None if args.solvent.lower() == "gas" else args.solvent,
+                "optimize": not args.single_point,
+                "frequencies": args.frequencies,
+                "charge": args.charge,
+                "multiplicity": args.multiplicity,
+                "seed": args.seed,
+                "nprocs": 1,
+                "maxcore": 1,
+                "geometry": args.geometry,
+                "orbital_grid": None if args.no_orbital_plots else args.orbital_grid,
+            }
+        preflight = run_preflight(
+            session=session,
+            execute=args.execute,
+            run_md=args.run_md,
+            require_orca=bool(args.dft or args.orca_cluster_sp or args.tier_4_ts),
+            pipeline_dir=args.pipeline_dir,
+            topology=args.topology,
+            trajectory=args.trajectory,
+            nprocs=preflight_nprocs,
+            maxcore_mb=preflight_maxcore,
+            ligand_request=preflight_ligand_request,
+        )
+        preflight.write(Path(args.work_dir) / "preflight.json")
+        update_workflow_stage(
+            args.work_dir,
+            "preflight",
+            status="failed" if preflight.blocking else "completed",
+            validation="failed" if preflight.blocking else "validated",
+            reason="; ".join(check.message for check in preflight.blocking) or None,
+            details={"checks": len(preflight.checks), "blocking": len(preflight.blocking)},
+        )
+        for check in preflight.blocking:
+            add_failure(check.stage, check.code, check.message, check.category, check.action)
+        if preflight.blocking:
+            raise WorkflowStageError(
+                "preflight", "PREFLIGHT_FAILED",
+                f"Preflight blocked execution with {len(preflight.blocking)} error(s)", "validation",
+            )
+        print(f"[PREFLIGHT] Passed {len(preflight.checks)} checks; {len(selected_for_preflight)} pose(s) selected")
+
         last_md_res = None
-        workflow_failures = []
         if args.run_md:
+            active_stage = "molecular_dynamics"
             update_workflow_stage(
                 args.work_dir,
                 "molecular_dynamics",
@@ -1198,11 +1381,16 @@ def main(argv=None):
                     pipeline_dir=args.pipeline_dir,
                     work_dir=Path(args.work_dir) / 'md' if (args.work_dir and not args.pipeline_dir) else None,
                     timeout=args.timeout,
+                    ligand_net_charge=preflight.ligand_charges.get(pose.ligand_id.casefold()),
                 )
                 last_md_res = res
                 print(f"[MD] Status: {res.status} | Directory: {res.run_dir}")
                 if args.execute and res.status != 'completed':
-                    workflow_failures.append(f"MD {res.status}: {res.error_message or 'external pipeline did not complete'}")
+                    add_failure(
+                        "molecular_dynamics", f"MD_{res.status.upper()}",
+                        f"MD {res.status}: {res.error_message or 'external pipeline did not complete'}",
+                        action="Inspect the preserved MD log, then resume the failed stage",
+                    )
                 if res.dashboard_path:
                     print(f"[MD] Dashboard: {res.dashboard_path}")
                 if (args.full_gold_standard or args.covalent or getattr(args, 'cluster_nac', False)) and res.status == 'completed':
@@ -1226,11 +1414,9 @@ def main(argv=None):
                     reason=last_md_res.error_message,
                     details={"sim_time_ns": last_md_res.sim_time_ns},
                 )
-            if not (args.full_gold_standard or args.covalent or getattr(args, 'cluster_nac', False) or args.tier_4_ts or args.dft):
-                return int(bool(workflow_failures))
-
         covalent_summary = None
         if args.covalent:
+            active_stage = "covalent_analysis"
             from .analysis.covalent_matcher import match_covalent_pocket
             from .analysis.reactivity import build_reactivity_profile
 
@@ -1240,6 +1426,7 @@ def main(argv=None):
 
             if args.trajectory and args.topology:
                 if args.cluster_nac:
+                    active_stage = "trajectory_clustering"
                     update_workflow_stage(
                         args.work_dir,
                         "trajectory_clustering",
@@ -1517,6 +1704,7 @@ def main(argv=None):
                     covalent_summary['target_residue_atoms'] = cluster_res_atoms
 
             if args.orca_cluster_sp:
+                active_stage = "cluster_qm"
                 update_workflow_stage(args.work_dir, "cluster_qm", status="running", validation="pending")
                 if args.full_gold_standard:
                     report_stage_progress(5, 8, "Active-Site Cluster QM Single-Point (Pillar 3)", f"Method: {args.theory} | Solvent: {args.solvent}")
@@ -1525,9 +1713,7 @@ def main(argv=None):
                 else:
                     cluster_work_dir = Path.cwd() / 'shark_jobs' / f"cluster_sp_{target_residue}_{args.qm_model}"
                 cluster_work_dir.mkdir(parents=True, exist_ok=True)
-                host_cpus = len(os.sched_getaffinity(0)) if hasattr(os, 'sched_getaffinity') else (os.cpu_count() or 1)
-                sp_nprocs = args.nprocs or min(8, host_cpus)
-                sp_maxcore = _get_safe_maxcore_mb(sp_nprocs, args.maxcore)
+                sp_nprocs, sp_maxcore = preflight_nprocs, preflight_maxcore
                 cluster_qm_res = run_cluster_single_point(
                     cluster=cluster,
                     work_dir=cluster_work_dir,
@@ -1557,9 +1743,14 @@ def main(argv=None):
                         reason=cluster_qm_res.error_message,
                     )
                     if args.execute:
-                        workflow_failures.append(f"Cluster QM failed: {cluster_qm_res.error_message or 'unknown error'}")
+                        add_failure(
+                            "cluster_qm", "CLUSTER_QM_FAILED",
+                            f"Cluster QM failed: {cluster_qm_res.error_message or 'unknown error'}",
+                            action="Inspect the cluster QM output and resume this stage",
+                        )
 
             if args.tier_4_ts:
+                active_stage = "tier_4"
                 update_workflow_stage(
                     args.work_dir,
                     "tier_4",
@@ -1574,9 +1765,7 @@ def main(argv=None):
                     ts_work_dir = Path.cwd() / 'runs' / f"ts_{p.ligand_id}_{target_residue}_{args.qm_model}"
                 ts_work_dir.mkdir(parents=True, exist_ok=True)
 
-                host_cpus = len(os.sched_getaffinity(0)) if hasattr(os, 'sched_getaffinity') else (os.cpu_count() or 1)
-                ts_nprocs = args.nprocs or min(8, host_cpus)
-                ts_maxcore = _get_safe_maxcore_mb(ts_nprocs, args.maxcore)
+                ts_nprocs, ts_maxcore = preflight_nprocs, preflight_maxcore
 
                 from .analysis.reaction_validation import validate_reaction_pair, write_reaction_definition_json, compute_tier4_fingerprint
 
@@ -1713,7 +1902,6 @@ def main(argv=None):
                 if args.execute and not tier4_blocked:
                     orca_bin = find_orca(allow_none=True)
                     if not orca_bin:
-                        print("[ERROR] ORCA executable not found in PATH or standard location", file=sys.stderr)
                         update_workflow_stage(
                             args.work_dir,
                             "tier_4",
@@ -1721,7 +1909,10 @@ def main(argv=None):
                             validation="failed",
                             reason="ORCA executable not found",
                         )
-                        return 1
+                        raise WorkflowStageError(
+                            "tier_4", "ORCA_UNAVAILABLE",
+                            "ORCA executable not found in PATH or configured locations", "tool",
+                        )
 
                     orca_real = str(orca_bin)
                     if getattr(args, 'full_thermo', False) and (ts_work_dir / '00_reactant_freq.inp').is_file():
@@ -1761,7 +1952,7 @@ def main(argv=None):
                             scan_text, len(scan_res.points), args.scan_steps
                         )
                         if p_scan.returncode != 0 or not p_scan.terminated_normally or not scan_is_complete:
-                            print(f"[ERROR] Coordinate scan failed: {p_scan.error or f'code {p_scan.returncode}'}", file=sys.stderr)
+                            scan_error = p_scan.error or f"process code {p_scan.returncode}"
                             update_workflow_stage(
                                 args.work_dir,
                                 "tier_4",
@@ -1769,7 +1960,10 @@ def main(argv=None):
                                 validation="failed",
                                 reason=p_scan.error or "Coordinate scan did not complete",
                             )
-                            return p_scan.returncode if p_scan.returncode != 0 else 1
+                            raise WorkflowStageError(
+                                "tier_4", "COORDINATE_SCAN_FAILED",
+                                f"Coordinate scan failed: {scan_error}",
+                            )
                         scan_res.converged = True
                         try:
                             scan_meta_path.write_text(json.dumps({
@@ -2279,6 +2473,7 @@ def main(argv=None):
                 print(f"[NOTE] Could not generate 3Dmol adduct viewer: {e}")
 
         if args.dft:
+            active_stage = "ligand_dft"
             update_workflow_stage(
                 args.work_dir,
                 "ligand_dft",
@@ -2287,9 +2482,7 @@ def main(argv=None):
             )
             if args.full_gold_standard:
                 report_stage_progress(8, 8, "Isolated Ligand DFT & Frontier Orbitals", f"Theory: {args.theory} | Solvent: {args.solvent}")
-            host_cpus = len(os.sched_getaffinity(0)) if hasattr(os, 'sched_getaffinity') else (os.cpu_count() or 1)
-            dft_nprocs = args.nprocs if args.nprocs is not None else min(8, host_cpus)
-            dft_maxcore = _get_safe_maxcore_mb(dft_nprocs, args.maxcore)
+            dft_nprocs, dft_maxcore = preflight_nprocs, preflight_maxcore
             jobs = prepare_ligand_jobs(
                 session, Path(args.work_dir) / 'quantum', top=args.top, target=args.target, compounds=args.compound,
                 pareto=args.pareto, include_controls=args.include_controls, method=args.theory,
@@ -2308,7 +2501,7 @@ def main(argv=None):
                 if record.get('orbital_export', {}).get('status') == 'completed':
                     record['viewer_link'] = Path(os.path.relpath(job / 'frontier_orbitals.html', out_file.parent)).as_posix()
             if covalent_summary and 'cdft' not in covalent_summary and records:
-                first_orb = records[0].get('results', {}).get('orbitals', {}).get('0', {})
+                first_orb = (records[0].get('results') or {}).get('orbitals', {}).get('0', {})
                 h = first_orb.get('homo', {}).get('energy_eV')
                 l = first_orb.get('lumo', {}).get('energy_eV')
                 if h is not None and l is not None:
@@ -2337,15 +2530,12 @@ def main(argv=None):
             if args.execute:
                 for record in records:
                     if record.get('status') != 'completed':
-                        workflow_failures.append(
-                            f"Ligand DFT {record.get('status', 'failed')}: {record.get('error', 'calculation did not complete')}"
+                        add_failure(
+                            "ligand_dft", "LIGAND_DFT_FAILED",
+                            f"Ligand DFT {record.get('status', 'failed')}: {record.get('error', 'calculation did not complete')}",
+                            action="Inspect the preserved ORCA attempt and run shark resume",
                         )
-            if not (args.full_gold_standard or args.covalent or getattr(args, 'cluster_nac', False) or args.run_md):
-                generate_html_dossier(session.project_name, [], out_file, qm_summary={'jobs': records},
-                                      covalent_summary=covalent_summary)
-                print(f'[REPORT] {out_file}')
-                return int(args.execute and any(r['status'] != 'completed' or
-                           r.get('orbital_export', {}).get('status') == 'failed' for r in records))
+        active_stage = "reporting"
         poses = _get_selected_poses()
         poses_data = [dict(ligand_id=p.ligand_id, pose_idx=p.pose_idx,
                            score=p.score if math.isfinite(p.score) else None) for p in poses]
@@ -2407,7 +2597,7 @@ def main(argv=None):
                     if r_id.casefold() in p_dict['ligand_id'].casefold() or p_dict['ligand_id'].casefold() in r_id.casefold():
                         cand_rec = r
                         break
-                orb = cand_rec.get('results', {}).get('orbitals', {}).get('0', {})
+                orb = (cand_rec.get('results') or {}).get('orbitals', {}).get('0', {})
                 if orb:
                     h = orb.get('homo', {}).get('energy_eV')
                     l = orb.get('lumo', {}).get('energy_eV')
@@ -2419,7 +2609,7 @@ def main(argv=None):
                     if g is not None:
                         p_dict['gap_ev'] = g
             if covalent_summary and 'cdft' not in covalent_summary:
-                first_orb = records[0].get('results', {}).get('orbitals', {}).get('0', {})
+                first_orb = (records[0].get('results') or {}).get('orbitals', {}).get('0', {})
                 h = first_orb.get('homo', {}).get('energy_eV')
                 l = first_orb.get('lumo', {}).get('energy_eV')
                 if h is not None and l is not None:
@@ -2435,16 +2625,28 @@ def main(argv=None):
         from .core.analysis_result import SharKAnalysisResult
         out_dir = out_file.parent
         out_dir.mkdir(parents=True, exist_ok=True)
+        execution_manifest, recorded_jobs = inspect_workflow(args.work_dir)
+        recovery = workflow_recovery_plan(execution_manifest, recorded_jobs)
+        completeness = dict(tot_feas.completeness) if 'tot_feas' in locals() else {}
+        completeness['recovery'] = recovery
+        result_warnings = list(tot_feas.warnings) if 'tot_feas' in locals() else []
+        result_warnings.extend(item['message'] for item in structured_failures)
 
         req_wf = 'simple_gold_standard' if args.simple_gold_standard else ('full_gold_standard' if args.full_gold_standard else ('fast_analysis' if args.fast_analysis else 'custom'))
+        workflow_status = 'incomplete' if structured_failures or recovery['repeat_required'] else (
+            'prepared' if not args.execute and (args.dft or args.run_md or args.tier_4_ts or args.orca_cluster_sp)
+            else 'completed'
+        )
         analysis_result = SharKAnalysisResult(
             analysis_id=str(session.project_name),
             workflow={
                 'requested': req_wf,
                 'executed': req_wf,
-                'status': 'completed',
-                'degraded': bool(workflow_failures),
+                'status': workflow_status,
+                'degraded': bool(structured_failures),
                 'degradation_reason': '; '.join(workflow_failures) if workflow_failures else None,
+                'failures': structured_failures,
+                'recovery': recovery,
             },
             binding={
                 'docking_score': d_score if 'd_score' in locals() else None,
@@ -2459,9 +2661,9 @@ def main(argv=None):
             transition_state=covalent_summary.get('transition_state', {}) if covalent_summary else {},
             adduct=covalent_summary.get('adduct_qm', {}) if covalent_summary else {},
             feasibility=covalent_summary.get('total_feasibility', {}) if covalent_summary else {},
-            completeness=tot_feas.completeness if 'tot_feas' in locals() else {},
-            warnings=tot_feas.warnings if 'tot_feas' in locals() else [],
-            provenance={'project': session.project_name, 'work_dir': str(args.work_dir)},
+            completeness=completeness,
+            warnings=result_warnings,
+            provenance={'project': session.project_name, 'work_dir': '.'},
         )
 
         try:
@@ -2548,12 +2750,53 @@ def main(argv=None):
             pass
 
         print(f'[REPORT] {out_file}')
-        return int(bool(workflow_failures))
-    except KeyboardInterrupt:
-        print('[STOPPED] Execution interrupted; job state and logs preserved', file=sys.stderr)
-        return 130
-    except (ValueError, OSError, zipfile.BadZipFile) as exc:
+        return int(bool(structured_failures))
+    except WorkflowStageError as exc:
+        update_workflow_stage(
+            args.work_dir, exc.stage, status="failed", validation="failed", reason=str(exc),
+        )
+        if not any(item.get("stage") == exc.stage and item.get("code") == exc.code for item in structured_failures):
+            add_failure(exc.stage, exc.code, str(exc), exc.category)
         print(f'[ERROR] {exc}', file=sys.stderr)
+        _write_partial_dossier(
+            args,
+            session.project_name if session is not None else Path(args.session).stem,
+            structured_failures,
+        )
+        return 1
+    except KeyboardInterrupt:
+        update_workflow_stage(
+            args.work_dir, active_stage, status="interrupted", validation="failed",
+            reason="Execution interrupted",
+        )
+        add_failure(
+            active_stage, "STAGE_INTERRUPTED",
+            "Execution was interrupted; completed outputs were preserved",
+            action="Inspect shark status, then resume the first incomplete stage",
+        )
+        print('[STOPPED] Execution interrupted; job state and logs preserved', file=sys.stderr)
+        _write_partial_dossier(
+            args,
+            session.project_name if session is not None else Path(args.session).stem,
+            structured_failures,
+            interrupted=True,
+        )
+        return 130
+    except Exception as exc:
+        update_workflow_stage(
+            args.work_dir, active_stage, status="failed", validation="failed", reason=str(exc),
+        )
+        add_failure(
+            active_stage, f"{active_stage.upper()}_FAILED", str(exc),
+            "input" if isinstance(exc, (ValueError, zipfile.BadZipFile)) else "execution",
+            action="Correct the reported issue, then reuse completed validated stages",
+        )
+        print(f'[ERROR] {exc}', file=sys.stderr)
+        _write_partial_dossier(
+            args,
+            session.project_name if session is not None else Path(args.session).stem,
+            structured_failures,
+        )
         return 1
     finally:
         if session is not None:

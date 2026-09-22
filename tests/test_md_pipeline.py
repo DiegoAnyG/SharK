@@ -73,7 +73,8 @@ def test_setup_and_launch_md_prepared(mock_pipeline_dir, tmp_path):
         ligand_name="TEST_LIG",
         sim_time_ns=5.0,
         pipeline_dir=mock_pipeline_dir,
-        run_now=False
+        run_now=False,
+        ligand_net_charge=-1,
     )
 
     assert isinstance(result, MDRunResult)
@@ -86,6 +87,7 @@ def test_setup_and_launch_md_prepared(mock_pipeline_dir, tmp_path):
     cfg = (result.run_dir / "config.env").read_text()
     assert "SIM_TIME_NS=5.0" in cfg
     assert 'LIGAND_NAME="TEST_LIG"' in cfg
+    assert 'LIGAND_NET_CHARGE="-1"' in cfg
     assert 'CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"' in cfg
 
 

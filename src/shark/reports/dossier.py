@@ -247,11 +247,13 @@ def generate_html_dossier(project_name: str, poses_data: list[dict], out_html: s
     no viewer path is used by the resulting document. Existing call sites remain valid.
     """
     out_path = Path(out_html)
+    workflow_data = {}
 
     # If a structured SharKAnalysisResult is passed, adapt it for the dossier
     if result is not None:
         r_dict = result.to_dict() if hasattr(result, 'to_dict') else result
         project_name = r_dict.get('analysis_id') or project_name
+        workflow_data = r_dict.get('workflow') or {}
 
         # 1. Attempt to load rich covalent_feasibility.json if covalent_summary is absent
         if covalent_summary is None:
@@ -380,7 +382,7 @@ def generate_html_dossier(project_name: str, poses_data: list[dict], out_html: s
                 d_sc = r_dict['binding'].get('docking_score')
                 p_item = {'ligand_id': lig_name, 'pose_idx': 1, 'score': d_sc}
                 if qm_summary and qm_summary.get('jobs'):
-                    orb = qm_summary['jobs'][0].get('results', {}).get('orbitals', {}).get('0', {})
+                    orb = (qm_summary['jobs'][0].get('results') or {}).get('orbitals', {}).get('0', {})
                     if orb:
                         p_item['homo_ev'] = orb.get('homo', {}).get('energy_eV')
                         p_item['lumo_ev'] = orb.get('lumo', {}).get('energy_eV')
@@ -1163,6 +1165,38 @@ def generate_html_dossier(project_name: str, poses_data: list[dict], out_html: s
     # Legacy callers may still provide an explicit mesh rather than orbital exports.
     legacy = '<section><h2>Supplied orbital mesh</h2><p>Legacy mesh: provenance and spatial convergence are not established.</p><div id="legacy-mesh"></div></section>' if orbital_mesh else ''
     public_jobs = [{k:v for k,v in job.items() if k != 'viewer_link'} for job in jobs]
+
+    workflow_html = ''
+    if workflow_data:
+        recovery = workflow_data.get('recovery') or {}
+        failures = workflow_data.get('failures') or []
+
+        def recovery_items(key: str, empty: str) -> str:
+            values = recovery.get(key) or []
+            return ''.join(f'<li>{escape(str(value))}</li>' for value in values) or f'<li>{escape(empty)}</li>'
+
+        failure_rows = ''.join(
+            '<li><strong>' + escape(str(item.get('code', 'WORKFLOW_FAILURE'))) + '</strong>'
+            + ' [' + escape(str(item.get('category', 'execution'))) + '] — '
+            + escape(str(item.get('message', 'Unknown failure')))
+            + (f'<br><span style="color:#64748b;">Next action: {escape(str(item["action"]))}</span>' if item.get('action') else '')
+            + '</li>'
+            for item in failures
+        ) or '<li>No structured failures recorded.</li>'
+        status = str(workflow_data.get('status', 'unknown')).upper()
+        workflow_html = (
+            '<div style="margin-top:18px;padding:16px;border:1px solid #cbd5e1;border-radius:10px;background:#f8fafc;">'
+            '<h3 style="margin:0 0 8px;">Workflow Completion and Recovery</h3>'
+            f'<p><strong>Status: {escape(status)}</strong>. Completed means process output exists; only validated entries are reusable without rerun.</p>'
+            '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:12px;">'
+            f'<div><h4>Reusable without rerun</h4><ul>{recovery_items("reusable", "None")}</ul></div>'
+            f'<div><h4>Review before reuse</h4><ul>{recovery_items("review_required", "None")}</ul></div>'
+            f'<div><h4>Must be repeated</h4><ul>{recovery_items("repeat_required", "None")}</ul></div>'
+            f'<div><h4>Not yet performed</h4><ul>{recovery_items("pending", "None")}</ul></div>'
+            '</div>'
+            f'<h4>Structured failures</h4><ul>{failure_rows}</ul>'
+            '</div>'
+        )
     provenance = _redact_local_paths(dict(
         schema_version=1,
         shark_version=__version__,
@@ -1171,6 +1205,7 @@ def generate_html_dossier(project_name: str, poses_data: list[dict], out_html: s
         docking=poses_data,
         molecular_dynamics=md_summary,
         covalent=covalent_summary,
+        workflow=workflow_data,
         notes=notes,
     ))
     
@@ -1259,7 +1294,7 @@ def generate_html_dossier(project_name: str, poses_data: list[dict], out_html: s
                         CARD2_TITLE=card2_title, CARD2_MAIN=escape(card2_main), CARD2_SUB=escape(card2_sub),
                         CARD3_TITLE=card3_title, CARD3_MAIN=escape(card3_main), CARD3_SUB=escape(card3_sub),
                         CARD4_TITLE=card4_title, CARD4_MAIN=escape(card4_main), CARD4_SUB=escape(card4_sub),
-                        LEGACY=legacy, NOTES=f'<p>{escape(notes)}</p>' if notes else '',
+                        LEGACY=legacy, NOTES=workflow_html + (f'<p>{escape(notes)}</p>' if notes else ''),
                         PROVENANCE=escape(json.dumps(provenance, indent=2, default=str)),
                         DATA=_json(dict(viewers=viewers, levels=levels, tautomers=tautomers_data,
                                         energy_basis=energy_basis,

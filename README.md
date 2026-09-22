@@ -138,6 +138,12 @@ runtime state and validation state. `status` detects a recorded worker that is n
 running. Automatic resume currently covers isolated-ligand DFT only; MD checkpoints and
 Tier 4 continuation still require their workflow-specific commands.
 
+Before work starts, `preflight.json` records tool availability, host resource limits,
+input readability, selected poses, and ligand charge/spin identity. A blocking check or
+later runtime failure still produces `evidence.json`, `analysis_manifest.json`, and an
+incomplete `dossier.html`. Its recovery section separates validated reusable stages,
+completed work requiring review, stages that must be repeated, and pending work.
+
 The offline `dossier.html` distinguishes prepared, completed, failed and interrupted jobs.
 Only normally terminated calculations with a final energy and orbital table provide
 results; optimization also requires ORCA's convergence marker. Frequencies are required
