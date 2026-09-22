@@ -68,6 +68,7 @@ def initialize_workflow_manifest(
                 "status": "invalidated",
                 "validation": "not_evaluated",
                 "fingerprint": fingerprint,
+                "parameters": parameters,
                 "reason": "Stage parameters changed",
             }
         elif current is None:
@@ -75,7 +76,10 @@ def initialize_workflow_manifest(
                 "status": "planned",
                 "validation": "not_evaluated",
                 "fingerprint": fingerprint,
+                "parameters": parameters,
             }
+        else:
+            current["parameters"] = parameters
         data["stages"][name] = current
     data["updated_utc"] = _now()
     _atomic_json(path, data)

@@ -29,6 +29,7 @@ dist/
 # OS artifacts
 .DS_Store
 Thumbs.db
+*:Zone.Identifier
 
 # Private working notes, calculations, and reports
 /notes/

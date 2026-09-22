@@ -776,6 +776,7 @@ def _write_partial_dossier(args, project: str, failures: list[dict], *, interrup
 def _workflow_control(command: str, arguments: list[str]) -> int:
     parser = argparse.ArgumentParser(prog=f"shark {command}")
     parser.add_argument("--work-dir", required=True, help="Existing SharK job directory")
+    parser.add_argument("--pipeline-dir", help="Configured GROMACS pipeline for legacy external MD runs")
     parser.add_argument("--timeout", type=float, default=float(os.environ.get("SHARK_STAGE_TIMEOUT", "86400")))
     options = parser.parse_args(arguments)
     if not math.isfinite(options.timeout) or options.timeout <= 0:
@@ -808,59 +809,178 @@ def _workflow_control(command: str, arguments: list[str]) -> int:
         ))
         return int(stage_bad or any(job.get("status") in bad for job in jobs))
 
-    resumable = [
-        job for job in jobs
-        if job.get("status") in ("prepared", "failed", "interrupted", "completed_export_failed")
-    ]
+    resumable = [job for job in jobs if job.get("status") in (
+        "prepared", "failed", "interrupted", "completed_export_failed"
+    )]
     invalid = [job for job in jobs if job.get("status") in ("invalidated", "invalid_manifest")]
     if invalid:
         print("[ERROR] Refusing resume because one or more DFT inputs or manifests changed", file=sys.stderr)
         return 1
-    if not resumable:
-        if jobs and all(job.get("status") == "completed" for job in jobs):
-            print("[RESUME] All isolated-ligand DFT jobs are already complete.")
-            return 0
-        print("[RESUME] No safely resumable DFT job was found. MD and Tier 4 checkpoint resume are not yet supported.")
-        return 1
+    handled = False
+    if resumable:
+        handled = True
+        update_workflow_stage(root, "ligand_dft", status="running", validation="pending")
+        failed = False
+        for job in resumable:
+            job_path = root / job["path"]
+            try:
+                record = run_orca_job(job_path, timeout=options.timeout, resume=True)
+            except KeyboardInterrupt:
+                update_workflow_stage(
+                    root, "ligand_dft", status="interrupted", validation="failed",
+                    reason="Resume interrupted by user",
+                )
+                return 130
+            except (ValueError, OSError) as exc:
+                update_workflow_stage(root, "ligand_dft", status="failed", validation="failed", reason=str(exc))
+                print(f"[ERROR] Could not resume {job['path']}: {exc}", file=sys.stderr)
+                return 1
+            print(f"[RESUME] DFT {record['selection']['ligand_id']}: {record['status']}")
+            failed = failed or record.get("status") != "completed" or record.get("orbital_export", {}).get("status") == "failed"
+        _, refreshed = inspect_workflow(root)
+        all_complete = bool(refreshed) and all(job.get("status") == "completed" for job in refreshed)
+        update_workflow_stage(
+            root, "ligand_dft",
+            status="completed" if all_complete else "failed",
+            validation="validated" if all_complete else "failed",
+            reason=None if all_complete else "One or more isolated-ligand calculations did not complete",
+            details={
+                "completed_jobs": sum(job.get("status") == "completed" for job in refreshed),
+                "total_jobs": len(refreshed),
+            },
+        )
+        if failed or not all_complete:
+            return 1
 
-    update_workflow_stage(root, "ligand_dft", status="running", validation="pending")
-    failed = False
-    for job in resumable:
-        job_path = root / job["path"]
+    stages = (manifest or {}).get("stages", {})
+    md_stage = stages.get("molecular_dynamics")
+    if md_stage and not (
+        md_stage.get("status") == "completed" and md_stage.get("validation") == "validated"
+    ):
+        from .workflows.md_pipeline import (
+            gromacs_production_hashes,
+            resume_md_from_checkpoint,
+            validate_gromacs_production,
+        )
+
+        recorded = md_stage.get("details", {}).get("run_dir")
+        if recorded:
+            md_run = (root / recorded).resolve()
+            try:
+                md_run.relative_to(root)
+            except ValueError:
+                print("[ERROR] Recorded MD run directory escapes the workflow directory", file=sys.stderr)
+                return 1
+        elif md_stage.get("details", {}).get("run_id"):
+            from .workflows.md_pipeline import find_gromacs_pipeline
+
+            pipeline = find_gromacs_pipeline(options.pipeline_dir)
+            if pipeline is None:
+                print(
+                    "[ERROR] External MD resume requires --pipeline-dir or SHARK_GROMACS_PIPELINE",
+                    file=sys.stderr,
+                )
+                return 1
+            md_run = (pipeline / "runs" / md_stage["details"]["run_id"]).resolve()
+        else:
+            candidates = sorted(path.parent for path in (root / "md").glob("*/config.env"))
+            if len(candidates) != 1:
+                print("[ERROR] MD resume requires exactly one recorded run directory", file=sys.stderr)
+                return 1
+            md_run = candidates[0].resolve()
+        handled = True
+        valid, reason = validate_gromacs_production(md_run)
+        if valid:
+            update_workflow_stage(
+                root, "molecular_dynamics", status="completed", validation="validated",
+                details={
+                    **md_stage.get("details", {}),
+                    "artifact_hashes": gromacs_production_hashes(md_run),
+                },
+            )
+            print(f"[RESUME] MD outputs already valid: {md_run.name}")
+        else:
+            update_workflow_stage(root, "molecular_dynamics", status="running", validation="pending")
+            try:
+                result = resume_md_from_checkpoint(md_run, timeout=options.timeout)
+            except KeyboardInterrupt:
+                update_workflow_stage(
+                    root, "molecular_dynamics", status="interrupted", validation="failed",
+                    reason="Resume interrupted by user",
+                )
+                return 130
+            except (ValueError, OSError) as exc:
+                update_workflow_stage(root, "molecular_dynamics", status="failed", validation="failed", reason=str(exc))
+                print(f"[ERROR] Could not resume MD: {exc}", file=sys.stderr)
+                return 1
+            update_workflow_stage(
+                root, "molecular_dynamics", status=result.status,
+                validation="validated" if result.status == "completed" else "failed",
+                reason=result.error_message,
+                details={
+                    **md_stage.get("details", {}),
+                    "artifact_hashes": result.artifact_hashes or {},
+                },
+            )
+            print(f"[RESUME] MD checkpoint continuation: {result.status}")
+            if result.status != "completed":
+                return 1
+
+    tier4_stage = stages.get("tier_4")
+    if tier4_stage and not (
+        tier4_stage.get("status") == "completed" and tier4_stage.get("validation") == "validated"
+    ):
+        from .workflows.tier4_resume import resume_tier4_workflow
+
+        parameters = tier4_stage.get("parameters", {})
+        tier4_dir = root / "transition_state"
+        if "full_thermo" in parameters:
+            full_thermo = bool(parameters["full_thermo"])
+        else:
+            product_template = tier4_dir / "03_adduct_opt_template.inp"
+            full_thermo = product_template.is_file() and " Freq" in product_template.read_text(
+                encoding="utf-8", errors="replace"
+            )
+        optimize_adduct = bool(parameters.get("optimize_adduct", False))
+        if "optimize_adduct" not in parameters:
+            optimize_adduct = any((tier4_dir / name).is_file() for name in (
+                "03_adduct_opt.inp", "03_adduct_opt.out", "03_adduct_opt.meta.json"
+            ))
+        handled = True
+        update_workflow_stage(root, "tier_4", status="running", validation="pending")
         try:
-            record = run_orca_job(job_path, timeout=options.timeout, resume=True)
+            result = resume_tier4_workflow(
+                tier4_dir,
+                timeout=options.timeout,
+                full_thermo=full_thermo,
+                optimize_adduct=optimize_adduct,
+            )
         except KeyboardInterrupt:
             update_workflow_stage(
-                root,
-                "ligand_dft",
-                status="interrupted",
-                validation="failed",
+                root, "tier_4", status="interrupted", validation="failed",
                 reason="Resume interrupted by user",
             )
             return 130
-        except (ValueError, OSError) as exc:
-            update_workflow_stage(
-                root,
-                "ligand_dft",
-                status="failed",
-                validation="failed",
-                reason=str(exc),
-            )
-            print(f"[ERROR] Could not resume {job['path']}: {exc}", file=sys.stderr)
+        except ValueError as exc:
+            update_workflow_stage(root, "tier_4", status="invalid", validation="failed", reason=str(exc))
+            print(f"[ERROR] Tier 4 result is not reusable: {exc}", file=sys.stderr)
             return 1
-        print(f"[RESUME] DFT {record['selection']['ligand_id']}: {record['status']}")
-        failed = failed or record.get("status") != "completed" or record.get("orbital_export", {}).get("status") == "failed"
-    _, refreshed = inspect_workflow(root)
-    all_complete = bool(refreshed) and all(job.get("status") == "completed" for job in refreshed)
-    update_workflow_stage(
-        root,
-        "ligand_dft",
-        status="completed" if all_complete else "failed",
-        validation="validated" if all_complete else "failed",
-        reason=None if all_complete else "One or more isolated-ligand calculations did not complete",
-        details={"completed_jobs": sum(job.get("status") == "completed" for job in refreshed), "total_jobs": len(refreshed)},
-    )
-    return int(failed or not all_complete)
+        except (OSError, RuntimeError) as exc:
+            update_workflow_stage(root, "tier_4", status="failed", validation="failed", reason=str(exc))
+            print(f"[ERROR] Could not resume Tier 4: {exc}", file=sys.stderr)
+            return 1
+        update_workflow_stage(
+            root, "tier_4", status="completed", validation="validated", details={"substages": result}
+        )
+        print("[RESUME] Tier 4: " + ", ".join(f"{stage}={status}" for stage, status in result.items()))
+
+    if handled:
+        return 0
+    if jobs and all(job.get("status") == "completed" for job in jobs):
+        print("[RESUME] All recorded resumable stages are already complete.")
+        return 0
+    print("[RESUME] No safely resumable stage was found.")
+    return 1
 
 
 def main(argv=None):
@@ -1406,13 +1526,24 @@ def main(argv=None):
                         print(f'[MD] Linking trajectory for clustering: {xtc_cand}')
             if last_md_res is not None:
                 md_validated = last_md_res.status == "completed" and bool(args.execute)
+                md_details = {
+                    "sim_time_ns": last_md_res.sim_time_ns,
+                    "run_id": last_md_res.run_id,
+                    "artifact_hashes": last_md_res.artifact_hashes or {},
+                }
+                try:
+                    md_details["run_dir"] = last_md_res.run_dir.resolve().relative_to(
+                        Path(args.work_dir).resolve()
+                    ).as_posix()
+                except ValueError:
+                    pass
                 update_workflow_stage(
                     args.work_dir,
                     "molecular_dynamics",
                     status=last_md_res.status,
-                    validation="process_completed" if md_validated else "not_evaluated",
+                    validation="validated" if md_validated else "not_evaluated",
                     reason=last_md_res.error_message,
-                    details={"sim_time_ns": last_md_res.sim_time_ns},
+                    details=md_details,
                 )
         covalent_summary = None
         if args.covalent:
@@ -1860,6 +1991,33 @@ def main(argv=None):
                 print(f"[TIER 4] Scan input: {wf['scan_inp']}")
                 print(f"[TIER 4] Runner script: {wf['run_script']}")
 
+                if args.execute and not tier4_blocked:
+                    from .workflows.tier4_resume import resume_tier4_workflow
+                    try:
+                        resumed = resume_tier4_workflow(
+                            ts_work_dir,
+                            timeout=args.timeout,
+                            full_thermo=getattr(args, 'full_thermo', False),
+                            optimize_adduct=getattr(args, 'optimize_adduct', False),
+                        )
+                        print("[TIER 4] Dependency-validated execution: " + ", ".join(
+                            f"{stage}={status}" for stage, status in resumed.items()
+                        ))
+                    except ValueError as exc:
+                        update_workflow_stage(
+                            args.work_dir, "tier_4", status="invalid", validation="failed", reason=str(exc)
+                        )
+                        raise WorkflowStageError(
+                            "tier_4", "TIER4_VALIDATION_FAILED", str(exc), "validation"
+                        ) from exc
+                    except (OSError, RuntimeError) as exc:
+                        update_workflow_stage(
+                            args.work_dir, "tier_4", status="failed", validation="failed", reason=str(exc)
+                        )
+                        raise WorkflowStageError(
+                            "tier_4", "TIER4_EXECUTION_FAILED", str(exc), "execution"
+                        ) from exc
+
                 # Fingerprint-aware cache validation (Auditor Spec Section 6 & 7)
                 scan_meta_path = ts_work_dir / '01_scan.meta.json'
                 cached_scan_valid = True
@@ -2042,7 +2200,7 @@ def main(argv=None):
                             pass
 
                     # Step 4/4 (Optional): Covalent product adduct optimization
-                    if (getattr(args, 'optimize_adduct', False) or (ts_work_dir / '03_adduct_opt.inp').is_file()) and (ts_work_dir / '03_adduct_opt_template.inp').is_file():
+                    if getattr(args, 'optimize_adduct', False) and (ts_work_dir / '03_adduct_opt_template.inp').is_file():
                         if args.full_gold_standard:
                             report_stage_progress(7, 8, "Covalent Adduct Product Optimization & Thermodynamics", "Adduct Opt + Freq (Delta G_rxn)")
                         adduct_inp = ts_work_dir / '03_adduct_opt.inp'
@@ -2753,7 +2911,9 @@ def main(argv=None):
         return int(bool(structured_failures))
     except WorkflowStageError as exc:
         update_workflow_stage(
-            args.work_dir, exc.stage, status="failed", validation="failed", reason=str(exc),
+            args.work_dir, exc.stage,
+            status="invalid" if exc.code == "TIER4_VALIDATION_FAILED" else "failed",
+            validation="failed", reason=str(exc),
         )
         if not any(item.get("stage") == exc.stage and item.get("code") == exc.code for item in structured_failures):
             add_failure(exc.stage, exc.code, str(exc), exc.category)

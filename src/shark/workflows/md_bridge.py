@@ -14,6 +14,7 @@ import re
 import shutil
 from typing import Optional
 
+from ..core.frontier import file_hash
 from ..core.runner import run_external_process
 
 
@@ -52,6 +53,83 @@ def resolve_gromacs_tool_paths() -> list[Path]:
     return extra_paths
 
 
+def _gromacs_environment() -> tuple[dict[str, str], Optional[str]]:
+    """Build the configured GROMACS environment and resolve ``gmx``."""
+    env = os.environ.copy()
+    tool_dirs = [str(path) for path in resolve_gromacs_tool_paths()]
+    if tool_dirs:
+        env["PATH"] = os.pathsep.join([*tool_dirs, env.get("PATH", "")])
+    return env, shutil.which("gmx", path=env.get("PATH"))
+
+
+def _nonempty(path: Path) -> bool:
+    return path.is_file() and path.stat().st_size > 0
+
+
+def validate_gromacs_production(run_dir: str | Path) -> tuple[bool, str]:
+    """Validate the durable outputs of a completed GROMACS production run."""
+    prep_dir = Path(run_dir).expanduser().resolve() / "00_prep"
+    log_file = prep_dir / "md_prod.log"
+    if not _nonempty(log_file):
+        return False, "GROMACS production log is missing or empty"
+    text = log_file.read_text(encoding="utf-8", errors="replace")
+    if "Finished mdrun" not in text:
+        return False, "GROMACS production completion marker is missing"
+    missing = [name for name in ("md_prod.gro", "md_prod.xtc") if not _nonempty(prep_dir / name)]
+    if missing:
+        return False, f"GROMACS production output is missing or empty: {', '.join(missing)}"
+    return True, "Validated GROMACS production log, structure and trajectory"
+
+
+def gromacs_production_hashes(run_dir: str | Path) -> dict[str, str]:
+    """Hash durable production and continuation artifacts without recording host paths."""
+    prep_dir = Path(run_dir).expanduser().resolve() / "00_prep"
+    names = ("md_prod.tpr", "md_prod.cpt", "md_prod.log", "md_prod.gro", "md_prod.xtc")
+    return {name: file_hash(prep_dir / name) for name in names if _nonempty(prep_dir / name)}
+
+
+def resume_md_from_checkpoint(
+    run_dir: str | Path,
+    *,
+    timeout: Optional[float] = None,
+) -> MDRunResult:
+    """Continue production MD through GROMACS' native checkpoint validation."""
+    run_path = Path(run_dir).expanduser().resolve()
+    prep_dir = run_path / "00_prep"
+    tpr = prep_dir / "md_prod.tpr"
+    checkpoint = prep_dir / "md_prod.cpt"
+    missing = [path.name for path in (tpr, checkpoint) if not _nonempty(path)]
+    if missing:
+        raise ValueError(f"Cannot resume MD without non-empty {', '.join(missing)}")
+
+    env, gmx = _gromacs_environment()
+    if not gmx:
+        raise FileNotFoundError(
+            "GROMACS executable 'gmx' was not found; configure SHARK_GROMACS_BIN_DIRS or PATH"
+        )
+    proc = run_external_process(
+        command=[gmx, "mdrun", "-s", tpr.name, "-deffnm", "md_prod", "-cpi", checkpoint.name, "-append"],
+        output_file=run_path / "md_resume.log",
+        cwd=prep_dir,
+        timeout=timeout,
+        env=env,
+        output_mode="a",
+        process_name="GROMACS checkpoint continuation",
+    )
+    valid, reason = validate_gromacs_production(run_path)
+    completed = proc.terminated_normally and valid
+    status = "completed" if completed else ("timed_out" if proc.timed_out else "failed")
+    return MDRunResult(
+        run_id=run_path.name,
+        run_dir=run_path,
+        sim_time_ns=0.0,
+        status=status,
+        execution_time_s=proc.execution_time_s,
+        error_message=None if completed else (proc.error or reason),
+        artifact_hashes=gromacs_production_hashes(run_path),
+    )
+
+
 @dataclass
 class MDRunResult:
     run_id: str
@@ -64,6 +142,7 @@ class MDRunResult:
     mean_rmsf: Optional[float] = None
     mean_coord_dist: Optional[float] = None
     dashboard_path: Optional[Path] = None
+    artifact_hashes: Optional[dict[str, str]] = None
 
 
 def setup_and_launch_md(
@@ -258,8 +337,13 @@ GPU_FLAGS="-nb gpu -pme gpu -bonded gpu -update gpu"
                     print(f"[SharK-MD] -> {display_label}")
 
             if proc_res.terminated_normally:
-                status = "completed"
-                print(f"[SharK-MD] Simulation {run_id} completed successfully.")
+                valid, validation_reason = validate_gromacs_production(run_dir)
+                status = "completed" if valid else "failed"
+                if valid:
+                    print(f"[SharK-MD] Simulation {run_id} completed successfully.")
+                else:
+                    error_message = validation_reason
+                    print(f"[SharK-MD] Simulation {run_id} failed output validation: {validation_reason}")
             else:
                 status = "timed_out" if proc_res.timed_out else "failed"
                 print(f"[SharK-MD] Simulation {run_id} {status}. Log saved to {log_file}")
@@ -284,7 +368,8 @@ GPU_FLAGS="-nb gpu -pme gpu -bonded gpu -update gpu"
         status=status,
         execution_time_s=execution_time_s,
         error_message=error_message,
-        dashboard_path=dash_path if dash_path.is_file() else None
+        dashboard_path=dash_path if dash_path.is_file() else None,
+        artifact_hashes=gromacs_production_hashes(run_dir),
     )
 
 

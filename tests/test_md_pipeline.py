@@ -9,8 +9,10 @@ import pytest
 
 from shark.workflows.md_pipeline import (
     find_gromacs_pipeline,
+    resume_md_from_checkpoint,
     setup_and_launch_md,
     run_md_from_session,
+    validate_gromacs_production,
     MDRunResult,
 )
 from shark.workflows.md_bridge import resolve_gromacs_tool_paths
@@ -59,6 +61,46 @@ def test_md_tool_paths_require_explicit_configuration(tmp_path, monkeypatch):
     configured.mkdir()
     monkeypatch.setenv("SHARK_GROMACS_BIN_DIRS", str(configured))
     assert resolve_gromacs_tool_paths() == [configured.resolve()]
+
+
+def test_resume_md_uses_native_checkpoint_and_validates_outputs(tmp_path, monkeypatch):
+    run_dir = tmp_path / "workflow" / "md" / "run_ligand_10ns"
+    prep_dir = run_dir / "00_prep"
+    prep_dir.mkdir(parents=True)
+    (prep_dir / "md_prod.tpr").write_bytes(b"tpr")
+    (prep_dir / "md_prod.cpt").write_bytes(b"checkpoint")
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    gmx = bin_dir / "gmx"
+    gmx.write_text(
+        "#!/bin/sh\n"
+        "printf '%s\\n' \"$@\" > invoked.args\n"
+        "printf 'Finished mdrun on rank 0\\n' > md_prod.log\n"
+        "printf 'structure\\n' > md_prod.gro\n"
+        "printf 'trajectory\\n' > md_prod.xtc\n",
+        encoding="utf-8",
+    )
+    gmx.chmod(0o755)
+    monkeypatch.setenv("SHARK_GROMACS_BIN_DIRS", str(bin_dir))
+
+    result = resume_md_from_checkpoint(run_dir, timeout=10)
+
+    assert result.status == "completed"
+    assert validate_gromacs_production(run_dir)[0] is True
+    invoked = (prep_dir / "invoked.args").read_text(encoding="utf-8")
+    assert "-cpi\nmd_prod.cpt\n-append" in invoked
+    assert (run_dir / "md_resume.log").is_file()
+
+
+def test_resume_md_refuses_missing_checkpoint_before_launch(tmp_path, monkeypatch):
+    run_dir = tmp_path / "run_ligand_10ns"
+    prep_dir = run_dir / "00_prep"
+    prep_dir.mkdir(parents=True)
+    (prep_dir / "md_prod.tpr").write_bytes(b"tpr")
+    monkeypatch.setenv("SHARK_GROMACS_BIN_DIRS", str(tmp_path))
+
+    with pytest.raises(ValueError, match="md_prod.cpt"):
+        resume_md_from_checkpoint(run_dir, timeout=10)
 
 
 def test_setup_and_launch_md_prepared(mock_pipeline_dir, tmp_path):
@@ -201,6 +243,10 @@ def test_setup_and_launch_md_live_execution_with_progress(mock_pipeline_dir, tmp
         "echo 'step 25000, will finish soon, remaining runtime: 10 s'\n"
         "echo '### Phase: Production Molecular Dynamics (10.0 ns) ###'\n"
         "echo 'step 250000, will finish tomorrow, remaining runtime: 120 s'\n"
+        "mkdir -p 00_prep\n"
+        "echo 'Finished mdrun on rank 0' > 00_prep/md_prod.log\n"
+        "echo 'structure' > 00_prep/md_prod.gro\n"
+        "echo 'trajectory' > 00_prep/md_prod.xtc\n"
         "exit 0\n",
         encoding="utf-8"
     )

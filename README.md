@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/shark_logo.jpg" alt="SharK Logo" width="380"/>
+  <img src="assets/shark_logo.png" alt="SharK Logo" width="380"/>
 </p>
 
 <h1 align="center">SharK</h1>
@@ -92,7 +92,7 @@ shark run-qm --session screening.poliscreen --work-dir ../qm_results \
 shark run-qm --session screening.poliscreen --target target_ready~Pk1 \
   --pareto --top 3 --geometry smiles --work-dir ../selected_jobs
 
-# Inspect recorded stages, then resume prepared or interrupted ligand DFT jobs.
+# Inspect recorded stages, then resume DFT, native MD checkpoints or Tier 4.
 shark status --work-dir ../qm_results
 shark resume --work-dir ../qm_results
 ```
@@ -134,9 +134,10 @@ failures. `resume` refuses changed inputs, preserves earlier failed artifacts un
 logs may contain local runtime paths; keep calculation directories private.
 
 Each workflow also writes an atomic `execution_manifest.json` with stage fingerprints,
-runtime state and validation state. `status` detects a recorded worker that is no longer
-running. Automatic resume currently covers isolated-ligand DFT only; MD checkpoints and
-Tier 4 continuation still require their workflow-specific commands.
+parameters, runtime state and validation state. `status` detects a recorded worker that is no
+longer running. `resume` supports isolated-ligand DFT, native GROMACS production checkpoints,
+and dependency-validated Tier 4 continuation. For an older MD run stored under an external
+pipeline, also pass `--pipeline-dir` or configure `SHARK_GROMACS_PIPELINE`.
 
 Before work starts, `preflight.json` records tool availability, host resource limits,
 input readability, selected poses, and ligand charge/spin identity. A blocking check or

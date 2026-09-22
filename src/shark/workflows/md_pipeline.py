@@ -8,15 +8,20 @@ from __future__ import annotations
 
 from .md_bridge import (
     find_gromacs_pipeline,
+    gromacs_production_hashes,
+    resume_md_from_checkpoint,
     setup_and_launch_md,
     run_md_from_session,
+    validate_gromacs_production,
     MDRunResult,
 )
 
 __all__ = [
     "find_gromacs_pipeline",
+    "gromacs_production_hashes",
+    "resume_md_from_checkpoint",
     "setup_and_launch_md",
     "run_md_from_session",
+    "validate_gromacs_production",
     "MDRunResult",
 ]
-
