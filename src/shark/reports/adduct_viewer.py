@@ -240,8 +240,10 @@ def generate_adduct_viewer_html(
         target_sym = reg.get('target_atom_symbol', 'C')
         target_rnk = reg.get('target_rank', 1)
         sites = reg.get('sites') or []
-        fukui_val = _safe_float(sites[0].get('fukui_electrophilic')) if sites else None
-        fukui_str = f" (f_k^+ = {fukui_val:.3f})" if fukui_val is not None else ""
+        candidate_value = _safe_float(sites[0].get('candidate_site_score')) if sites else None
+        candidate_text = (
+            f" (heuristic score = {candidate_value:.3f})" if candidate_value is not None else ""
+        )
 
         wbo = _safe_float(bond.get('wiberg_bond_order'))
         wbo_str = f"Wiberg BO = {wbo:.2f}" if wbo is not None else "Wiberg BO = N/A"
@@ -252,7 +254,7 @@ def generate_adduct_viewer_html(
         desc_parts.append(
             f"Local FMO Phase Symmetry: Constructive Allowed ({sym_type}{s_eff_str}{gap_fmo_str}). "
             f"Active Pocket Polarization: Δϵ_LUMO = {dlumo_str}, Δω = {domega_str}{epol_str}. "
-            f"Regiospecificity: Atom #{target_idx} ({target_sym}) rank {target_rnk} primary locus{fukui_str}. "
+            f"Candidate-site prior: Atom #{target_idx} ({target_sym}) rank {target_rnk}{candidate_text}. "
             f"Adduct Bond: {wbo_str} ({dq_str}, {b_type})."
         )
 
@@ -673,4 +675,3 @@ body {{ margin: 0; padding: 20px; font-family: system-ui, -apple-system, sans-se
 </html>
 """
     return html_content
-

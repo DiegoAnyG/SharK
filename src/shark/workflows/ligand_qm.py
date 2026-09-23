@@ -163,7 +163,8 @@ def prepare_ligand_jobs(session: PoliScreenSession, output_dir: str | Path | Non
                         optimize: bool = True, frequencies: bool = False,
                         multiplicity: int = 1, charge: int | None = None,
                         seed: int = 42, nprocs: int | None = None, maxcore: int | None = None,
-                        geometry: str = 'input', orbital_grid: int | None = 60) -> list[Path]:
+                        geometry: str = 'input', orbital_grid: int | None = 60,
+                        fukui: bool = False) -> list[Path]:
     """Prepare input-only jobs. No electronic results exist until ORCA completes."""
     if not re.fullmatch(r'[A-Za-z0-9+(),*/._ -]+', method) or not method.strip():
         raise ValueError('Method must be an ORCA keyword line, without blocks or newlines')
@@ -174,6 +175,8 @@ def prepare_ligand_jobs(session: PoliScreenSession, output_dir: str | Path | Non
         raise ValueError('Invalid solvent keyword')
     if not 0 <= seed < 2**31 or multiplicity < 1:
         raise ValueError('Seed or multiplicity out of range')
+    if fukui and multiplicity != 1:
+        raise ValueError('Finite-difference Fukui analysis currently requires a closed-shell reference state')
     if geometry not in ('input', 'smiles'):
         raise ValueError('Geometry source must be input or smiles')
     if orbital_grid is not None and not 10 <= orbital_grid <= 256:
@@ -227,7 +230,7 @@ def prepare_ligand_jobs(session: PoliScreenSession, output_dir: str | Path | Non
                       parameters=dict(method=method.strip(), solvent=solvent, optimize=optimize,
                                       frequencies=frequencies, charge=formal_charge, multiplicity=multiplicity,
                                       nprocs=nprocs, maxcore_mb=maxcore, seed=seed, geometry=geometry,
-                                      orbital_grid=orbital_grid),
+                                      orbital_grid=orbital_grid, fukui=fukui),
                       software=dict(shark=version, rdkit=rdBase.rdkitVersion, numpy=np.__version__),
                       inputs={name: file_hash(job / name) for name in ('calculation.inp', 'geometry.xyz')},
                       results=None)

@@ -267,13 +267,13 @@ A partir de los autovalores de energía orbital de Kohn-Sham del orbital molecul
 
 ### 7.2 Funciones de Fukui Condensadas ($f_k^+$) y Regioespecificidad
 
-La reactividad de cada átomo individual $k$ del ligando frente a un ataque nucleofílico (como el ataque del residuo `THR309:OG1`) está gobernada por la **Función de Fukui condensada para ataque nucleofílico ($f_k^+$)**:
+La respuesta electrónica local del átomo $k$ ante la adición de un electrón se aproxima mediante la **función de Fukui condensada para ataque nucleofílico ($f_k^+$)**:
 
-$$f_k^+ = q_k(N+1) - q_k(N)$$
+$$f_k^+ = q_k(N) - q_k(N+1)$$
 
-donde $q_k(N)$ y $q_k(N+1)$ son las poblaciones electrónicas atómicas (Mulliken o Hirshfeld) del sistema neutro y del anión mononegativo con geometría congelada.
+donde $q_k(N)$ y $q_k(N+1)$ son cargas atómicas Löwdin del estado de referencia y del estado con un electrón adicional, calculadas sobre la misma geometría congelada. SharK también calcula $f_k^- = q_k(N-1)-q_k(N)$ y $f_k^0=(f_k^+ + f_k^-)/2$.
 
-El átomo del warhead que maximiza $f_k^+$ se identifica cuantitativamente como el centro electrofílico preferente (Rango #1 de regioespecificidad).
+SharK solo presenta estas cantidades como diferencias finitas cuando los tres estados completan y sus poblaciones pasan validaciones de identidad, conteo atómico y carga. El ranking geométrico del bolsillo es un prior heurístico separado y nunca se presenta como función de Fukui.
 
 ---
 

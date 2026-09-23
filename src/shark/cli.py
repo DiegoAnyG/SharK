@@ -12,7 +12,7 @@ import sys
 import zipfile
 
 from .core.session import read_poliscreen_session, match_receptor_id
-from .core.runner import run_orca_job, run_orca_process, find_orca
+from .core.runner import run_fukui_analysis, run_orca_job, run_orca_process, find_orca
 from .core.frontier import file_hash
 from .core.preflight import run_preflight
 from .core.workflow_state import (
@@ -803,6 +803,8 @@ def _workflow_control_unlocked(command: str, arguments: list[str]) -> int:
         for job in jobs:
             changed = f" | changed={','.join(job.get('changed_inputs', []))}" if job.get("changed_inputs") else ""
             print(f"  DFT {job.get('ligand', job['path'])}: {job['status']} | {job['path']}{changed}")
+            if job.get("fukui_status") is not None:
+                print(f"    Fukui N/N+1/N-1: {job['fukui_status']}")
         for failure in (manifest or {}).get("failures", []):
             print(f"  Failure {failure.get('code', 'UNKNOWN')}: {failure.get('message', 'No message')}")
         bad = {"failed", "interrupted", "timed_out", "invalid", "invalidated", "invalid_manifest", "completed_export_failed", "skipped"}
@@ -810,7 +812,9 @@ def _workflow_control_unlocked(command: str, arguments: list[str]) -> int:
             stage.get("observed_status", stage.get("status")) in bad
             for stage in manifest.get("stages", {}).values()
         ))
-        return int(stage_bad or any(job.get("status") in bad for job in jobs))
+        return int(stage_bad or any(
+            job.get("status") in bad or job.get("fukui_status") in bad for job in jobs
+        ))
 
     resumable = [job for job in jobs if job.get("status") in (
         "prepared", "failed", "interrupted", "completed_export_failed"
@@ -820,8 +824,10 @@ def _workflow_control_unlocked(command: str, arguments: list[str]) -> int:
         print("[ERROR] Refusing resume because one or more DFT inputs or manifests changed", file=sys.stderr)
         return 1
     handled = False
+    dft_handled = False
     if resumable:
         handled = True
+        dft_handled = True
         update_workflow_stage(root, "ligand_dft", status="running", validation="pending")
         failed = False
         for job in resumable:
@@ -841,18 +847,65 @@ def _workflow_control_unlocked(command: str, arguments: list[str]) -> int:
             print(f"[RESUME] DFT {record['selection']['ligand_id']}: {record['status']}")
             failed = failed or record.get("status") != "completed" or record.get("orbital_export", {}).get("status") == "failed"
         _, refreshed = inspect_workflow(root)
-        all_complete = bool(refreshed) and all(job.get("status") == "completed" for job in refreshed)
+        neutral_complete = bool(refreshed) and all(job.get("status") == "completed" for job in refreshed)
+        if failed or not neutral_complete:
+            update_workflow_stage(
+                root, "ligand_dft", status="failed", validation="failed",
+                reason="One or more isolated-ligand calculations did not complete",
+            )
+            return 1
+
+    _, current_jobs = inspect_workflow(root)
+    fukui_resumable = [job for job in current_jobs if job.get("status") == "completed" and job.get(
+        "fukui_status"
+    ) in ("prepared", "failed", "interrupted", "running")]
+    if fukui_resumable:
+        handled = True
+        dft_handled = True
+        update_workflow_stage(root, "ligand_dft", status="running", validation="pending")
+        for job in fukui_resumable:
+            try:
+                fukui = run_fukui_analysis(root / job["path"], timeout=options.timeout, resume=True)
+            except KeyboardInterrupt:
+                update_workflow_stage(
+                    root, "ligand_dft", status="interrupted", validation="failed",
+                    reason="Fukui resume interrupted by user",
+                )
+                return 130
+            except (ValueError, OSError) as exc:
+                update_workflow_stage(root, "ligand_dft", status="failed", validation="failed", reason=str(exc))
+                print(f"[ERROR] Could not resume Fukui analysis for {job['path']}: {exc}", file=sys.stderr)
+                return 1
+            print(f"[RESUME] Fukui {job.get('ligand', job['path'])}: {fukui['status']}")
+            if fukui.get("status") != "completed":
+                update_workflow_stage(
+                    root, "ligand_dft", status="failed", validation="failed",
+                    reason=fukui.get("error", "Finite-difference Fukui analysis did not complete"),
+                )
+                return 1
+
+    if dft_handled:
+        _, refreshed = inspect_workflow(root)
+        all_complete = bool(refreshed) and all(
+            job.get("status") == "completed"
+            and job.get("fukui_status") in (None, "completed")
+            for job in refreshed
+        )
         update_workflow_stage(
             root, "ligand_dft",
             status="completed" if all_complete else "failed",
             validation="validated" if all_complete else "failed",
-            reason=None if all_complete else "One or more isolated-ligand calculations did not complete",
+            reason=None if all_complete else "One or more ligand quantum analyses did not complete",
             details={
-                "completed_jobs": sum(job.get("status") == "completed" for job in refreshed),
+                "completed_jobs": sum(
+                    job.get("status") == "completed"
+                    and job.get("fukui_status") in (None, "completed")
+                    for job in refreshed
+                ),
                 "total_jobs": len(refreshed),
             },
         )
-        if failed or not all_complete:
+        if not all_complete:
             return 1
 
     stages = (manifest or {}).get("stages", {})
@@ -1039,6 +1092,10 @@ def main(argv=None):
     parser.add_argument('--solvent', default='Water', help='CPCM solvent; gas disables solvent')
     parser.add_argument('--single-point', action='store_true', help='Skip geometry optimization')
     parser.add_argument('--frequencies', action='store_true', help='Request vibrational frequencies')
+    parser.add_argument(
+        '--fukui', action='store_true',
+        help='Run vertical N, N+1 and N-1 ORCA single points for finite-difference condensed Fukui indices',
+    )
     parser.add_argument('--charge', type=int, help='Check intended charge against the molecular input')
     parser.add_argument('--multiplicity', type=int, default=1)
     parser.add_argument('--seed', type=int, default=42)
@@ -1225,6 +1282,8 @@ def main(argv=None):
         args.tier_4_ts = True
         args.optimize_adduct = True
         args.full_thermo = True
+    if args.fukui:
+        args.dft = True
     if getattr(args, 'full_thermo', False):
         args.covalent = True
         args.tier_4_ts = True
@@ -1387,6 +1446,7 @@ def main(argv=None):
                 "include_controls": args.include_controls,
                 "nprocs": args.nprocs,
                 "maxcore_mb": args.maxcore,
+                "fukui": args.fukui,
             }
         initialize_workflow_manifest(
             args.work_dir,
@@ -2725,11 +2785,14 @@ def main(argv=None):
                 solvent=None if args.solvent.lower() == 'gas' else args.solvent,
                 optimize=not args.single_point, frequencies=args.frequencies, charge=args.charge,
                 multiplicity=args.multiplicity, seed=args.seed, nprocs=dft_nprocs, maxcore=dft_maxcore,
-                geometry=args.geometry, orbital_grid=None if args.no_orbital_plots else args.orbital_grid)
+                geometry=args.geometry, orbital_grid=None if args.no_orbital_plots else args.orbital_grid,
+                fukui=args.fukui)
             records = []
             for job in jobs:
                 record = run_orca_job(job, timeout=args.timeout) if args.execute else json.loads(
                     (job / 'job.json').read_text(encoding='utf-8'))
+                if args.execute and args.fukui and record.get('status') == 'completed':
+                    record['fukui'] = run_fukui_analysis(job, timeout=args.timeout)
                 records.append(record)
                 print(f"[DFT] {record['selection']['ligand_id']}: {record['status']} ({job})")
             out_file = Path(args.html) if args.html else Path(args.work_dir) / 'dossier.html'
@@ -2744,6 +2807,7 @@ def main(argv=None):
                     from .analysis.reactivity import calculate_cdft_descriptors
                     desc = calculate_cdft_descriptors(homo_ev=h, lumo_ev=l)
                     covalent_summary['cdft'] = {
+                        'gap_ev': desc.gap_ev,
                         'hardness_ev': desc.hardness_ev,
                         'chemical_potential_ev': desc.chemical_potential_ev,
                         'electrophilicity_ev': desc.electrophilicity_ev,
@@ -2753,6 +2817,7 @@ def main(argv=None):
             dft_complete = bool(records) and all(
                 record.get("status") == "completed"
                 and record.get("orbital_export", {}).get("status") != "failed"
+                and (not args.fukui or record.get("fukui", {}).get("status") == "completed")
                 for record in records
             )
             update_workflow_stage(
@@ -2770,6 +2835,13 @@ def main(argv=None):
                             "ligand_dft", "LIGAND_DFT_FAILED",
                             f"Ligand DFT {record.get('status', 'failed')}: {record.get('error', 'calculation did not complete')}",
                             action="Inspect the preserved ORCA attempt and run shark resume",
+                        )
+                    elif args.fukui and record.get('fukui', {}).get('status') != 'completed':
+                        add_failure(
+                            "ligand_dft", "FUKUI_ANALYSIS_FAILED",
+                            f"Finite-difference Fukui analysis failed: "
+                            f"{record.get('fukui', {}).get('error', 'charged-state calculation did not complete')}",
+                            "validation", "Inspect the preserved charged-state outputs and run shark resume",
                         )
         active_stage = "reporting"
         poses = _get_selected_poses()
@@ -2852,6 +2924,7 @@ def main(argv=None):
                     from .analysis.reactivity import calculate_cdft_descriptors
                     desc = calculate_cdft_descriptors(homo_ev=h, lumo_ev=l)
                     covalent_summary['cdft'] = {
+                        'gap_ev': desc.gap_ev,
                         'hardness_ev': desc.hardness_ev,
                         'chemical_potential_ev': desc.chemical_potential_ev,
                         'electrophilicity_ev': desc.electrophilicity_ev,

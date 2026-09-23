@@ -1,9 +1,9 @@
 """Quantum mechanical evaluation of covalent adducts and pre-reactive active-site complexes.
 
 Computes:
-1. FMO Phase Symmetry Verification (Fukui & Woodward-Hoffmann constructive orbital overlap)
+1. FMO alignment geometry heuristic
 2. Active Pocket Polarization Effect (frontier orbital shifts and electrophilicity modulation)
-3. Regiospecificity Confirmation (local electrophilic Fukui function f_k^+ and local softness s_k^+)
+3. Target-biased candidate-site prior (not a finite-difference Fukui function)
 4. Nature of the Covalent Bond Formed (Wiberg covalent bond order, charge transfer, bond length)
 """
 
@@ -97,7 +97,7 @@ class PocketPolarizationResult:
 
 @dataclass
 class RegiospecificitySite:
-    """Individual atom regiospecificity ranking entry."""
+    """Individual atom entry in a model-derived candidate-site ranking."""
     atom_index: int
     atom_symbol: str
     candidate_site_score: float = 0.0
@@ -109,8 +109,6 @@ class RegiospecificitySite:
     def __post_init__(self):
         if self.fukui_electrophilic is not None and self.candidate_site_score == 0.0:
             self.candidate_site_score = self.fukui_electrophilic
-        elif self.fukui_electrophilic is None:
-            self.fukui_electrophilic = self.candidate_site_score
 
 
 @dataclass
@@ -144,7 +142,9 @@ class RegiospecificityResult:
                     "atom_symbol": s.atom_symbol,
                     "candidate_score": round(s.candidate_site_score, 4),
                     "candidate_site_score": round(s.candidate_site_score, 4),
-                    "fukui_electrophilic": round(s.fukui_electrophilic if s.fukui_electrophilic is not None else s.candidate_site_score, 4),
+                    "fukui_electrophilic": (
+                        round(s.fukui_electrophilic, 4) if s.fukui_electrophilic is not None else None
+                    ),
                     "local_softness": round(s.local_softness, 4),
                     "rank": s.rank,
                     "is_target_site": s.is_target_site,
@@ -296,11 +296,11 @@ def evaluate_pocket_polarization(
     complex_homo = isolated_homo_ev - 0.10
 
     iso_mu = (isolated_homo_ev + isolated_lumo_ev) / 2.0
-    iso_eta = isolated_lumo_ev - isolated_homo_ev
+    iso_eta = (isolated_lumo_ev - isolated_homo_ev) / 2.0
     iso_omega = (iso_mu ** 2) / (2.0 * iso_eta) if iso_eta > 0 else 0.0
 
     cpx_mu = (complex_homo + complex_lumo) / 2.0
-    cpx_eta = complex_lumo - complex_homo
+    cpx_eta = (complex_lumo - complex_homo) / 2.0
     cpx_omega = (cpx_mu ** 2) / (2.0 * cpx_eta) if cpx_eta > 0 else 0.0
 
     delta_omega = cpx_omega - iso_omega
@@ -357,23 +357,25 @@ def evaluate_regiospecificity(
 
     for rank, k in enumerate(sorted_indices, start=1):
         sym, at_num, w, is_target = raw_weights[k]
-        norm_fk = w / total_w
-        sk = norm_fk * (1.0 / max(0.1, electrophilicity_index))
+        candidate_score = w / total_w
+        sk = candidate_score * (1.0 / max(0.1, electrophilicity_index))
         if is_target:
             target_rank = rank
         sites.append(RegiospecificitySite(
             atom_index=at_num,
             atom_symbol=sym,
-            fukui_electrophilic=norm_fk,
+            candidate_site_score=candidate_score,
             local_softness=sk,
             rank=rank,
             is_target_site=is_target,
         ))
 
     is_primary = (target_rank == 1)
+    target_site = next((site for site in sites if site.is_target_site), None)
+    target_score = target_site.candidate_site_score if target_site is not None else 0.0
     explanation = (
         f"Atom #{target_atom_index} ({target_atom_symbol}) ranks #{target_rank} in candidate site prior "
-        f"(score = {sites[0].fukui_electrophilic:.3f}). "
+        f"(score = {target_score:.3f}). "
         f"Note: Model-derived prior score; not a computed ab initio Fukui function."
     )
 

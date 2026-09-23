@@ -801,6 +801,7 @@ def generate_html_dossier(project_name: str, poses_data: list[dict], out_html: s
         cdft_block = ''
         if cdft:
             cdft_items = [
+                ('Frontier gap', _number(cdft.get('gap_ev'), 2) + ' eV'),
                 ('Chemical hardness', _number(cdft.get('hardness_ev'), 2) + ' eV'),
                 ('Chemical potential', _number(cdft.get('chemical_potential_ev'), 2) + ' eV'),
                 ('Electrophilicity index', _number(cdft.get('electrophilicity_ev'), 2) + ' eV'),
@@ -1013,6 +1014,10 @@ def generate_html_dossier(project_name: str, poses_data: list[dict], out_html: s
             reg_rank = reg.get('target_rank', 1)
             reg_atom = f"Atom #{reg.get('target_atom_index', 0)} ({reg.get('target_atom_symbol', 'C')})"
             is_pri = reg.get('is_primary_locus', True)
+            reg_sites = reg.get('sites') or []
+            reg_score = reg.get('candidate_site_score')
+            if reg_score is None and reg_sites:
+                reg_score = reg_sites[0].get('candidate_site_score', reg_sites[0].get('candidate_score'))
             reg_badge = (
                 '<span class="badge" style="background:#fef3c7;color:#92400e;border:1px solid #fde68a;">[Model-Derived Proxy]</span>'
             )
@@ -1101,9 +1106,9 @@ def generate_html_dossier(project_name: str, poses_data: list[dict], out_html: s
                 f'<div style="font-size:12px;color:#475569;margin-bottom:10px;">Target-Biased Site Ranking</div>'
                 f'<dl style="margin:0;font-size:12.5px;">'
                 f'<div style="display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid #f1f5f9;"><dt style="color:#64748b;">Target Reactive Atom</dt><dd style="margin:0;font-weight:600;color:#0f172a;">{reg_atom_esc}</dd></div>'
-                f'<div style="display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid #f1f5f9;"><dt style="color:#64748b;">Candidate Score (heuristic)</dt><dd style="margin:0;font-weight:600;color:#0f172a;">{_number(reg.get("candidate_site_score", reg.get("sites", [{}])[0].get("fukui_electrophilic", 0.231)), 3)}</dd></div>'
+                f'<div style="display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid #f1f5f9;"><dt style="color:#64748b;">Candidate Score (heuristic)</dt><dd style="margin:0;font-weight:600;color:#0f172a;">{_number(reg_score, 3)}</dd></div>'
                 f'<div style="display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid #f1f5f9;"><dt style="color:#64748b;">Site Ranking</dt><dd style="margin:0;font-weight:600;color:#0f172a;">Rank #{reg_rank}</dd></div>'
-                f'<div style="display:flex;justify-content:space-between;padding:4px 0;"><dt style="color:#64748b;">Candidate Sites Evaluated</dt><dd style="margin:0;font-weight:600;color:#0f172a;">{reg.get("total_sites_evaluated", 13)}</dd></div>'
+                f'<div style="display:flex;justify-content:space-between;padding:4px 0;"><dt style="color:#64748b;">Candidate Sites Evaluated</dt><dd style="margin:0;font-weight:600;color:#0f172a;">{reg.get("total_sites_evaluated", "N/A")}</dd></div>'
                 f'</dl>'
                 f'<p style="margin:10px 0 0;font-size:11.5px;color:#64748b;line-height:1.4;">{reg_expl_esc}</p>'
                 f'</div>'
@@ -1165,6 +1170,70 @@ def generate_html_dossier(project_name: str, poses_data: list[dict], out_html: s
     # Legacy callers may still provide an explicit mesh rather than orbital exports.
     legacy = '<section><h2>Supplied orbital mesh</h2><p>Legacy mesh: provenance and spatial convergence are not established.</p><div id="legacy-mesh"></div></section>' if orbital_mesh else ''
     public_jobs = [{k:v for k,v in job.items() if k != 'viewer_link'} for job in jobs]
+
+    fukui_blocks = []
+    for job in jobs:
+        requested = bool(job.get('parameters', {}).get('fukui'))
+        fukui = job.get('fukui') or {}
+        if not requested and not fukui:
+            continue
+        ligand = escape(str(job.get('selection', {}).get('ligand_id', 'Unnamed ligand')))
+        if fukui.get('status') != 'completed' or fukui.get('validated') is not True:
+            status = escape(str(fukui.get('status', 'not calculated')))
+            reason = escape(str(fukui.get('error', 'Three-state calculation has not completed')))
+            fukui_blocks.append(
+                f'<article class="method"><h3>{ligand}</h3><p class="notice">'
+                f'Finite-difference Fukui status: {status}. {reason}</p></article>'
+            )
+            continue
+        profile = fukui.get('profile') or {}
+        if profile.get('fukui_method') != 'finite_difference':
+            fukui_blocks.append(
+                f'<article class="method"><h3>{ligand}</h3><p class="notice">'
+                'Fukui values withheld because the recorded method is not a complete finite difference.'
+                '</p></article>'
+            )
+            continue
+        atoms = sorted(
+            profile.get('atoms') or [],
+            key=lambda atom: atom.get('fukui_plus') if isinstance(atom.get('fukui_plus'), (int, float)) else -math.inf,
+            reverse=True,
+        )
+        rows_html = ''.join(
+            '<tr>' + ''.join(f'<td>{value}</td>' for value in (
+                str(atom.get('atom_index', 'N/A')),
+                escape(str(atom.get('element', 'N/A'))),
+                _number(atom.get('fukui_plus'), 4),
+                _number(atom.get('fukui_minus'), 4),
+                _number(atom.get('fukui_zero'), 4),
+                _number(atom.get('local_electrophilicity'), 4),
+            )) + '</tr>'
+            for atom in atoms
+        )
+        setup = fukui.get('setup') or {}
+        state_labels = {'n': 'N', 'n_plus_1': 'N+1', 'n_minus_1': 'N-1'}
+        state_text = ', '.join(
+            f"{state_labels.get(name, name)}: q={state.get('charge')}, M={state.get('multiplicity')}"
+            for name, state in (setup.get('states') or {}).items()
+        )
+        fukui_blocks.append(
+            f'<article class="insight" style="margin:16px 0;"><h3>{ligand}</h3>'
+            '<p>Validated vertical finite differences from frozen-geometry N, N+1 and N-1 ORCA '
+            f'single points using {escape(str(setup.get("charge_scheme", "Loewdin")))} charges. '
+            'Atom indices are zero-based. Negative condensed values are retained rather than clipped.</p>'
+            f'<p><strong>States:</strong> {escape(state_text)}; '
+            f'<strong>geometry:</strong> {escape(str(setup.get("geometry_source", "N/A")))}.</p>'
+            '<div class="table-wrap"><table><thead><tr><th>Atom index</th><th>Element</th>'
+            '<th>f<sup>+</sup></th><th>f<sup>−</sup></th><th>f<sup>0</sup></th>'
+            '<th>ω<sub>k</sub> / eV</th></tr></thead><tbody>' + rows_html + '</tbody></table></div></article>'
+        )
+    fukui_html = (
+        '<section id="fukui"><div class="section-heading"><span>01B / Local reactivity</span>'
+        '<h2>Finite-Difference Condensed Fukui Functions</h2></div>'
+        '<p>These local descriptors are reported only when all three frozen-geometry charge states '
+        'complete and their Löwdin populations pass charge and atom-count validation.</p>'
+        + ''.join(fukui_blocks) + '</section>'
+    ) if fukui_blocks else ''
 
     workflow_html = ''
     if workflow_data:
@@ -1288,7 +1357,7 @@ def generate_html_dossier(project_name: str, poses_data: list[dict], out_html: s
 
     replacements = dict(TITLE=escape(str(project_name)), VERSION=__version__, TOTAL=str(len(jobs)),
                         COMPLETED=str(completed), CHECKED=str(checked), TABLE=table, METHODS=''.join(methods),
-                        DOCKING=docking, MD=md, COVALENT=covalent_html,
+                        DOCKING=docking, MD=md, COVALENT=covalent_html, FUKUI=fukui_html,
                         COVALENT_STATUS=escape(cov_status), COVALENT_SUB=escape(cov_sub),
                         CARD1_TITLE=card1_title, CARD1_MAIN=escape(card1_main), CARD1_SUB=escape(card1_sub),
                         CARD2_TITLE=card2_title, CARD2_MAIN=escape(card2_main), CARD2_SUB=escape(card2_sub),

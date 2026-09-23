@@ -62,7 +62,8 @@ def test_evaluate_regiospecificity():
     assert res.target_rank == 1
     assert res.is_primary_locus is True
     assert len(res.sites) == len(heavy_atoms)
-    assert sum(s.fukui_electrophilic for s in res.sites) == pytest.approx(1.0, 0.01)
+    assert sum(s.candidate_site_score for s in res.sites) == pytest.approx(1.0, 0.01)
+    assert all(s.fukui_electrophilic is None for s in res.sites)
 
 
 def test_evaluate_covalent_bond_nature():

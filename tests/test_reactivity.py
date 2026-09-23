@@ -21,12 +21,12 @@ def test_cdft_descriptors():
 
     assert isinstance(desc, CDFTDescriptors)
     assert pytest.approx(desc.gap_ev, 1e-4) == 3.4468
-    assert pytest.approx(desc.hardness_ev, 1e-4) == 3.4468
+    assert pytest.approx(desc.hardness_ev, 1e-4) == 1.7234
     assert pytest.approx(desc.hardness_half_ev, 1e-4) == 1.7234
     assert pytest.approx(desc.chemical_potential_ev, 1e-4) == -4.6183
     assert pytest.approx(desc.electronegativity_ev, 1e-4) == 4.6183
-    assert pytest.approx(desc.electrophilicity_ev, 1e-4) == 3.0938
-    assert pytest.approx(desc.softness_ev, abs=1e-3) == 0.1451
+    assert pytest.approx(desc.electrophilicity_ev, 1e-4) == 6.1876
+    assert pytest.approx(desc.softness_ev, abs=1e-3) == 0.2901
     assert pytest.approx(desc.nucleophilicity_ev, abs=1e-3) == homo - (-9.13)
 
 
@@ -66,7 +66,7 @@ def test_build_reactivity_profile_synthetic():
     profile = build_reactivity_profile(data)
     assert isinstance(profile, ReactivityProfile)
     assert profile.name == "SyntheticWarhead"
-    assert profile.global_descriptors.hardness_ev == 4.0
+    assert profile.global_descriptors.hardness_ev == 2.0
     assert len(profile.atoms) == 4
     
     # Hydrogen (atom 3) should be excluded from warhead candidates
@@ -89,7 +89,7 @@ def test_reactivity_profile_from_orca_file():
     res = parse_orca_results(dft_path, name="Benzofuroxan_1_oxide")
     profile = build_reactivity_profile(res)
 
-    assert profile.global_descriptors.hardness_ev > 3.0
+    assert profile.global_descriptors.hardness_ev > 1.5
     assert len(profile.warhead_candidates) > 0
     assert profile.top_electrophile is not None
     assert profile.top_electrophile.element in ("C", "N", "O")

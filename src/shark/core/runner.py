@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
+import hashlib
 import json
 import math
 import os
@@ -134,6 +135,241 @@ def cleanup_orphan_orca_processes() -> int:
     raise RuntimeError(
         "Global ORCA/MPI cleanup is disabled because process ownership cannot be proven"
     )
+
+
+def _read_xyz_geometry(path: Path) -> tuple[list[str], list[str]]:
+    """Read and validate an XYZ geometry while preserving atom order."""
+    lines = path.read_text(encoding="utf-8").splitlines()
+    if not lines:
+        raise ValueError("Fukui analysis geometry is empty")
+    try:
+        atom_count = int(lines[0].strip())
+    except ValueError as exc:
+        raise ValueError("Fukui analysis geometry is not valid XYZ") from exc
+    rows = []
+    symbols = []
+    for line in lines[2:2 + atom_count]:
+        parts = line.split()
+        if len(parts) < 4:
+            raise ValueError("Fukui analysis geometry has an incomplete atom row")
+        try:
+            coordinates = [float(value) for value in parts[1:4]]
+        except ValueError as exc:
+            raise ValueError("Fukui analysis geometry has non-numeric coordinates") from exc
+        if not all(math.isfinite(value) for value in coordinates):
+            raise ValueError("Fukui analysis geometry has non-finite coordinates")
+        symbols.append(parts[0])
+        rows.append(f"{parts[0]} {coordinates[0]:.12f} {coordinates[1]:.12f} {coordinates[2]:.12f}")
+    if len(rows) != atom_count:
+        raise ValueError("Fukui analysis geometry atom count does not match its XYZ header")
+    return symbols, rows
+
+
+def run_fukui_analysis(
+    job_dir: str | Path,
+    *,
+    timeout: float | None = None,
+    resume: bool = False,
+) -> dict:
+    """Run vertical N, N+1 and N-1 single points and record condensed Fukui indices."""
+    if timeout is not None and (not math.isfinite(timeout) or timeout <= 0):
+        raise ValueError("Timeout must be a finite positive number")
+    job = Path(job_dir).resolve()
+    parent_path = job / "job.json"
+    parent = json.loads(parent_path.read_text(encoding="utf-8"))
+    if parent.get("status") != "completed":
+        raise ValueError("Reference ligand calculation must complete before Fukui analysis")
+    parameters = parent.get("parameters", {})
+    if not parameters.get("fukui"):
+        raise ValueError("Fukui analysis was not requested for this ligand job")
+
+    reference_charge = int(parameters["charge"])
+    reference_multiplicity = int(parameters["multiplicity"])
+    if reference_multiplicity != 1:
+        raise ValueError("Finite-difference Fukui analysis currently requires a closed-shell reference state")
+
+    geometry_path = job / ("calculation.xyz" if parameters.get("optimize") else "geometry.xyz")
+    if not geometry_path.is_file():
+        raise ValueError(
+            "Optimized reference XYZ is missing; finite-difference states cannot share one frozen geometry"
+        )
+    symbols, geometry_rows = _read_xyz_geometry(geometry_path)
+    from rdkit import Chem
+    nuclear_charge = sum(Chem.GetPeriodicTable().GetAtomicNumber(symbol) for symbol in symbols)
+    states = {
+        "n": (reference_charge, reference_multiplicity),
+        "n_plus_1": (reference_charge - 1, 2),
+        "n_minus_1": (reference_charge + 1, 2),
+    }
+    for label, (charge, multiplicity) in states.items():
+        electrons = nuclear_charge - charge
+        if electrons < multiplicity - 1 or (electrons - multiplicity + 1) % 2:
+            raise ValueError(f"Charge and multiplicity are incompatible for Fukui {label} state")
+
+    executable = find_orca()
+    setup = {
+        "method": parameters["method"],
+        "solvent": parameters.get("solvent"),
+        "nprocs": parameters["nprocs"],
+        "maxcore_mb": parameters["maxcore_mb"],
+        "charge_scheme": "loewdin",
+        "geometry_sha256": file_hash(geometry_path),
+        "geometry_source": geometry_path.name,
+        "orca_executable_name": executable.name,
+        "orca_executable_sha256": file_hash(executable),
+        "states": {label: {"charge": values[0], "multiplicity": values[1]} for label, values in states.items()},
+    }
+    fingerprint = hashlib.sha256(json.dumps(setup, sort_keys=True).encode("utf-8")).hexdigest()
+    root = job / "fukui"
+    manifest = root / "fukui.json"
+    if manifest.is_file():
+        record = json.loads(manifest.read_text(encoding="utf-8"))
+        if record.get("fingerprint") != fingerprint:
+            raise ValueError("Existing Fukui analysis was prepared from different inputs")
+        if record.get("status") == "completed":
+            for state in record.get("states", {}).values():
+                input_path = root / state["input"]
+                output = root / state["output"]
+                if not input_path.is_file() or file_hash(input_path) != state.get("input_sha256"):
+                    raise ValueError("Completed Fukui input changed after validation")
+                if not output.is_file() or file_hash(output) != state.get("output_sha256"):
+                    raise ValueError("Completed Fukui output changed after validation")
+                property_name = state.get("property_file")
+                if property_name:
+                    property_path = root / property_name
+                    if not property_path.is_file() or file_hash(property_path) != state.get("property_sha256"):
+                        raise ValueError("Completed Fukui property output changed after validation")
+            parent["fukui"] = record
+            return record
+        if not resume:
+            raise ValueError("Incomplete Fukui analysis requires workflow resume")
+    else:
+        if root.exists() and any(root.iterdir()):
+            raise ValueError("Fukui directory exists without a readable manifest")
+        root.mkdir(parents=True, exist_ok=True)
+        record = {
+            "schema_version": 1,
+            "status": "prepared",
+            "method": "finite_difference",
+            "fingerprint": fingerprint,
+            "setup": setup,
+            "states": {},
+        }
+
+    def save() -> None:
+        record["updated_utc"] = datetime.now(timezone.utc).isoformat()
+        temporary = manifest.with_suffix(".json.tmp")
+        temporary.write_text(json.dumps(record, indent=2, allow_nan=False) + "\n", encoding="utf-8")
+        temporary.replace(manifest)
+        parent["fukui"] = record
+        parent_tmp = parent_path.with_suffix(".json.tmp")
+        parent_tmp.write_text(json.dumps(parent, indent=2, allow_nan=False) + "\n", encoding="utf-8")
+        parent_tmp.replace(parent_path)
+
+    solvent = parameters.get("solvent")
+    keywords = f'{parameters["method"]} SP TightSCF'
+    if solvent:
+        keywords += f" CPCM({solvent})"
+    record["status"] = "running"
+    save()
+    try:
+        for label, (charge, multiplicity) in states.items():
+            input_name = f"{label}.inp"
+            output_name = f"{label}.out"
+            deck = (
+                f"! {keywords}\n%pal nprocs {parameters['nprocs']} end\n"
+                f"%maxcore {parameters['maxcore_mb']}\n* xyz {charge} {multiplicity}\n"
+                + "\n".join(geometry_rows) + "\n*\n"
+            )
+            input_path = root / input_name
+            input_hash = hashlib.sha256(deck.encode("utf-8")).hexdigest()
+            previous = record["states"].get(label, {})
+            if previous.get("status") == "completed" and previous.get("input_sha256") == input_hash:
+                output_path = root / output_name
+                if output_path.is_file() and file_hash(output_path) == previous.get("output_sha256"):
+                    continue
+            input_path.write_text(deck, encoding="utf-8")
+            output_path = root / output_name
+            if output_path.exists():
+                attempt = 1
+                while (root / f"{label}.attempt-{attempt}.out").exists():
+                    attempt += 1
+                output_path.replace(root / f"{label}.attempt-{attempt}.out")
+            record["states"][label] = {
+                "status": "running",
+                "charge": charge,
+                "multiplicity": multiplicity,
+                "input": input_name,
+                "input_sha256": input_hash,
+                "output": output_name,
+            }
+            save()
+            process = run_orca_process(
+                executable=executable,
+                input_file=input_name,
+                output_file=output_path,
+                cwd=root,
+                timeout=timeout,
+            )
+            if process.returncode != 0 or not process.terminated_normally:
+                raise ValueError(process.error or f"Fukui {label} calculation did not complete")
+            record["states"][label].update(
+                status="completed", output_sha256=file_hash(output_path)
+            )
+            save()
+
+        from .parser import parse_orca_results
+        parsed = {label: parse_orca_results(root / label) for label in states}
+        charges = {}
+        for label, result in parsed.items():
+            values = result.loewdin_charges
+            if len(values) != len(symbols) or not all(math.isfinite(value) for value in values):
+                raise ValueError(f"Fukui {label} state lacks a complete finite Loewdin charge population")
+            expected_charge = states[label][0]
+            if abs(sum(values) - expected_charge) > 0.05:
+                raise ValueError(f"Fukui {label} Loewdin charges do not sum to the molecular charge")
+            if result.atomic_symbols and [value.upper() for value in result.atomic_symbols] != [
+                value.upper() for value in symbols
+            ]:
+                raise ValueError(f"Fukui {label} atom identity or order differs from the frozen geometry")
+            charges[label] = values
+            property_path = root / f"{label}.property.txt"
+            if property_path.is_file():
+                record["states"][label].update(
+                    charge_source="property_file",
+                    property_file=property_path.name,
+                    property_sha256=file_hash(property_path),
+                )
+            else:
+                record["states"][label]["charge_source"] = "orca_output"
+        from ..analysis.reactivity import build_reactivity_profile
+        if parsed["n"].homo_energy is None or parsed["n"].lumo_energy is None:
+            raise ValueError("Frozen reference state lacks a complete HOMO/LUMO pair")
+        profile = build_reactivity_profile(
+            {
+                "homo_ev": parsed["n"].homo_energy,
+                "lumo_ev": parsed["n"].lumo_energy,
+                "loewdin_charges": charges["n"],
+                "atomic_symbols": symbols,
+            },
+            name=parent.get("selection", {}).get("ligand_id", job.name),
+            charge_type="loewdin",
+            anion_charges=charges["n_plus_1"],
+            cation_charges=charges["n_minus_1"],
+        )
+        record["profile"] = asdict(profile)
+        record["status"] = "completed"
+        record["validated"] = True
+    except BaseException as exc:
+        record["status"] = "interrupted" if isinstance(exc, KeyboardInterrupt) else "failed"
+        record["validated"] = False
+        record["error"] = str(exc) if isinstance(exc, (ValueError, OSError)) else type(exc).__name__
+        save()
+        if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+            raise
+        return record
+    save()
+    return record
 
 
 def _format_time(seconds: float) -> str:

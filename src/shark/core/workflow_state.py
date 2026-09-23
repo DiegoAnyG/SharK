@@ -229,6 +229,15 @@ def workflow_recovery_plan(
             plan["repeat_required"].append(label)
         else:
             plan["pending"].append(label)
+        fukui_status = job.get("fukui_status")
+        if fukui_status is not None:
+            fukui_label = f"ligand_fukui:{job.get('ligand', job.get('path', 'job'))}"
+            if fukui_status == "completed":
+                plan["reusable"].append(fukui_label)
+            elif fukui_status in ("failed", "interrupted", "invalidated"):
+                plan["repeat_required"].append(fukui_label)
+            else:
+                plan["pending"].append(fukui_label)
     for key in plan:
         plan[key] = sorted(set(plan[key]))
     return plan
@@ -259,11 +268,15 @@ def inspect_workflow(work_dir: str | Path) -> tuple[dict[str, Any] | None, list[
             status = record.get("status", "unknown")
             if status == "completed" and record.get("orbital_export", {}).get("status") == "failed":
                 status = "completed_export_failed"
+            fukui_status = None
+            if record.get("parameters", {}).get("fukui"):
+                fukui_status = record.get("fukui", {}).get("status", "prepared")
             jobs.append({
                 "path": job_file.parent.relative_to(root).as_posix(),
                 "status": "invalidated" if changed else status,
                 "ligand": record.get("selection", {}).get("ligand_id", job_file.parent.name),
                 "changed_inputs": changed,
+                "fukui_status": fukui_status,
             })
         except (OSError, ValueError, json.JSONDecodeError, KeyError):
             jobs.append({"path": job_file.parent.relative_to(root).as_posix(), "status": "invalid_manifest"})

@@ -72,6 +72,21 @@ def test_invalid_charge_spin_and_resources_fail_before_writing(session, tmp_path
         assert not (tmp_path / 'invalid').exists()
 
 
+def test_fukui_preparation_is_explicit_and_requires_closed_shell(session, tmp_path):
+    job = prepare_ligand_jobs(session, tmp_path / 'fukui', fukui=True)[0]
+    data = json.loads((job / 'job.json').read_text())
+    assert data['parameters']['fukui'] is True
+
+    with pytest.raises(ValueError, match='closed-shell'):
+        prepare_ligand_jobs(
+            session,
+            tmp_path / 'open-shell',
+            fukui=True,
+            multiplicity=2,
+        )
+    assert not (tmp_path / 'open-shell').exists()
+
+
 def test_mismatched_input_chemistry_is_rejected(session, tmp_path):
     wrong = tmp_path / 'wrong.mol'
     Chem.MolToMolFile(Chem.MolFromSmiles('CC'), str(wrong))
@@ -92,6 +107,17 @@ def test_cli_prepare_has_no_simulated_results(archive, tmp_path, monkeypatch):
     assert 'Not calculated' in text and 'prepared' in text
     assert '-25.40' not in text and '2.94 +- 0.33' not in text
     assert not list(tmp_path.glob('shark-session-*'))
+
+
+def test_cli_fukui_flag_prepares_three_state_analysis_without_executing(archive, tmp_path):
+    out = tmp_path / 'fukui-workflow'
+    assert main([
+        'run-qm', '--session', str(archive), '--work-dir', str(out),
+        '--fukui', '--no-orbital-plots',
+    ]) == 0
+    records = [json.loads(path.read_text()) for path in (out / 'quantum').glob('job-*/job.json')]
+    assert records and all(record['parameters']['fukui'] is True for record in records)
+    assert all('fukui' not in record for record in records)
 
 
 def test_parser_requires_final_converged_data(tmp_path):

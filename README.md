@@ -29,7 +29,7 @@ SharK bridges high-throughput virtual screening (such as [**PoliScreen**](https:
 
 - **Robust ORCA 6 Parser**: Instant extraction of electronic energies ($E_{el}$), thermochemical corrections ($ZPE$, $H$, $G$, $S$), dipole moments, Loewdin/Mulliken atomic charges, and vibrational modes from `.property.txt` and `.out` files.
 - **Boltzmann Thermodynamics**: Calculates relative free energies ($\Delta G, \Delta H, \Delta E$) and equilibrium Boltzmann population distributions ($P_i$) at specified temperatures.
-- **Conceptual DFT & Warhead Reactivity**: Calculates chemical hardness ($\eta$), chemical potential ($\mu$), global electrophilicity index ($\omega$), chemical softness ($S$), and condensed Fukui functions ($f_k^+, \omega_k$) to automatically rank electrophilic warhead centers.
+- **Conceptual DFT & Local Reactivity**: Reports the frontier gap separately from Parr–Pearson hardness ($\eta$), chemical potential ($\mu$), electrophilicity ($\omega$), and softness ($S$); optional condensed Fukui functions require validated frozen-geometry $N$, $N+1$, and $N-1$ ORCA calculations.
 - **Covalent Near-Attack Conformation (NAC) Matching**: Autonomous 3D spatial scanning of catalytic pocket nucleophiles (Cys, Ser, Thr, Lys, His, Tyr) against ligand warheads ($d \le 3.5\text{ \AA}$) to assess covalent reaction feasibility without prior manual residue specification.
 - **GROMACS MD Pipeline Bridge**: Automated orchestration of nanosecond classical molecular dynamics from PoliScreen screening sessions, strictly selecting raw receptor structures for accurate force-field topology generation (`pdb2gmx`).
 - **FTIR Transmittance Simulator**: Convolutes harmonic transitions with Lorentzian line-shapes into standardized FTIR transmittance spectra ($\%T$, 100% baseline, downward absorption dips) with shaded functional-group zones.
@@ -88,6 +88,10 @@ shark run-qm --session screening.poliscreen --work-dir ../qm_jobs
 shark run-qm --session screening.poliscreen --work-dir ../qm_results \
   --execute --frequencies --nprocs 2 --maxcore 1024
 
+# Add three frozen-geometry charge states for finite-difference condensed Fukui indices.
+shark run-qm --session screening.poliscreen --work-dir ../qm_fukui \
+  --execute --fukui --nprocs 2 --maxcore 1024
+
 # Regenerate geometry from recorded SMILES, selecting a target and Pareto leaders.
 shark run-qm --session screening.poliscreen --target target_ready~Pk1 \
   --pareto --top 3 --geometry smiles --work-dir ../selected_jobs
@@ -109,6 +113,9 @@ and `--frequencies`. `--charge` checks the charge against the input molecular st
 it does not change protonation. CPU and memory defaults honor `SHARK_NPROCS` and
 `SHARK_MAXCORE` (MB per process). `SHARK_ORCA` accepts an executable or installation
 directory, with `orca` on PATH as fallback. `--timeout` limits each external process.
+`--fukui` currently requires a closed-shell reference and adds N, N+1 and N-1
+single points relative to its recorded formal charge at one frozen geometry; it is never inferred from a partial-charge or
+target-biased site-ranking proxy.
 ORCA is installed separately and keeps its own license.
 
 Selection uses exact compound and target identities, including pocket suffixes. Use

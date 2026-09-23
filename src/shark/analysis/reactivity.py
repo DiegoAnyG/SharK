@@ -29,7 +29,7 @@ class CDFTDescriptors:
     homo_ev: float
     lumo_ev: float
     gap_ev: float
-    hardness_ev: float             # eta = lumo - homo (fundamental gap)
+    hardness_ev: float             # eta = (lumo - homo) / 2
     chemical_potential_ev: float    # mu = (homo + lumo) / 2
     electronegativity_ev: float     # chi = -mu
     electrophilicity_ev: float      # omega = mu^2 / (2 * eta)
@@ -38,8 +38,8 @@ class CDFTDescriptors:
 
     @property
     def hardness_half_ev(self) -> float:
-        """Parr-Pearson operational half-gap hardness: (lumo - homo) / 2."""
-        return self.hardness_ev / 2.0
+        """Backward-compatible alias for Parr-Pearson half-gap hardness."""
+        return self.hardness_ev
 
 
 @dataclass
@@ -95,7 +95,7 @@ def calculate_cdft_descriptors(
     if gap <= 0.0:
         raise ValueError(f"Non-physical or inverted frontier gap: HOMO={homo_ev:.3f} eV, LUMO={lumo_ev:.3f} eV")
 
-    hardness = gap
+    hardness = gap / 2.0
     chemical_potential = (homo_ev + lumo_ev) / 2.0
     electronegativity = -chemical_potential
     electrophilicity = (chemical_potential ** 2) / (2.0 * hardness)
@@ -207,15 +207,22 @@ def build_reactivity_profile(
     if not coords:
         coords = [None] * n_atoms
 
-    has_charged = (anion_charges is not None and len(anion_charges) == n_atoms) or (
-        cation_charges is not None and len(cation_charges) == n_atoms
+    has_anion = anion_charges is not None and len(anion_charges) == n_atoms
+    has_cation = cation_charges is not None and len(cation_charges) == n_atoms
+    has_charged = has_anion and has_cation
+    fukui_method = "finite_difference" if has_charged else (
+        "mixed_charge_difference_and_proxy" if has_anion or has_cation else "partial_charge_proxy"
     )
-    fukui_method = "finite_difference" if has_charged else "partial_charge_proxy"
     warnings_list: List[str] = []
-    if not has_charged:
+    if not has_anion and not has_cation:
         warnings_list.append(
             "Anion/cation charges not provided; Fukui values are approximate partial-charge proxies, "
             "not genuine finite-difference CDFT observables."
+        )
+    elif not has_charged:
+        warnings_list.append(
+            "Only one charged state was provided; the profile mixes one finite difference with one "
+            "partial-charge proxy and is not a complete finite-difference Fukui analysis."
         )
 
     f_plus, f_minus, f_zero = calculate_condensed_fukui(
@@ -270,4 +277,3 @@ def build_reactivity_profile(
         charge_scheme=charge_type,
         warnings=warnings_list,
     )
-

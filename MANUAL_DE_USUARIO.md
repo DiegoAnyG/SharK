@@ -32,7 +32,7 @@ El flujo de trabajo se organiza en cuatro niveles jerárquicos (*Tiers*):
 | TIER 3: Reactividad Quimica Conceptual (CDFT) y Cluster de Bolsillo         |
 |   - Calculos DFT de orbitales frontera HOMO / LUMO en ligando y cluster     |
 |   - Dureza quimica (eta), suavidad (S) e indice de electrofilia global (w)  |
-|   - Funciones de Fukui condensadas (f_k+) y suavidad local (s_k+)           |
+|   - Fukui condensado opcional desde estados N, N+1 y N-1 validados          |
 |   - Evaluacion de simetria de fase orbital y polarizacion de bolsillo       |
 +-----------------------------------------------------------------------------+
                                        |
@@ -93,7 +93,9 @@ A continuacion se detallan todas las variables, su definicion matematica, su sig
   $$\omega = \frac{\mu^2}{2\eta}, \quad \text{donde } \mu = \frac{E_{\text{HOMO}} + E_{\text{LUMO}}}{2}$$
   Cuantifica la propension intrinseca del ligando a adquirir densidad electronica. Valores de $\omega > 1.5\text{ eV}$ clasifican al compuesto como un electrofilo moderado a fuerte.
 * **Funcion de Fukui Condensada ($f_k^+$) y Suavidad Local ($s_k^+$):**
-  Indica que atomo especifico de la molecula es el mas susceptible de sufrir un ataque nucleofilico. Un valor maximo de $f_k^+$ en el atomo previsto confirma la regiospecificidad de la reaccion.
+  Se calcula solamente con `--fukui`, mediante diferencias de poblaciones Loewdin entre tres
+  single points ORCA sobre la misma geometria congelada. Un maximo de $f_k^+$ identifica una
+  respuesta electronica local dentro de este modelo; no confirma por si solo un mecanismo ni una reaccion.
 
 ### 2.4 Metricas de Estado de Transicion y Kinetica Cuantica (Tier 4)
 
