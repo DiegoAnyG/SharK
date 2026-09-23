@@ -10,6 +10,7 @@ import pytest
 from shark.core.cluster import extract_active_cluster, QuantumCluster
 from shark.reports.dossier import generate_html_dossier
 from shark.cli import main as cli_main
+from shark.core.runner import cleanup_orphan_orca_processes
 
 
 @pytest.fixture
@@ -62,6 +63,13 @@ def test_cluster_extraction(sample_structures, tmp_path):
 def test_cli_rejects_invalid_resource_limits_before_work(arguments):
     with pytest.raises(SystemExit):
         cli_main(arguments)
+
+
+def test_unsafe_global_process_cleanup_is_refused(capsys):
+    assert cli_main(["--kill-orphans"]) == 2
+    assert "cannot prove ownership" in capsys.readouterr().err
+    with pytest.raises(RuntimeError, match="ownership cannot be proven"):
+        cleanup_orphan_orca_processes()
 
 
 def test_html_dossier_generation(tmp_path):

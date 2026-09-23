@@ -3,9 +3,18 @@
 import json
 from pathlib import Path
 
+import pytest
+
 from shark.cli import main
 from shark.core.runner import ProcessResult
-from shark.core.workflow_state import initialize_workflow_manifest, update_workflow_stage
+from shark.core.workflow_state import (
+    LOCK_NAME,
+    WorkflowBusyError,
+    acquire_workflow_lock,
+    initialize_workflow_manifest,
+    release_workflow_lock,
+    update_workflow_stage,
+)
 from shark.workflows.tier4_resume import (
     resume_tier4_workflow,
     tier4_stage_reusable,
@@ -73,6 +82,32 @@ def _prepared_tier4(tmp_path: Path) -> Path:
         validation="complete coordinate scan",
     )
     return root
+
+
+def test_workflow_lock_rejects_concurrent_writer_and_reclaims_stale_lock(tmp_path):
+    token = acquire_workflow_lock(tmp_path)
+    try:
+        with pytest.raises(WorkflowBusyError, match="already in use"):
+            acquire_workflow_lock(tmp_path)
+    finally:
+        release_workflow_lock(tmp_path, token)
+
+    (tmp_path / LOCK_NAME).write_text(
+        json.dumps({"pid": 999999999, "token": "stale"}), encoding="utf-8"
+    )
+    replacement = acquire_workflow_lock(tmp_path)
+    release_workflow_lock(tmp_path, replacement)
+    assert not (tmp_path / LOCK_NAME).exists()
+
+
+def test_resume_honors_writer_lock_while_status_remains_read_only(tmp_path, capsys):
+    token = acquire_workflow_lock(tmp_path)
+    try:
+        assert main(["status", "--work-dir", str(tmp_path)]) == 0
+        assert main(["resume", "--work-dir", str(tmp_path)]) == 1
+        assert "already in use" in capsys.readouterr().err
+    finally:
+        release_workflow_lock(tmp_path, token)
 
 
 def test_manifest_persists_stage_parameters_for_typed_resume(tmp_path):

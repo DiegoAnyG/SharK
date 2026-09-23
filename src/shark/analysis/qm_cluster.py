@@ -857,6 +857,10 @@ def extract_qm_cluster(
                 if at.res_name == "LIG" and at.atom_name.strip().upper() == electrophile_atom.strip().upper():
                     electrophile_idx = idx
                     break
+            if electrophile_idx is None:
+                raise ValueError(
+                    f"Specified electrophile atom '{electrophile_atom}' was not found in the ligand"
+                )
 
         if electrophile_idx is None:
             nucl_crd = cluster_atoms[nucl_idx].coords
@@ -1131,4 +1135,3 @@ def run_cluster_single_point(
         execution_time_s=exec_time,
         success=True,
     )
-

@@ -106,6 +106,18 @@ def test_extract_qm_cluster_minimal(mock_active_site):
     assert any(a.atom_name == "HC_CAP" for a in caps)
 
 
+def test_explicit_missing_electrophile_is_not_silently_reassigned(mock_active_site):
+    rec_pdb, lig_pdb = mock_active_site
+    with pytest.raises(ValueError, match="electrophile atom 'C99'.*not found"):
+        extract_qm_cluster(
+            receptor_pdb=rec_pdb,
+            ligand_pose=lig_pdb,
+            model_type="minimal",
+            target_residue="THR309",
+            electrophile_atom="C99",
+        )
+
+
 def test_extract_qm_cluster_extended(mock_active_site):
     rec_pdb, lig_pdb = mock_active_site
     cluster = extract_qm_cluster(

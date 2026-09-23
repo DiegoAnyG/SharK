@@ -156,7 +156,7 @@ Para el control manual de cada tarea que genera secciones o salidas en el dossie
 | `--full-thermo`, `--gibbs-thermo` | Termodinamica completa de Gibbs (reactivos, TS y producto) | `--session` o snapshot PDB | Seccion 03: Frecuencias de reactivo y aducto, Delta G‡, Delta G_rxn, k_chem de Eyring y vida media t_1/2 |
 | `--html`, `--generate-dossier` | Generacion del informe HTML autocontenido | Archivos de calculo | Archivo HTML portatil con graficas Plotly.js y visualizadores 3Dmol.js integrados |
 | `--report-from-evidence` | Regeneracion inmediata desde JSON | `evidence.json` | Dossier HTML regenerado en < 2 segundos sin recomputar calculos |
-| `--kill-orphans` | Limpieza de procesos MPI/ORCA colgados | N/A | Terminacion segura de procesos huerfanos en segundo plano |
+| `--kill-orphans` | Opcion obsoleta, siempre rechazada | N/A | No termina procesos por nombre; use el estado del trabajo y los grupos de procesos supervisados |
 
 ### 3.2 Modo 1: Cribado Rapido Basado en Docking (`--fast-analysis`)
 Para evaluar rapidamente decenas o cientos de compuestos a partir de poses de docking sin ejecutar dinamica molecular:
@@ -390,15 +390,11 @@ SharK implementa dos mecanismos robustos de defensa:
 
 1. **Aislamiento en Grupo de Procesos (`process-group kill`):**
    Todos los subprocesos se lanzan en un grupo de procesos independiente (`os.setpgid`). Si el proceso principal se detiene, se emite una senal `SIGTERM` seguida de `SIGKILL` a todo el grupo, garantizando que ningun hilo de OpenMPI quede con vida.
-2. **Herramienta Integrada de Limpieza (`--kill-orphans`):**
-   Si sospecha que quedaron procesos parasitos de ejecuciones previas o sesiones bloqueadas, ejecute simplemente:
-   ```bash
-   shark --kill-orphans
-   ```
-   SharK escaneara la tabla de procesos del sistema operativo, identificara cualquier binario perteneciente a ORCA o a sus trabajadores MPI derivados y los terminara de forma segura:
-   ```text
-   [CLEANUP] Terminated 8 orphaned ORCA/MPI processes.
-   ```
+2. **Limpieza global deshabilitada (`--kill-orphans`):**
+   Esta opcion se conserva para compatibilidad, pero SharK la rechaza porque un nombre de ejecutable
+   no demuestra que el proceso pertenezca al trabajo actual. Cada etapa iniciada por SharK se limpia
+   mediante su propio grupo de procesos. Consulte `shark status --work-dir <trabajo>` antes de reanudar;
+   no termine procesos ORCA o MPI de otros investigadores por nombre.
 
 ---
 
@@ -408,6 +404,11 @@ SharK incorpora las directivas de fiabilidad de `SHARK_TIER4_ORCA_RELIABILITY_SP
 
 ### 6.1 Preflight de Coordenada de Reaccion
 Antes de generar archivos de entrada para ORCA, SharK valida que el par nucleofilo-electrofilo sea quimicamente congruente con el mecanismo declarado:
+
+Para Tier 4, el residuo nucleofilo se toma del mejor contacto detectado si no se especifica
+`--target-residue`. Si existe mas de un atomo del ligando compatible con el mecanismo, la ejecucion
+se detiene y exige `--electrophile-atom`; un nombre explicito inexistente nunca se sustituye por
+proximidad.
 * **Mecanismos soportados:**
   * `carbonyl_addition`: Ataque de Nu (O, S, N) sobre carbono electrofilico (C).
   * `michael_addition`: Adicion 1,4 conjugada sobre carbono beta (C).
@@ -461,4 +462,3 @@ Si el usuario modifica el atomo electrofilico o la geometria del ligando, SharK 
 
 ---
 *Manual de Usuario de SharK — Diseñado para computo cientifico robusto, reproducible y autonomo.*
-

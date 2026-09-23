@@ -130,21 +130,10 @@ def _stop_process_tree(proc):
 
 
 def cleanup_orphan_orca_processes() -> int:
-    """Scans and safely terminates orphaned ORCA/MPI binaries owned by current user."""
-    targets = ['orca', 'orca_prop_mpi', 'orca_scf_mpi', 'orca_gtoint_mpi', 'orca_md_mpi', 'orca_cpscf_mpi', 'mpirun']
-    killed = 0
-    if os.name == 'posix':
-        import getpass
-        try:
-            current_user = getpass.getuser()
-            for t in targets:
-                res = subprocess.run(['pkill', '-u', current_user, '-9', '-f', t],
-                                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                if res.returncode == 0:
-                    killed += 1
-        except Exception:
-            pass
-    return killed
+    """Reject unsafe global cleanup retained only for API compatibility."""
+    raise RuntimeError(
+        "Global ORCA/MPI cleanup is disabled because process ownership cannot be proven"
+    )
 
 
 def _format_time(seconds: float) -> str:

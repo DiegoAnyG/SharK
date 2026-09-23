@@ -8,11 +8,81 @@ import json
 import os
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from .frontier import file_hash
 
 
 MANIFEST_NAME = "execution_manifest.json"
+LOCK_NAME = ".shark-workflow.lock"
+
+
+class WorkflowBusyError(RuntimeError):
+    """Raised when another live SharK process owns a workflow directory."""
+
+
+def _process_is_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def acquire_workflow_lock(work_dir: str | Path) -> str:
+    """Acquire an exclusive per-workflow writer lock, reclaiming stale locks."""
+    lock_path = Path(work_dir).expanduser().resolve() / LOCK_NAME
+    token = uuid4().hex
+    payload = {
+        "schema_version": 1,
+        "pid": os.getpid(),
+        "token": token,
+        "created_utc": _now(),
+    }
+    for _ in range(2):
+        try:
+            descriptor = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        except FileExistsError:
+            try:
+                existing = json.loads(lock_path.read_text(encoding="utf-8"))
+                owner_pid = int(existing.get("pid", 0))
+            except (OSError, ValueError, TypeError, json.JSONDecodeError):
+                owner_pid = 0
+            if _process_is_alive(owner_pid):
+                raise WorkflowBusyError(
+                    f"Workflow directory is already in use by SharK process {owner_pid}"
+                )
+            try:
+                lock_path.unlink()
+            except FileNotFoundError:
+                pass
+            continue
+        try:
+            os.write(descriptor, (json.dumps(payload, allow_nan=False) + "\n").encode("utf-8"))
+        finally:
+            os.close(descriptor)
+        return token
+    raise WorkflowBusyError("Workflow lock changed while a stale lock was being reclaimed")
+
+
+def release_workflow_lock(work_dir: str | Path, token: str) -> None:
+    """Release a workflow lock only when it is still owned by the caller."""
+    lock_path = Path(work_dir).expanduser().resolve() / LOCK_NAME
+    try:
+        existing = json.loads(lock_path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        return
+    if existing.get("token") == token:
+        try:
+            lock_path.unlink()
+        except FileNotFoundError:
+            pass
 
 
 def _now() -> str:

@@ -16,9 +16,12 @@ from .core.runner import run_orca_job, run_orca_process, find_orca
 from .core.frontier import file_hash
 from .core.preflight import run_preflight
 from .core.workflow_state import (
+    WorkflowBusyError,
+    acquire_workflow_lock,
     initialize_workflow_manifest,
     inspect_workflow,
     record_workflow_failure,
+    release_workflow_lock,
     update_workflow_stage,
     workflow_recovery_plan,
 )
@@ -773,7 +776,7 @@ def _write_partial_dossier(args, project: str, failures: list[dict], *, interrup
         return None
 
 
-def _workflow_control(command: str, arguments: list[str]) -> int:
+def _workflow_control_unlocked(command: str, arguments: list[str]) -> int:
     parser = argparse.ArgumentParser(prog=f"shark {command}")
     parser.add_argument("--work-dir", required=True, help="Existing SharK job directory")
     parser.add_argument("--pipeline-dir", help="Configured GROMACS pipeline for legacy external MD runs")
@@ -983,6 +986,27 @@ def _workflow_control(command: str, arguments: list[str]) -> int:
     return 1
 
 
+def _workflow_control(command: str, arguments: list[str]) -> int:
+    """Run workflow inspection or resume with one exclusive writer."""
+    if command == "status":
+        return _workflow_control_unlocked(command, arguments)
+    lock_parser = argparse.ArgumentParser(add_help=False)
+    lock_parser.add_argument("--work-dir", required=True)
+    lock_options, _ = lock_parser.parse_known_args(arguments)
+    root = Path(lock_options.work_dir).expanduser().resolve()
+    if not root.is_dir():
+        return _workflow_control_unlocked(command, arguments)
+    try:
+        token = acquire_workflow_lock(root)
+    except WorkflowBusyError as exc:
+        print(f"[ERROR] {exc}", file=sys.stderr)
+        return 1
+    try:
+        return _workflow_control_unlocked(command, arguments)
+    finally:
+        release_workflow_lock(root, token)
+
+
 def main(argv=None):
     arguments = list(sys.argv[1:] if argv is None else argv)
     if arguments and arguments[0] in ("status", "resume"):
@@ -1060,7 +1084,7 @@ def main(argv=None):
     parser.add_argument('--optimize-adduct', action='store_true', help='Optimize the covalent adduct product geometry in Tier 4 to obtain Card 4 bond nature metrics')
     parser.add_argument('--full-thermo', '--gibbs-thermo', action='store_true', dest='full_thermo', help='Compute complete Gibbs free energy thermochemistry (Delta G‡, Delta G_rxn, k_chem, half-life t1/2) by calculating vibrational frequencies on reactant complex and product adduct')
     parser.add_argument('--report-from-evidence', help='Generate HTML dossier directly from an existing evidence.json file without running calculations')
-    parser.add_argument('--kill-orphans', action='store_true', help='Scan and safely terminate any orphaned or stuck background ORCA/OpenMPI processes.')
+    parser.add_argument('--kill-orphans', action='store_true', help='Deprecated unsafe global cleanup option (always refused).')
     args = parser.parse_args(arguments)
     if args.timeout is not None and (not math.isfinite(args.timeout) or args.timeout <= 0):
         parser.error('--timeout must be a finite positive number of seconds')
@@ -1073,10 +1097,12 @@ def main(argv=None):
     if args.tier_4_ts and args.scan_steps < 2:
         parser.error('--scan-steps must be at least 2')
     if args.kill_orphans:
-        from .core.runner import cleanup_orphan_orca_processes
-        killed = cleanup_orphan_orca_processes()
-        print(f"[CLEANUP] Terminated {killed} orphaned ORCA/MPI processes.")
-        return 0
+        print(
+            "[ERROR] --kill-orphans is disabled because SharK cannot prove ownership of "
+            "processes selected only by executable name",
+            file=sys.stderr,
+        )
+        return 2
     if args.report_from_evidence:
         ev_file = Path(args.report_from_evidence).expanduser().resolve()
         if not ev_file.is_file():
@@ -1264,6 +1290,16 @@ def main(argv=None):
         parser.error('--execute requires --dft, run-qm, --run-md or --tier-4-ts')
     if args.top < 1:
         parser.error('--top must be positive')
+    try:
+        Path(args.work_dir).expanduser().mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        print(f'[ERROR] Could not create workflow directory: {exc}', file=sys.stderr)
+        return 1
+    try:
+        workflow_lock_token = acquire_workflow_lock(args.work_dir)
+    except WorkflowBusyError as exc:
+        print(f'[ERROR] {exc}', file=sys.stderr)
+        return 1
     session = None
     active_stage = "ingestion"
     workflow_failures = []
@@ -1645,6 +1681,7 @@ def main(argv=None):
                 report_stage_progress(4, 8, "Active-Site Pocket Conceptual DFT & Bürgi-Dunitz Matching", f"Target residue: {args.target_residue or 'Auto-detect'}")
 
             all_contacts, nac_contacts, pocket_nucls, summaries = [], [], [], []
+            auto_target_residue = None
             rep = None
             for p in selected_poses:
                 if cluster_rep and cluster_rep.snapshot_receptor_pdb and cluster_rep.snapshot_ligand_pdb:
@@ -1666,6 +1703,8 @@ def main(argv=None):
                     ligand_name=p.ligand_id
                 )
                 print(f'[COVALENT] {rep.summary}')
+                if auto_target_residue is None and rep.best_match is not None:
+                    auto_target_residue = rep.best_match.nucleophile.residue_label
                 summaries.append(rep.summary)
                 for n in rep.pocket_nucleophiles:
                     if n.residue_label not in pocket_nucls:
@@ -1798,7 +1837,15 @@ def main(argv=None):
                         lig_smiles = meta.get('smiles')
                         break
 
-            target_residue = args.target_residue or 'THR309'
+            target_residue = args.target_residue or auto_target_residue
+            if not target_residue:
+                raise WorkflowStageError(
+                    "tier_4",
+                    "REACTION_CENTER_UNRESOLVED",
+                    "Tier 4 could not identify a receptor nucleophile near the selected ligand; "
+                    "provide --target-residue after reviewing the structure",
+                    "validation",
+                )
             print(f"[TIER 4] Extracting {args.qm_model.upper()} QM cluster for {p.ligand_id} against {target_residue} in {p.receptor_id} (pH {args.ph:.1f})...")
             cluster = extract_qm_cluster(
                 receptor_pdb=rec_path,
@@ -1898,7 +1945,12 @@ def main(argv=None):
 
                 ts_nprocs, ts_maxcore = preflight_nprocs, preflight_maxcore
 
-                from .analysis.reaction_validation import validate_reaction_pair, write_reaction_definition_json, compute_tier4_fingerprint
+                from .analysis.reaction_validation import (
+                    compatible_electrophile_candidates,
+                    compute_tier4_fingerprint,
+                    validate_reaction_pair,
+                    write_reaction_definition_json,
+                )
 
                 nucl_el = cluster.atoms[cluster.nucleophile_idx].element if cluster.nucleophile_idx is not None else "O"
                 el_el = cluster.atoms[cluster.electrophile_idx].element if cluster.electrophile_idx is not None else "C"
@@ -1931,16 +1983,39 @@ def main(argv=None):
                 print(f"  Validation Status:  {val_res.severity} - {val_res.message}")
                 print("=" * 65)
 
-                tier4_blocked = val_res.severity == "BLOCKING"
+                assignment_message = None
+                candidates = compatible_electrophile_candidates(
+                    cluster.atoms, getattr(args, 'mechanism', 'generic_covalent_addition')
+                )
+                if not getattr(args, 'electrophile_atom', None):
+                    if not candidates:
+                        assignment_message = (
+                            "No ligand atom is element-compatible with the declared reaction mechanism"
+                        )
+                    elif len(candidates) > 1:
+                        labels = ", ".join(candidate["label"] for candidate in candidates)
+                        assignment_message = (
+                            "Automatic electrophile assignment is ambiguous among "
+                            f"{labels}; provide --electrophile-atom after chemical review"
+                        )
+
+                tier4_blocked = val_res.severity == "BLOCKING" or assignment_message is not None
                 if tier4_blocked:
-                    print(f"[TIER 4] [SKIPPED] {val_res.message}", file=sys.stderr)
+                    block_reason = assignment_message or val_res.message
+                    print(f"[TIER 4] [SKIPPED] {block_reason}", file=sys.stderr)
                     update_workflow_stage(
                         args.work_dir,
                         "tier_4",
                         status="skipped",
                         validation="not_evaluated",
-                        reason=val_res.message,
+                        reason=block_reason,
                     )
+                    if args.execute:
+                        add_failure(
+                            "tier_4", "REACTION_CENTER_AMBIGUOUS" if assignment_message else "REACTION_PAIR_BLOCKED",
+                            block_reason, "validation",
+                            "Declare --target-residue, --electrophile-atom, and --mechanism explicitly",
+                        )
 
                 fp = compute_tier4_fingerprint(
                     cluster_atoms=cluster.atoms,
@@ -1965,8 +2040,11 @@ def main(argv=None):
                         electrophile_element=el_el,
                         electrophile_idx=cluster.electrophile_idx or 0,
                         mechanism=getattr(args, 'mechanism', 'generic_covalent_addition'),
-                        assignment_source='user_defined' if getattr(args, 'electrophile_atom', None) else 'automatic',
-                        validation_status=val_res.severity,
+                        assignment_source=(
+                            'user_defined' if getattr(args, 'electrophile_atom', None)
+                            else 'automatic_ambiguous' if assignment_message else 'automatic_unique'
+                        ),
+                        validation_status='BLOCKING' if tier4_blocked else val_res.severity,
                         initial_distance_angstrom=round(d_init, 2) if d_init else 3.5,
                         proposed_bond=val_res.proposed_bond_type,
                         fingerprint=fp,
@@ -2961,6 +3039,7 @@ def main(argv=None):
     finally:
         if session is not None:
             shutil.rmtree(session.extract_dir)
+        release_workflow_lock(args.work_dir, workflow_lock_token)
 
 
 if __name__ == '__main__':

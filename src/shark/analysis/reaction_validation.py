@@ -130,6 +130,24 @@ class ReactionPairValidation:
     electrophile_label: str = ""
 
 
+def compatible_electrophile_candidates(
+    cluster_atoms: Sequence[Any],
+    mechanism_name: str,
+) -> list[dict[str, Any]]:
+    """List ligand atoms whose elements are compatible with a declared mechanism."""
+    mechanism = KNOWN_MECHANISMS.get(
+        mechanism_name, KNOWN_MECHANISMS["generic_covalent_addition"]
+    )
+    candidates = []
+    for index, atom in enumerate(cluster_atoms):
+        element = str(getattr(atom, "element", "")).strip().upper()
+        if getattr(atom, "res_name", None) != "LIG" or element not in mechanism.electrophile_types:
+            continue
+        atom_name = str(getattr(atom, "atom_name", element)).strip() or element
+        candidates.append({"index": index, "label": f"LIG:{atom_name}", "element": element})
+    return candidates
+
+
 def validate_reaction_pair(
     nucleophile_element: str,
     electrophile_element: str,

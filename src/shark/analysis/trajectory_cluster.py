@@ -502,7 +502,9 @@ def cluster_trajectory(
             if len(matches) > 0:
                 el_cand_atom = matches[0]
             else:
-                warnings_list.append(f"Specified electrophile atom '{electrophile_atom}' not found in ligand; using chemically validated rule.")
+                raise ValueError(
+                    f"Specified electrophile atom '{electrophile_atom}' was not found in the ligand selection"
+                )
 
         if el_cand_atom is None:
             cand_electrophiles = ligand_atoms.select_atoms(

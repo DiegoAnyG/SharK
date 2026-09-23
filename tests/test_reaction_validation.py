@@ -5,11 +5,26 @@ from pathlib import Path
 import pytest
 
 from shark.analysis.reaction_validation import (
+    compatible_electrophile_candidates,
     validate_reaction_pair,
     compute_tier4_fingerprint,
     write_reaction_definition_json,
     KNOWN_MECHANISMS,
 )
+
+
+def test_compatible_electrophile_candidates_respect_declared_mechanism():
+    class Atom:
+        def __init__(self, element, name, residue="LIG"):
+            self.element = element
+            self.atom_name = name
+            self.res_name = residue
+
+    atoms = [Atom("C", "C1"), Atom("N", "N1"), Atom("O", "O1"), Atom("C", "CA", "THR")]
+    carbonyl = compatible_electrophile_candidates(atoms, "carbonyl_addition")
+    generic = compatible_electrophile_candidates(atoms, "generic_covalent_addition")
+    assert [candidate["label"] for candidate in carbonyl] == ["LIG:C1"]
+    assert [candidate["label"] for candidate in generic] == ["LIG:C1", "LIG:N1"]
 
 
 def test_validate_reaction_pair_pass():
