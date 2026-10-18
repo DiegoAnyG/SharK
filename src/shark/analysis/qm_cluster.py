@@ -198,6 +198,8 @@ class QMCluster:
             route = f"! Opt {method} {solvent_str} TightSCF"
         elif jt == "optts":
             route = f"! OptTS Freq {method} {solvent_str} TightSCF"
+        elif jt == "irc":
+            route = f"! IRC {method} {solvent_str} TightSCF"
         elif jt in ("opt_freq", "optfreq"):
             route = f"! Opt Freq {method} {solvent_str} TightSCF"
         elif jt == "freq":
@@ -212,6 +214,16 @@ class QMCluster:
         if nprocs > 1:
             lines.append(f"%pal nprocs {nprocs} end")
         lines.append(f"%maxcore {maxcore_mb}")
+
+        if jt == "irc":
+            lines.extend([
+                "%irc",
+                "   MaxIter 40",
+                "   Direction both",
+                "   InitHess read",
+                '   Hess_Filename "02_optts.hess"',
+                "end",
+            ])
 
         # Geometry block: constraints or scan
         has_geom = False

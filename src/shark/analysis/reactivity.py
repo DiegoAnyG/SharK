@@ -177,6 +177,7 @@ def build_reactivity_profile(
         lumo = calc_or_dict.get("lumo_ev")
         loewdin = calc_or_dict.get("loewdin_charges", [])
         mulliken = calc_or_dict.get("mulliken_charges", [])
+        hirshfeld = calc_or_dict.get("hirshfeld_charges", [])
         symbols = calc_or_dict.get("atomic_symbols", [])
         coords = calc_or_dict.get("coordinates", [])
         mol_name = name or str(calc_or_dict.get("name", "molecule"))
@@ -185,6 +186,7 @@ def build_reactivity_profile(
         lumo = getattr(calc_or_dict, "lumo_energy", None)
         loewdin = getattr(calc_or_dict, "loewdin_charges", [])
         mulliken = getattr(calc_or_dict, "mulliken_charges", [])
+        hirshfeld = getattr(calc_or_dict, "hirshfeld_charges", [])
         symbols = getattr(calc_or_dict, "atomic_symbols", [])
         coords = getattr(calc_or_dict, "coordinates_angstrom", [])
         mol_name = name or getattr(calc_or_dict, "name", "molecule")
@@ -195,11 +197,15 @@ def build_reactivity_profile(
     global_desc = calculate_cdft_descriptors(homo_ev=homo, lumo_ev=lumo)
 
     # Select atomic charges
-    charges = loewdin if charge_type.lower() == "loewdin" and loewdin else mulliken
-    if not charges and loewdin:
+    scheme = charge_type.lower().strip()
+    if scheme == "hirshfeld" and hirshfeld:
+        charges = hirshfeld
+    elif scheme == "loewdin" and loewdin:
         charges = loewdin
-    elif not charges and mulliken:
+    elif scheme == "mulliken" and mulliken:
         charges = mulliken
+    else:
+        charges = hirshfeld or loewdin or mulliken
 
     n_atoms = len(charges)
     if not symbols:
@@ -277,3 +283,49 @@ def build_reactivity_profile(
         charge_scheme=charge_type,
         warnings=warnings_list,
     )
+
+
+def validate_fukui_profile(
+    profile: ReactivityProfile,
+    *,
+    sum_tolerance: float = 0.05,
+) -> dict:
+    """Validate finite-difference condensed Fukui profile against normalization and physical bounds."""
+    reasons: List[str] = []
+    if profile.fukui_method != "finite_difference":
+        reasons.append(f"Profile method is '{profile.fukui_method}', not 'finite_difference'")
+    if not profile.atoms:
+        reasons.append("Profile contains no atoms")
+        return {
+            "valid": False,
+            "fukui_method": profile.fukui_method,
+            "charge_scheme": profile.charge_scheme,
+            "sum_f_plus": 0.0,
+            "sum_f_minus": 0.0,
+            "sum_f_zero": 0.0,
+            "reasons": reasons,
+        }
+    sum_fp = sum(float(a.fukui_plus or 0.0) for a in profile.atoms)
+    sum_fm = sum(float(a.fukui_minus or 0.0) for a in profile.atoms)
+    sum_fz = sum(float(a.fukui_zero or 0.0) for a in profile.atoms)
+    fp_ok = abs(sum_fp - 1.0) <= sum_tolerance
+    fm_ok = abs(sum_fm - 1.0) <= sum_tolerance
+    fz_ok = abs(sum_fz - 1.0) <= sum_tolerance
+    if not fp_ok:
+        reasons.append(f"Sum of f+ ({sum_fp:.4f}) deviates from 1.0 by more than {sum_tolerance}")
+    if not fm_ok:
+        reasons.append(f"Sum of f- ({sum_fm:.4f}) deviates from 1.0 by more than {sum_tolerance}")
+    if not fz_ok:
+        reasons.append(f"Sum of f0 ({sum_fz:.4f}) deviates from 1.0 by more than {sum_tolerance}")
+    return {
+        "valid": len(reasons) == 0,
+        "fukui_method": profile.fukui_method,
+        "charge_scheme": profile.charge_scheme,
+        "sum_f_plus": round(sum_fp, 6),
+        "sum_f_minus": round(sum_fm, 6),
+        "sum_f_zero": round(sum_fz, 6),
+        "sum_f_plus_valid": fp_ok,
+        "sum_f_minus_valid": fm_ok,
+        "sum_f_zero_valid": fz_ok,
+        "reasons": reasons,
+    }

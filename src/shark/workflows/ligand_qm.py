@@ -16,7 +16,7 @@ from rdkit import Chem, rdBase
 from rdkit.Chem import AllChem
 
 from ..core.frontier import file_hash
-from ..core.session import PoliScreenSession, match_receptor_id
+from ..core.session import PoliScreenSession, match_receptor_id, split_receptor_pocket
 
 
 def _flag(value) -> bool:
@@ -61,12 +61,45 @@ def select_ligands(session: PoliScreenSession, *, top: int = 1, target: str | No
             score = math.inf
         filtered.append((score if math.isfinite(score) else math.inf, name.casefold(), receptor, row))
     unique = {}
+    pocket_scores: dict[tuple[str, str], list[float]] = {}
     for score, key, receptor, row in sorted(filtered, key=lambda item: item[:3]):
         if key not in unique:
             unique[key] = dict(ligand_id=row['ligand_id'], targets=[],
-                               docking_score_kcal_mol=score if math.isfinite(score) else None)
+                               docking_score_kcal_mol=score if math.isfinite(score) else None,
+                               pocket_breakdown=[])
         if receptor and receptor not in unique[key]['targets']:
             unique[key]['targets'].append(receptor)
+        if receptor and math.isfinite(score):
+            pocket_scores.setdefault((key, receptor), []).append(score)
+    for key, item in unique.items():
+        pose_summaries = {
+            s['receptor_id']: s
+            for s in session.summarize_by_target_and_pocket(ligand_id=item['ligand_id'], target=target)
+        } if hasattr(session, 'summarize_by_target_and_pocket') else {}
+        for rec in item['targets']:
+            if rec in pose_summaries:
+                item['pocket_breakdown'].append(pose_summaries[rec])
+            else:
+                tgt_id, pock_id = split_receptor_pocket(rec)
+                scores = sorted(pocket_scores.get((key, rec), []))
+                best_s = scores[0] if scores else None
+                mean_s = (sum(scores) / len(scores)) if scores else None
+                std_s = (
+                    math.sqrt(sum((x - mean_s) ** 2 for x in scores) / (len(scores) - 1))
+                    if len(scores) > 1 and mean_s is not None else (0.0 if scores else None)
+                )
+                item['pocket_breakdown'].append({
+                    'ligand_id': item['ligand_id'],
+                    'target_id': tgt_id,
+                    'pocket_id': pock_id,
+                    'receptor_id': rec,
+                    'pose_count': len(scores),
+                    'best_score': round(best_s, 3) if best_s is not None else None,
+                    'mean_score': round(mean_s, 3) if mean_s is not None else None,
+                    'std_score': round(std_s, 3) if std_s is not None else None,
+                    'min_score': round(best_s, 3) if best_s is not None else None,
+                    'max_score': round(scores[-1], 3) if scores else None,
+                })
     if wanted - unique.keys():
         raise ValueError('Requested compounds absent after target/control/Pareto filtering: '
                          + ', '.join(sorted(wanted - unique.keys())))
@@ -150,6 +183,31 @@ def _resources(nprocs, maxcore):
         try:
             available_mb = os.sysconf('SC_AVPHYS_PAGES') * os.sysconf('SC_PAGE_SIZE') / 1024**2
         except (ValueError, OSError):
+            available_mb = None
+    if available_mb is None and os.name == 'nt':
+        try:
+            import ctypes
+
+            class _MEMORYSTATUSEX(ctypes.Structure):
+                _fields_ = [
+                    ('dwLength', ctypes.c_ulong),
+                    ('dwMemoryLoad', ctypes.c_ulong),
+                    ('ullTotalPhys', ctypes.c_ulonglong),
+                    ('ullAvailPhys', ctypes.c_ulonglong),
+                    ('ullTotalPageFile', ctypes.c_ulonglong),
+                    ('ullAvailPageFile', ctypes.c_ulonglong),
+                    ('ullTotalVirtual', ctypes.c_ulonglong),
+                    ('ullAvailVirtual', ctypes.c_ulonglong),
+                    ('ullAvailExtendedVirtual', ctypes.c_ulonglong),
+                ]
+
+            stat = _MEMORYSTATUSEX()
+            stat.dwLength = ctypes.sizeof(_MEMORYSTATUSEX)
+            kernel32 = getattr(ctypes, 'windll', None)
+            if kernel32 is not None and hasattr(kernel32, 'kernel32'):
+                if kernel32.kernel32.GlobalMemoryStatusEx(ctypes.byref(stat)):
+                    available_mb = float(stat.ullAvailPhys) / (1024.0 ** 2)
+        except Exception:
             available_mb = None
     if available_mb is not None and nprocs * maxcore > available_mb * 0.75:
         raise ValueError('ORCA maxcore times nprocs exceeds 75% of available host memory')

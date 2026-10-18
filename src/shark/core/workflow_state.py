@@ -21,15 +21,44 @@ class WorkflowBusyError(RuntimeError):
     """Raised when another live SharK process owns a workflow directory."""
 
 
+DEFAULT_STAGE_SECONDS: dict[str, float] = {
+    "ligand_dft": 900.0,
+    "md": 7200.0,
+    "tier_4": 10800.0,
+    "redox": 1800.0,
+    "reporting": 30.0,
+}
+
+
 def _process_is_alive(pid: int) -> bool:
     if pid <= 0:
         return False
+    if os.name == "nt":
+        try:
+            import ctypes
+            kernel32 = getattr(ctypes, "windll", None)
+            if kernel32 is not None and hasattr(kernel32, "kernel32"):
+                PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+                STILL_ACTIVE = 259
+                handle = kernel32.kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, int(pid))
+                if not handle:
+                    return False
+                try:
+                    exit_code = ctypes.c_ulong()
+                    ok = kernel32.kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code))
+                    return bool(ok and exit_code.value == STILL_ACTIVE)
+                finally:
+                    kernel32.kernel32.CloseHandle(handle)
+        except Exception:
+            pass
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
         return False
     except PermissionError:
         return True
+    except OSError:
+        return False
     return True
 
 
@@ -170,11 +199,28 @@ def update_workflow_stage(
         return
     data = json.loads(path.read_text(encoding="utf-8"))
     record = data.setdefault("stages", {}).setdefault(stage, {})
+    now_iso = _now()
     record["status"] = status
     if status == "running":
         record["pid"] = os.getpid()
+        record["started_utc"] = now_iso
     else:
         record.pop("pid", None)
+        if status in ("completed", "failed", "invalid", "timed_out", "skipped"):
+            record["completed_utc"] = now_iso
+            started_iso = record.get("started_utc")
+            if isinstance(started_iso, str):
+                try:
+                    t0 = datetime.fromisoformat(started_iso)
+                    t1 = datetime.fromisoformat(now_iso)
+                    elapsed = max(0.0, (t1 - t0).total_seconds())
+                    record["elapsed_seconds"] = round(elapsed, 3)
+                    history = data.setdefault("stage_duration_history", {}).setdefault(stage, [])
+                    history.append(round(elapsed, 3))
+                    if len(history) > 20:
+                        del history[:-20]
+                except ValueError:
+                    pass
     if validation is not None:
         record["validation"] = validation
     if reason:
@@ -183,9 +229,44 @@ def update_workflow_stage(
         record.pop("reason", None)
     if details:
         record["details"] = details
-    record["updated_utc"] = _now()
-    data["updated_utc"] = record["updated_utc"]
+    record["updated_utc"] = now_iso
+    data["updated_utc"] = now_iso
     _atomic_json(path, data)
+
+
+def estimate_stage_duration(
+    stage: str,
+    manifest: dict[str, Any] | None = None,
+    default_seconds: float | None = None,
+) -> dict[str, Any]:
+    """Estimate stage runtime using recorded execution history when available."""
+    fallback = float(default_seconds if default_seconds is not None else DEFAULT_STAGE_SECONDS.get(stage, 600.0))
+    samples: list[float] = []
+    if isinstance(manifest, dict):
+        hist = manifest.get("stage_duration_history", {}).get(stage, [])
+        if isinstance(hist, list):
+            samples.extend(float(x) for x in hist if isinstance(x, (int, float)) and x >= 0.0)
+        stage_rec = manifest.get("stages", {}).get(stage, {})
+        if isinstance(stage_rec, dict) and isinstance(stage_rec.get("elapsed_seconds"), (int, float)):
+            val = float(stage_rec["elapsed_seconds"])
+            if val >= 0.0 and val not in samples:
+                samples.append(val)
+    if samples:
+        mean_val = sum(samples) / len(samples)
+        return {
+            "stage": stage,
+            "estimated_seconds": round(mean_val, 3),
+            "source": "calibrated_history",
+            "sample_count": len(samples),
+            "min_seconds": round(min(samples), 3),
+            "max_seconds": round(max(samples), 3),
+        }
+    return {
+        "stage": stage,
+        "estimated_seconds": round(fallback, 3),
+        "source": "static_default",
+        "sample_count": 0,
+    }
 
 
 def record_workflow_failure(work_dir: str | Path, failure: dict[str, Any]) -> None:
@@ -214,6 +295,8 @@ def workflow_recovery_plan(
         status = stage.get("observed_status", stage.get("status", "unknown"))
         validation = stage.get("validation", "not_evaluated")
         if status == "completed" and validation == "validated":
+            plan["reusable"].append(name)
+        elif status == "skipped" and validation == "not_applicable":
             plan["reusable"].append(name)
         elif status == "completed":
             plan["review_required"].append(name)
@@ -252,9 +335,7 @@ def inspect_workflow(work_dir: str | Path) -> tuple[dict[str, Any] | None, list[
         for stage in manifest.get("stages", {}).values():
             pid = stage.get("pid")
             if stage.get("status") == "running" and isinstance(pid, int):
-                try:
-                    os.kill(pid, 0)
-                except (OSError, ValueError):
+                if not _process_is_alive(pid):
                     stage["observed_status"] = "interrupted"
                     stage["observed_reason"] = "Recorded worker process is no longer running"
     jobs = []

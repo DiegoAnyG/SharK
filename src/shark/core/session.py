@@ -18,6 +18,29 @@ import pandas as pd
 from .frontier import file_hash
 
 
+def split_receptor_pocket(receptor_id: str | None) -> tuple[str, str]:
+    """Disaggregate a PoliScreen receptor identifier into (target_id, pocket_id).
+
+    Examples:
+    - '6Q9N_ready~principal' -> ('6Q9N', 'principal')
+    - '6Q9N_ready~Pk1'       -> ('6Q9N', 'Pk1')
+    - '8HTB_ready'           -> ('8HTB', 'principal')
+    """
+    if not receptor_id:
+        return ("unknown", "principal")
+    raw = str(receptor_id).strip()
+    if "~" in raw:
+        stem, pocket = raw.split("~", 1)
+        pocket_clean = pocket.strip() or "principal"
+    else:
+        stem = raw
+        pocket_clean = "principal"
+    target_clean = re.sub(
+        r"_(?:ready|prep|docking|prepared|clean)$", "", stem.strip(), flags=re.IGNORECASE
+    )
+    return (target_clean or stem.strip(), pocket_clean)
+
+
 @dataclass
 class DockingPose:
     ligand_id: str
@@ -31,6 +54,14 @@ class DockingPose:
     efficiency: float | None = None
     confidence: float | None = None
     metadata: dict = field(default_factory=dict)
+
+    @property
+    def target_id(self) -> str:
+        return split_receptor_pocket(self.receptor_id)[0]
+
+    @property
+    def pocket_id(self) -> str:
+        return split_receptor_pocket(self.receptor_id)[1]
 
 
 def match_receptor_id(candidate: str | None, target: str | None) -> bool:
@@ -94,6 +125,59 @@ class PoliScreenSession:
             p.score if math.isfinite(p.score) else math.inf,
             p.receptor_id, p.ligand_id, p.pose_idx,
         ))[:top_n]
+
+    def summarize_by_target_and_pocket(
+        self,
+        ligand_id: str | None = None,
+        target: str | None = None,
+    ) -> list[dict]:
+        """Aggregate docking scores per (ligand_id, target_id, pocket_id) with dispersion metrics.
+
+        Never collapses distinct pockets (e.g. catalytic 'principal' vs allosteric 'Pk1')
+        into a single target average.
+        """
+        grouped: dict[tuple[str, str, str, str], list[DockingPose]] = {}
+        for pose in self.poses:
+            if ligand_id and pose.ligand_id.casefold() != ligand_id.casefold():
+                continue
+            if target and not match_receptor_id(pose.receptor_id, target):
+                continue
+            key = (pose.ligand_id, pose.target_id, pose.pocket_id, pose.receptor_id)
+            grouped.setdefault(key, []).append(pose)
+
+        rows: list[dict] = []
+        for (lig, tgt_id, pock_id, rec_id), p_list in sorted(grouped.items()):
+            finite_scores = sorted(p.score for p in p_list if math.isfinite(p.score))
+            n = len(finite_scores)
+            if n > 0:
+                best_s = finite_scores[0]
+                worst_s = finite_scores[-1]
+                mean_s = sum(finite_scores) / n
+                std_s = math.sqrt(sum((x - mean_s) ** 2 for x in finite_scores) / (n - 1)) if n > 1 else 0.0
+                mid = n // 2
+                median_s = finite_scores[mid] if n % 2 == 1 else 0.5 * (finite_scores[mid - 1] + finite_scores[mid])
+                q1 = float(pd.Series(finite_scores).quantile(0.25))
+                q3 = float(pd.Series(finite_scores).quantile(0.75))
+                iqr_s = q3 - q1
+            else:
+                best_s = worst_s = mean_s = std_s = median_s = iqr_s = None
+            effs = [p.efficiency for p in p_list if p.efficiency is not None and math.isfinite(p.efficiency)]
+            rows.append({
+                "ligand_id": lig,
+                "target_id": tgt_id,
+                "pocket_id": pock_id,
+                "receptor_id": rec_id,
+                "pose_count": len(p_list),
+                "best_score": round(best_s, 3) if best_s is not None else None,
+                "mean_score": round(mean_s, 3) if mean_s is not None else None,
+                "std_score": round(std_s, 3) if std_s is not None else None,
+                "median_score": round(median_s, 3) if median_s is not None else None,
+                "iqr_score": round(iqr_s, 3) if iqr_s is not None else None,
+                "min_score": round(best_s, 3) if best_s is not None else None,
+                "max_score": round(worst_s, 3) if worst_s is not None else None,
+                "best_efficiency": round(max(effs), 3) if effs else None,
+            })
+        return rows
 
     def get_pose(self, ligand_id: str, pose_idx: int = 1,
                  receptor_id: str | None = None) -> DockingPose | None:

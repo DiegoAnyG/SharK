@@ -30,6 +30,9 @@ class CalculationResult:
     homo_lumo_gap: Optional[float] = None # eV
     loewdin_charges: List[float] = field(default_factory=list)
     mulliken_charges: List[float] = field(default_factory=list)
+    hirshfeld_charges: List[float] = field(default_factory=list)
+    spin_contamination_s2: Optional[float] = None
+    ideal_s2: Optional[float] = None
     atomic_numbers: List[int] = field(default_factory=list)
     atomic_symbols: List[str] = field(default_factory=list)
     coordinates_angstrom: List[Tuple[float, float, float]] = field(default_factory=list)
@@ -169,6 +172,23 @@ def _parse_property_file(prop_path: Path, result: CalculationResult) -> None:
             if charges:
                 result.mulliken_charges = charges
 
+    # Hirshfeld Population Analysis
+    hirsh_m = re.search(r"\$(?:SCF_)?Hirshfeld_Population_Analysis\s+(.*?)\$End", content, re.DOTALL)
+    if hirsh_m:
+        block = hirsh_m.group(1)
+        chg_m = re.search(r"&(?:AtomicCharges|CHRG)\s+\[.*?\]\s*(.*?)(?=&|\$End)", block, re.DOTALL)
+        if chg_m:
+            charges = []
+            for line in chg_m.group(1).strip().splitlines():
+                parts = line.strip().split()
+                if len(parts) >= 2 and parts[0].isdigit():
+                    try:
+                        charges.append(float(parts[1]))
+                    except ValueError:
+                        pass
+            if charges:
+                result.hirshfeld_charges = charges
+
 
 def _parse_out_file(out_path: Path, result: CalculationResult) -> None:
     """Extract IR intensities, dipole magnitude, frontier orbitals, and thermochemistry from ORCA .out."""
@@ -299,6 +319,35 @@ def _parse_out_file(out_path: Path, result: CalculationResult) -> None:
             if l_charges:
                 result.loewdin_charges = l_charges
 
+    if not result.hirshfeld_charges:
+        hirsh_blocks = list(re.finditer(r"HIRSHFELD ANALYSIS\s+-+\s+(.*?)(?=\n\nTotal|\n\n[A-Z]|\n---|\Z)", content, re.DOTALL))
+        if hirsh_blocks:
+            h_charges = []
+            h_symbols = []
+            for line in hirsh_blocks[-1].group(1).strip().splitlines():
+                m = re.match(r"^\s*(\d+)\s+([A-Za-z]+)\s*:?\s+([-\d.eE+]+)", line)
+                if m:
+                    h_symbols.append(m.group(2))
+                    h_charges.append(float(m.group(3)))
+            if h_charges:
+                result.hirshfeld_charges = h_charges
+                if not result.atomic_symbols:
+                    result.atomic_symbols = h_symbols
+
+    # Parse UHF/UKS spin contamination <S^2>
+    s2_matches = re.findall(r"Expectation value of <S\*\*2>\s*:\s*([-\d.eE+]+)", content)
+    if s2_matches:
+        try:
+            result.spin_contamination_s2 = float(s2_matches[-1])
+        except ValueError:
+            pass
+    ideal_s2_matches = re.findall(r"Ideal value S\*\(S\+1\).*?:\s*([-\d.eE+]+)", content)
+    if ideal_s2_matches:
+        try:
+            result.ideal_s2 = float(ideal_s2_matches[-1])
+        except ValueError:
+            pass
+
 
 def parse_orca_results(base_path: str | Path, name: Optional[str] = None) -> CalculationResult:
     """
@@ -346,6 +395,9 @@ def parse_orca_output(base_path: str | Path) -> dict:
         "optimization_converged": res.optimization_converged,
         "loewdin_charges": res.loewdin_charges,
         "mulliken_charges": res.mulliken_charges,
+        "hirshfeld_charges": res.hirshfeld_charges,
+        "spin_contamination_s2": res.spin_contamination_s2,
+        "ideal_s2": res.ideal_s2,
         "atomic_symbols": res.atomic_symbols,
         "atomic_numbers": res.atomic_numbers,
     }

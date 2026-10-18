@@ -12,7 +12,7 @@ from typing import Any
 
 from .runner import find_orca
 from ..workflows.ligand_qm import prepare_ligand_jobs, _resources
-from ..workflows.md_bridge import find_gromacs_pipeline
+from ..workflows.md_bridge import find_gromacs_pipeline, resolve_md_preset
 
 
 @dataclass(frozen=True)
@@ -32,6 +32,7 @@ class PreflightCheck:
 class PreflightReport:
     checks: list[PreflightCheck] = field(default_factory=list)
     ligand_charges: dict[str, int] = field(default_factory=dict)
+    md_capabilities: dict[str, Any] = field(default_factory=dict)
 
     @property
     def blocking(self) -> list[PreflightCheck]:
@@ -43,6 +44,7 @@ class PreflightReport:
             "status": "failed" if self.blocking else "passed",
             "checks": [check.to_dict() for check in self.checks],
             "ligand_charges": dict(self.ligand_charges),
+            "md_capabilities": dict(self.md_capabilities),
         }
 
     def write(self, path: str | Path) -> Path:
@@ -65,6 +67,7 @@ def run_preflight(
     nprocs: int,
     maxcore_mb: int | None,
     ligand_request: dict[str, Any] | None = None,
+    md_preset: str = "amber99sb-ildn_spce",
 ) -> PreflightReport:
     report = PreflightReport()
 
@@ -94,9 +97,23 @@ def run_preflight(
         else:
             report.checks.append(PreflightCheck("ORCA_UNAVAILABLE", "tool", "blocking", "ORCA executable was not found", action="Configure SHARK_ORCA"))
 
+    try:
+        preset_info = resolve_md_preset(md_preset)
+        report.md_capabilities = {**preset_info, "preset": preset_info["name"]}
+        if run_md:
+            report.checks.append(PreflightCheck(
+                "MD_PRESET_VALID", "chemistry", "passed",
+                f"MD preset '{preset_info['name']}' validated ({preset_info['protein_ff']} / {preset_info['water_model']} / {preset_info['ions']})",
+            ))
+    except ValueError as exc:
+        report.checks.append(PreflightCheck("MD_PRESET_INVALID", "chemistry", "blocking", str(exc), action="Choose a supported --md-preset"))
+
     if run_md:
+
         try:
             root = find_gromacs_pipeline(pipeline_dir)
+            if root is None:
+                raise FileNotFoundError("Configured GROMACS pipeline root was not found")
             runner = root / "scripts" / "run_pipeline.sh"
             if execute and not runner.is_file():
                 raise FileNotFoundError("Configured GROMACS pipeline is missing scripts/run_pipeline.sh")

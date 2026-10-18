@@ -8,7 +8,12 @@ from pathlib import Path
 import re
 from typing import Any, Callable
 
-from ..analysis.transition_state import parse_orca_scan_output, parse_orca_ts_output
+from ..analysis.transition_state import (
+    parse_orca_irc_output,
+    parse_orca_scan_output,
+    parse_orca_ts_output,
+    validate_tier4_homogeneity,
+)
 from ..core.frontier import file_hash
 from ..core.parser import parse_orca_results
 from ..core.runner import find_orca, run_orca_process
@@ -18,6 +23,7 @@ STAGES = {
     "reactant": ("00_reactant_freq.inp", "00_reactant_freq.out", "00_reactant_freq.meta.json"),
     "scan": ("01_scan.inp", "01_scan.out", "01_scan.meta.json"),
     "transition_state": ("02_optts.inp", "02_optts.out", "02_optts.meta.json"),
+    "irc": ("02b_irc.inp", "02b_irc.out", "02b_irc.meta.json"),
     "product": ("03_adduct_opt.inp", "03_adduct_opt.out", "03_adduct_opt.meta.json"),
 }
 
@@ -67,11 +73,17 @@ def _ts_valid(path: Path) -> bool:
     return path.is_file() and parse_orca_ts_output(path).is_valid_first_order_saddle_point
 
 
+def _irc_valid(path: Path) -> bool:
+    return path.is_file() and parse_orca_irc_output(path).connects_reactant_and_product
+
+
 def _validator(stage: str, *, full_thermo: bool) -> Callable[[Path], bool]:
     if stage == "scan":
         return _scan_valid
     if stage == "transition_state":
         return _ts_valid
+    if stage == "irc":
+        return _irc_valid
     if stage == "reactant" or (stage == "product" and full_thermo):
         return _stationary_minimum
     return _normal_optimization
@@ -225,6 +237,7 @@ def resume_tier4_workflow(
     timeout: float,
     full_thermo: bool = False,
     optimize_adduct: bool = False,
+    run_irc: bool = False,
 ) -> dict[str, str]:
     """Continue only the first invalid Tier 4 stage and its dependent descendants."""
     root = Path(directory).expanduser().resolve()
@@ -235,6 +248,11 @@ def resume_tier4_workflow(
     fingerprint = reaction.get("fingerprint")
     if not fingerprint or reaction.get("validation_status") == "BLOCKING":
         raise ValueError("Tier 4 reaction definition is missing a usable validated fingerprint")
+
+    homogeneity = validate_tier4_homogeneity(root)
+    if homogeneity["stage_count"] > 1 and not homogeneity["homogeneous"]:
+        raise ValueError(f"Tier 4 stage homogeneity check failed: {'; '.join(homogeneity['mismatches'])}")
+
     orca = None
     states: dict[str, str] = {}
 
@@ -257,6 +275,7 @@ def resume_tier4_workflow(
         validation = {
             "scan": "complete coordinate scan",
             "transition_state": "verified first-order saddle point",
+            "irc": "verified forward and backward IRC path",
             "reactant": "verified stationary reactant minimum",
             "product": "verified product minimum" if full_thermo else "converged product optimization",
         }[stage]
@@ -283,7 +302,7 @@ def resume_tier4_workflow(
     if reusable_scan:
         states["scan"] = "reused"
     else:
-        _archive(root, ("01_scan", "02_optts", "03_adduct_opt"), "scan-dependency-reset")
+        _archive(root, ("01_scan", "02_optts", "02b_irc", "03_adduct_opt"), "scan-dependency-reset")
         execute("scan")
 
     scan = parse_orca_scan_output(root / "01_scan.out", work_dir=root)
@@ -297,11 +316,34 @@ def resume_tier4_workflow(
     else:
         if _recorded_invalid_current(root, "transition_state", fingerprint, ts_dependencies):
             raise ValueError("TS optimization completed but is not a first-order saddle point; change the setup before retrying")
-        _archive(root, ("02_optts",), "ts-dependency-reset")
+        _archive(root, ("02_optts", "02b_irc"), "ts-dependency-reset")
         if not scan.ts_guess_xyz or not scan.ts_guess_xyz.is_file():
             raise ValueError("Validated scan has no TS-guess geometry; downstream input cannot be regenerated safely")
         _input_from_xyz(root / "02_optts_template.inp", scan.ts_guess_xyz, root / "02_optts.inp")
         execute("transition_state", ts_dependencies)
+
+    if run_irc:
+        ts_hash = file_hash(root / "02_optts.out")
+        irc_dependencies = {"ts_output_sha256": ts_hash}
+        reusable_irc, _ = tier4_stage_reusable(
+            root, "irc", fingerprint, dependencies=irc_dependencies
+        )
+        if reusable_irc:
+            states["irc"] = "reused"
+        else:
+            if _recorded_invalid_current(root, "irc", fingerprint, irc_dependencies):
+                raise ValueError("IRC calculation completed but did not connect reactant and product; change the setup before retrying")
+            _archive(root, ("02b_irc",), "irc-retry")
+            ts_xyz = root / "02_optts.xyz"
+            if not ts_xyz.is_file():
+                ts_xyz = scan.ts_guess_xyz
+            if not ts_xyz or not ts_xyz.is_file():
+                raise ValueError("Validated TS has no XYZ geometry; IRC input cannot be generated safely")
+            irc_template = root / "02b_irc_template.inp"
+            if not irc_template.is_file():
+                raise ValueError("IRC template 02b_irc_template.inp is missing")
+            _input_from_xyz(irc_template, ts_xyz, root / "02b_irc.inp")
+            execute("irc", irc_dependencies)
 
     if optimize_adduct:
         product_dependencies = {"scan_output_sha256": scan_hash}

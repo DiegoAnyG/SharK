@@ -170,6 +170,7 @@ def run_fukui_analysis(
     *,
     timeout: float | None = None,
     resume: bool = False,
+    charge_scheme: str | None = None,
 ) -> dict:
     """Run vertical N, N+1 and N-1 single points and record condensed Fukui indices."""
     if timeout is not None and (not math.isfinite(timeout) or timeout <= 0):
@@ -207,12 +208,18 @@ def run_fukui_analysis(
             raise ValueError(f"Charge and multiplicity are incompatible for Fukui {label} state")
 
     executable = find_orca()
+    resolved_scheme = str(
+        charge_scheme or parameters.get("fukui_charge_scheme") or parameters.get("charge_scheme") or "loewdin"
+    ).strip().lower()
+    if resolved_scheme not in ("loewdin", "hirshfeld"):
+        raise ValueError(f"Unsupported Fukui charge scheme '{resolved_scheme}'; choose 'loewdin' or 'hirshfeld'")
+    charge_scheme = resolved_scheme
     setup = {
         "method": parameters["method"],
         "solvent": parameters.get("solvent"),
         "nprocs": parameters["nprocs"],
         "maxcore_mb": parameters["maxcore_mb"],
-        "charge_scheme": "loewdin",
+        "charge_scheme": charge_scheme,
         "geometry_sha256": file_hash(geometry_path),
         "geometry_source": geometry_path.name,
         "orca_executable_name": executable.name,
@@ -251,6 +258,7 @@ def run_fukui_analysis(
             "schema_version": 1,
             "status": "prepared",
             "method": "finite_difference",
+            "charge_scheme": charge_scheme,
             "fingerprint": fingerprint,
             "setup": setup,
             "states": {},
@@ -268,6 +276,8 @@ def run_fukui_analysis(
 
     solvent = parameters.get("solvent")
     keywords = f'{parameters["method"]} SP TightSCF'
+    if charge_scheme == "hirshfeld":
+        keywords += " HIRSHFELD"
     if solvent:
         keywords += f" CPCM({solvent})"
     record["status"] = "running"
@@ -322,16 +332,27 @@ def run_fukui_analysis(
         parsed = {label: parse_orca_results(root / label) for label in states}
         charges = {}
         for label, result in parsed.items():
-            values = result.loewdin_charges
+            values = result.hirshfeld_charges if charge_scheme == "hirshfeld" else result.loewdin_charges
+            scheme_label = "Hirshfeld" if charge_scheme == "hirshfeld" else "Loewdin"
             if len(values) != len(symbols) or not all(math.isfinite(value) for value in values):
-                raise ValueError(f"Fukui {label} state lacks a complete finite Loewdin charge population")
+                raise ValueError(f"Fukui {label} state lacks a complete finite {scheme_label} charge population")
             expected_charge = states[label][0]
             if abs(sum(values) - expected_charge) > 0.05:
-                raise ValueError(f"Fukui {label} Loewdin charges do not sum to the molecular charge")
+                raise ValueError(f"Fukui {label} {scheme_label} charges do not sum to the molecular charge")
             if result.atomic_symbols and [value.upper() for value in result.atomic_symbols] != [
                 value.upper() for value in symbols
             ]:
                 raise ValueError(f"Fukui {label} atom identity or order differs from the frozen geometry")
+            if states[label][1] == 2 and result.spin_contamination_s2 is not None:
+                ideal_s2 = float(result.ideal_s2 if result.ideal_s2 is not None else 0.75)
+                s2_dev = abs(float(result.spin_contamination_s2) - ideal_s2)
+                record["states"][label]["spin_contamination_s2"] = round(float(result.spin_contamination_s2), 6)
+                record["states"][label]["ideal_s2"] = round(ideal_s2, 6)
+                record["states"][label]["s2_deviation"] = round(s2_dev, 6)
+                if s2_dev > 0.50:
+                    raise ValueError(
+                        f"Fukui {label} doublet state exhibits severe spin contamination (<S^2>={result.spin_contamination_s2:.4f}, ideal={ideal_s2:.4f})"
+                    )
             charges[label] = values
             property_path = root / f"{label}.property.txt"
             if property_path.is_file():
@@ -342,22 +363,27 @@ def run_fukui_analysis(
                 )
             else:
                 record["states"][label]["charge_source"] = "orca_output"
-        from ..analysis.reactivity import build_reactivity_profile
+        from ..analysis.reactivity import build_reactivity_profile, validate_fukui_profile
         if parsed["n"].homo_energy is None or parsed["n"].lumo_energy is None:
             raise ValueError("Frozen reference state lacks a complete HOMO/LUMO pair")
         profile = build_reactivity_profile(
             {
                 "homo_ev": parsed["n"].homo_energy,
                 "lumo_ev": parsed["n"].lumo_energy,
-                "loewdin_charges": charges["n"],
+                "loewdin_charges": charges["n"] if charge_scheme == "loewdin" else parsed["n"].loewdin_charges,
+                "hirshfeld_charges": charges["n"] if charge_scheme == "hirshfeld" else parsed["n"].hirshfeld_charges,
                 "atomic_symbols": symbols,
             },
             name=parent.get("selection", {}).get("ligand_id", job.name),
-            charge_type="loewdin",
+            charge_type=charge_scheme,
             anion_charges=charges["n_plus_1"],
             cation_charges=charges["n_minus_1"],
         )
+        validation_metrics = validate_fukui_profile(profile)
+        if not validation_metrics["valid"]:
+            raise ValueError("; ".join(validation_metrics["reasons"]))
         record["profile"] = asdict(profile)
+        record["validation_metrics"] = validation_metrics
         record["status"] = "completed"
         record["validated"] = True
     except BaseException as exc:

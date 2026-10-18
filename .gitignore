@@ -33,6 +33,10 @@ Thumbs.db
 
 # Private working notes, calculations, and reports
 /notes/
+/scratch/
+/CLAUDE.md
+/COVALENT_MODEL_REFACTOR_SPEC.md
+/next.md
 /dft_benzofuroxan/
 /reports/
 /runs/

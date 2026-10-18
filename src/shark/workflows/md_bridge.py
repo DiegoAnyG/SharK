@@ -12,10 +12,73 @@ import os
 from pathlib import Path
 import re
 import shutil
-from typing import Optional
+from typing import Any, Optional
 
 from ..core.frontier import file_hash
 from ..core.runner import run_external_process
+
+
+MD_PRESETS: dict[str, dict[str, Any]] = {
+    "amber99sb-ildn_spce": {
+        "name": "amber99sb-ildn_spce",
+        "protein_ff": "amber99sb-ildn",
+        "water_model": "spce",
+        "ligand_ff": "gaff2",
+        "charge_method": "bcc",
+        "ph": 7.4,
+        "salt_concentration_m": 0.15,
+        "ions": "NaCl",
+        "box_type": "dodecahedron",
+        "box_distance_nm": 1.0,
+        "cofactors": "HEM,HEME,MUR,CD,CL,FE,GDP,GTP,ADP,ATP,NAD,NADH,NADP,NADPH",
+        "nonstandard_residue_support": [
+            "HEM", "HEME", "MUR", "CD", "CL", "FE", "GDP", "GTP", "ADP", "ATP", "NAD", "NADH", "NADP", "NADPH"
+        ],
+    },
+    "amber14sb_tip3p": {
+        "name": "amber14sb_tip3p",
+        "protein_ff": "amber14sb",
+        "water_model": "tip3p",
+        "ligand_ff": "gaff2",
+        "charge_method": "bcc",
+        "ph": 7.4,
+        "salt_concentration_m": 0.15,
+        "ions": "NaCl",
+        "box_type": "dodecahedron",
+        "box_distance_nm": 1.0,
+        "cofactors": "HEM,HEME,MUR,CD,CL,FE,GDP,GTP,ADP,ATP,NAD,NADH,NADP,NADPH",
+        "nonstandard_residue_support": [
+            "HEM", "HEME", "MUR", "CD", "CL", "FE", "GDP", "GTP", "ADP", "ATP", "NAD", "NADH", "NADP", "NADPH"
+        ],
+    },
+    "charmm36m_tip3p": {
+        "name": "charmm36m_tip3p",
+        "protein_ff": "charmm36-jul2022",
+        "water_model": "tip3p",
+        "ligand_ff": "cgenff",
+        "charge_method": "cgenff",
+        "ph": 7.4,
+        "salt_concentration_m": 0.15,
+        "ions": "NaCl",
+        "box_type": "dodecahedron",
+        "box_distance_nm": 1.0,
+        "cofactors": "HEM,HEME,MUR,CD,CL,FE,GDP,GTP,ADP,ATP,NAD,NADH,NADP,NADPH",
+        "nonstandard_residue_support": [
+            "HEM", "HEME", "MUR", "CD", "CL", "FE", "GDP", "GTP", "ADP", "ATP", "NAD", "NADH", "NADP", "NADPH"
+        ],
+    },
+}
+
+
+def resolve_md_preset(preset_name: str = "amber99sb-ildn_spce") -> dict[str, Any]:
+    """Return a validated MD force-field/solvent/cofactor preset dictionary."""
+    key = (preset_name or "amber99sb-ildn_spce").strip().lower()
+    if key not in MD_PRESETS:
+        valid = ", ".join(sorted(MD_PRESETS))
+        raise ValueError(f"Unknown MD preset '{preset_name}'; supported presets: {valid}")
+    out = dict(MD_PRESETS[key])
+    out["supported_cofactors"] = list(out.get("nonstandard_residue_support", []))
+    return out
 
 
 def find_gromacs_pipeline(custom_dir: Optional[str | Path] = None) -> Optional[Path]:
@@ -93,13 +156,48 @@ def resume_md_from_checkpoint(
     *,
     timeout: Optional[float] = None,
 ) -> MDRunResult:
-    """Continue production MD through GROMACS' native checkpoint validation."""
+    """Continue production MD through GROMACS' native checkpoint validation, or restart pre-production pipeline."""
     run_path = Path(run_dir).expanduser().resolve()
     prep_dir = run_path / "00_prep"
     tpr = prep_dir / "md_prod.tpr"
     checkpoint = prep_dir / "md_prod.cpt"
     missing = [path.name for path in (tpr, checkpoint) if not _nonempty(path)]
     if missing:
+        cfg_file = run_path / "config.env"
+        if cfg_file.is_file():
+            cfg_text = cfg_file.read_text(encoding="utf-8", errors="replace")
+            m = re.search(r'^PROJECT_ROOT="([^"]+)"', cfg_text, re.MULTILINE)
+            bash = shutil.which("bash")
+            run_script: Optional[Path] = None
+            if m:
+                candidate = Path(m.group(1)) / "scripts" / "run_pipeline.sh"
+                if candidate.is_file():
+                    run_script = candidate
+            if run_script is None and (run_path / "run_pipeline.sh").is_file():
+                run_script = run_path / "run_pipeline.sh"
+            if bash and run_script is not None:
+                env, _ = _gromacs_environment()
+                proc = run_external_process(
+                    command=[bash, str(run_script), str(cfg_file)],
+                    output_file=run_path / "md_resume.log",
+                    cwd=run_path,
+                    timeout=timeout,
+                    env=env,
+                    output_mode="a",
+                    process_name="GROMACS pipeline pre-production continuation",
+                )
+                valid, reason = validate_gromacs_production(run_path)
+                completed = proc.terminated_normally and valid
+                status = "completed" if completed else ("timed_out" if proc.timed_out else "failed")
+                return MDRunResult(
+                    run_id=run_path.name,
+                    run_dir=run_path,
+                    sim_time_ns=0.0,
+                    status=status,
+                    execution_time_s=proc.execution_time_s,
+                    error_message=None if completed else (proc.error or reason),
+                    artifact_hashes=gromacs_production_hashes(run_path),
+                )
         raise ValueError(f"Cannot resume MD without non-empty {', '.join(missing)}")
 
     env, gmx = _gromacs_environment()
@@ -157,8 +255,10 @@ def setup_and_launch_md(
     work_dir: Optional[str | Path] = None,
     timeout: Optional[float] = None,
     ligand_net_charge: Optional[int] = None,
+    md_preset: str = "amber99sb-ildn_spce",
 ) -> MDRunResult:
     """Sets up a GROMACS MD run directory and optionally executes the pipeline."""
+    preset = resolve_md_preset(md_preset)
     pipeline_root = find_gromacs_pipeline(pipeline_dir)
     if pipeline_root is None:
         raise FileNotFoundError(
@@ -246,17 +346,18 @@ MDP_TEMPLATES_DIR="{pipeline_root}/mdp_templates"
 # Run Identification
 RUN_ID="{run_id}"
 WORKDIR="{run_dir}"
+MD_PRESET="{preset['name']}"
 
 # Ligand and Receptor Parameters
 LIGAND_NAME="{ligand_name}"
 LIGAND_RESNAME="{ligand_name[:3].upper()}"
-LIGAND_PH="7.4"
-LIGAND_CHARGE_METHOD="bcc"
+LIGAND_PH="{preset['ph']}"
+LIGAND_CHARGE_METHOD="{preset['charge_method']}"
 LIGAND_NET_CHARGE="{0 if ligand_net_charge is None else int(ligand_net_charge)}"
 POSRES_FORCE_CONST="1000"
 RECEPTOR_NAME="{rec_p.stem}"
 CHAIN="ALL"
-COFACTORS="HEM,HEME,MUR,CD,CL,FE,GDP,GTP,ADP,ATP,NAD,NADH,NADP,NADPH"
+COFACTORS="{preset['cofactors']}"
 RESTRAINT_FE_N={"true" if effective_metal_restraint else "false"}
 
 # Input Paths (Staged inside {pipeline_root}/inputs and {run_dir}/00_prep)
@@ -264,12 +365,12 @@ POLISCREEN_RECEPTOR_PDB="inputs/{run_id}_receptor.pdb"
 POLISCREEN_LIGAND_POSE="inputs/{run_id}_pose.pdb"
 POLISCREEN_LIGAND_SDF="{ref_rel_path}"
 
-# Force Fields and Solvent Box (Amber / GAFF2 Standard)
-PROTEIN_FF="amber99sb-ildn"
-WATER_MODEL="spce"
-BOX_TYPE="dodecahedron"
-BOX_DISTANCE_NM=1.0
-SALT_CONCENTRATION_M=0.15
+# Force Fields and Solvent Box ({preset['name']})
+PROTEIN_FF="{preset['protein_ff']}"
+WATER_MODEL="{preset['water_model']}"
+BOX_TYPE="{preset['box_type']}"
+BOX_DISTANCE_NM={preset['box_distance_nm']}
+SALT_CONCENTRATION_M={preset['salt_concentration_m']}
 
 # Thermodynamic and Temporal Parameters
 TEMP_K=300.0
@@ -385,8 +486,10 @@ def run_md_from_session(
     receptor_id: Optional[str] = None,
     timeout: Optional[float] = None,
     ligand_net_charge: Optional[int] = None,
+    md_preset: str = "amber99sb-ildn_spce",
 ) -> MDRunResult:
     """Extracts raw receptor and pose from PoliScreen session and prepares/launches MD."""
+    preset = resolve_md_preset(md_preset)
     pose = session.get_pose(ligand_id, pose_idx=pose_idx, receptor_id=receptor_id)
     if pose is None:
         raise ValueError(f"Pose not found in session: ligand={ligand_id}, pose_idx={pose_idx}, receptor={receptor_id}")
@@ -396,7 +499,11 @@ def run_md_from_session(
     prep_receptor_pdb = session.receptor_for(pose.receptor_id, raw=False)
     print(f"[SharK-MD] Target Receptor ID: {pose.receptor_id}")
     print(f"[SharK-MD] Staging RAW crystal structure: {raw_receptor_pdb.name} (docking-prepared '{prep_receptor_pdb.name}' bypassed)")
-    print(f"[SharK-MD] Classical Force Field: AMBER99SB-ILDN (protein) + GAFF2/AM1-BCC (ligand) + SPC/E (water, 0.15 M NaCl)")
+    print(
+        f"[SharK-MD] Classical Force Field Preset '{preset['name']}': "
+        f"{preset['protein_ff']} (protein) + {preset['ligand_ff']}/{preset['charge_method']} (ligand) + "
+        f"{preset['water_model']} (water, {preset['salt_concentration_m']} M {preset['ions']})"
+    )
 
     # Locate reference ligand topology (MOL2 / SDF) if present in session
     ref_lig_path = None
@@ -431,4 +538,5 @@ def run_md_from_session(
         work_dir=work_dir,
         timeout=timeout,
         ligand_net_charge=ligand_net_charge,
+        md_preset=preset["name"],
     )

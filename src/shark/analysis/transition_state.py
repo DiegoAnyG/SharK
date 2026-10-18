@@ -768,6 +768,17 @@ def prepare_ts_workflow_directory(
     )
     optts_template_path.write_text(optts_template_content, encoding="utf-8")
 
+    # 3b. Write template IRC input (to be filled with optimized TS coordinates after OptTS)
+    irc_template_path = out_path / "02b_irc_template.inp"
+    irc_template_content = cluster.to_orca_input(
+        job_type="irc",
+        method=method,
+        solvent=solvent,
+        nprocs=nprocs,
+        maxcore_mb=maxcore_mb,
+    )
+    irc_template_path.write_text(irc_template_content, encoding="utf-8")
+
     # 4. Write template Adduct Optimization input (to be filled with product coordinates after scan)
     adduct_template_path = out_path / "03_adduct_opt_template.inp"
     adduct_template_content = cluster.to_orca_input(
@@ -868,6 +879,210 @@ echo "Tier 4 workflow (Scan, TS, and Adduct) completed successfully."
         "reactant_freq_inp": reactant_freq_path,
         "scan_inp": scan_inp_path,
         "optts_template": optts_template_path,
+        "irc_template": irc_template_path,
         "run_script": run_sh_path,
         "cluster": cluster,
+    }
+
+
+@dataclass
+class IRCVerificationResult:
+    """Results from Intrinsic Reaction Coordinate (IRC) path verification."""
+    converged: bool = False
+    forward_completed: bool = False
+    backward_completed: bool = False
+    forward_steps: int = 0
+    backward_steps: int = 0
+    delta_e_forward_kcal: Optional[float] = None
+    delta_e_backward_kcal: Optional[float] = None
+    connects_reactant_and_product: bool = False
+    summary: str = ""
+
+
+def parse_orca_irc_output(output_text_or_path: Union[str, Path]) -> IRCVerificationResult:
+    """Parse ORCA IRC output and verify both forward and backward reaction paths."""
+    if isinstance(output_text_or_path, Path) or (
+        isinstance(output_text_or_path, str) and "\n" not in output_text_or_path and os.path.exists(output_text_or_path)
+    ):
+        content = Path(output_text_or_path).read_text(encoding="utf-8", errors="replace")
+    else:
+        content = str(output_text_or_path)
+
+    converged = "ORCA TERMINATED NORMALLY" in content and "ORCA finished by error termination" not in content
+    fwd_done = bool(re.search(r"FORWARD IRC(?:.*?CONVERGED|.*?COMPLETED|.*?-+\s+Step)", content, re.DOTALL | re.IGNORECASE))
+    bwd_done = bool(re.search(r"BACKWARD IRC(?:.*?CONVERGED|.*?COMPLETED|.*?-+\s+Step)", content, re.DOTALL | re.IGNORECASE))
+
+    summary_m = re.search(r"IRC PATH SUMMARY\s+-+\s+(.*?)(?=\n\n\n|ORCA TERMINATED|\Z)", content, re.DOTALL)
+    fwd_steps = 0
+    bwd_steps = 0
+    de_fwd = None
+    de_bwd = None
+    if summary_m:
+        block = summary_m.group(1)
+        rel_energies: List[float] = []
+        ts_idx = None
+        for idx, line in enumerate(block.splitlines()):
+            parts = line.strip().split()
+            if len(parts) >= 3 and re.match(r"^-?\d+$", parts[0]):
+                try:
+                    de = float(parts[2])
+                    rel_energies.append(de)
+                    if "<=" in line or "TS" in line.upper() or abs(de) < 1e-4:
+                        ts_idx = len(rel_energies) - 1
+                except ValueError:
+                    pass
+        if len(rel_energies) >= 3:
+            if ts_idx is None:
+                ts_idx = len(rel_energies) // 2
+            bwd_steps = ts_idx
+            fwd_steps = len(rel_energies) - 1 - ts_idx
+            de_bwd = round(rel_energies[0], 3)
+            de_fwd = round(rel_energies[-1], 3)
+            if fwd_steps > 0 and bwd_steps > 0:
+                fwd_done = True
+                bwd_done = True
+
+    connects = bool(
+        converged
+        and fwd_done
+        and bwd_done
+        and (de_fwd is None or de_fwd < -0.05)
+        and (de_bwd is None or de_bwd < -0.05)
+    )
+    summary_text = (
+        f"IRC Path Verified (Forward: {fwd_steps} steps, ΔE={de_fwd} kcal/mol; "
+        f"Backward: {bwd_steps} steps, ΔE={de_bwd} kcal/mol)"
+        if connects
+        else "IRC path incomplete or did not descend on both sides of the saddle point"
+    )
+    return IRCVerificationResult(
+        converged=converged,
+        forward_completed=fwd_done,
+        backward_completed=bwd_done,
+        forward_steps=fwd_steps,
+        backward_steps=bwd_steps,
+        delta_e_forward_kcal=de_fwd,
+        delta_e_backward_kcal=de_bwd,
+        connects_reactant_and_product=connects,
+        summary=summary_text,
+    )
+
+
+def _parse_orca_inp_signature(inp_path: Path) -> dict:
+    """Extract stoichiometry, ordered elements, charge, multiplicity, frozen atoms, and level of theory from an ORCA .inp."""
+    text = inp_path.read_text(encoding="utf-8", errors="replace")
+    route_lines = [ln.strip()[1:].strip() for ln in text.splitlines() if ln.strip().startswith("!")]
+    route_str = " ".join(route_lines)
+    job_keywords = {
+        "opt", "optts", "freq", "numfreq", "irc", "sp", "tightscf", "tightopt", "verytightscf", "anfreq"
+    }
+    theory_tokens = sorted(
+        tok.upper()
+        for tok in route_str.split()
+        if tok.lower() not in job_keywords and not tok.lower().startswith("pal")
+    )
+
+    frozen = sorted(
+        int(m.group(1))
+        for m in re.finditer(r"\{\s*C\s+(\d+)\s+C\s*\}", text, re.IGNORECASE)
+    )
+
+    xyz_m = re.search(r"\*\s*xyz\s+(-?\d+)\s+(\d+)\s*\n(.*?)\*", text, re.DOTALL | re.IGNORECASE)
+    charge = None
+    mult = None
+    elements: List[str] = []
+    if xyz_m:
+        charge = int(xyz_m.group(1))
+        mult = int(xyz_m.group(2))
+        for ln in xyz_m.group(3).strip().splitlines():
+            parts = ln.strip().split()
+            if len(parts) >= 4:
+                elements.append(parts[0].upper())
+
+    return {
+        "file": inp_path.name,
+        "charge": charge,
+        "multiplicity": mult,
+        "atom_count": len(elements),
+        "elements": elements,
+        "frozen_indices": frozen,
+        "theory_tokens": theory_tokens,
+    }
+
+
+def validate_tier4_homogeneity(
+    inputs_or_directory: Union[str, Path, Sequence[Union[str, Path]]],
+) -> dict:
+    """Verify that all Tier 4 stages share identical atomic identity, charge, spin, frozen constraints, and theory."""
+    if isinstance(inputs_or_directory, (str, Path)):
+        root = Path(inputs_or_directory).expanduser().resolve()
+        candidates = [
+            "00_reactant_freq.inp",
+            "01_scan.inp",
+            "02_optts.inp",
+            "02_optts_template.inp",
+            "02b_irc.inp",
+            "02b_irc_template.inp",
+            "03_adduct_opt.inp",
+            "03_adduct_opt_template.inp",
+        ]
+        # Prefer concrete .inp over _template.inp when both exist for the same stage
+        selected: List[Path] = []
+        seen_prefixes: set[str] = set()
+        for name in candidates:
+            p = root / name
+            if not p.is_file():
+                continue
+            prefix = name.replace("_template.inp", "").replace(".inp", "")
+            if prefix in seen_prefixes:
+                continue
+            seen_prefixes.add(prefix)
+            selected.append(p)
+        inp_files = selected
+    else:
+        inp_files = [Path(p).expanduser().resolve() for p in inputs_or_directory if Path(p).is_file()]
+
+    if not inp_files:
+        return {
+            "homogeneous": False,
+            "stage_count": 0,
+            "mismatches": ["No Tier 4 ORCA input files found for homogeneity verification"],
+        }
+
+    signatures = [_parse_orca_inp_signature(p) for p in inp_files]
+    ref = signatures[0]
+    mismatches: List[str] = []
+
+    for sig in signatures[1:]:
+        if sig["charge"] != ref["charge"] or sig["multiplicity"] != ref["multiplicity"]:
+            mismatches.append(
+                f"Charge/multiplicity mismatch between {ref['file']} ({ref['charge']}, {ref['multiplicity']}) "
+                f"and {sig['file']} ({sig['charge']}, {sig['multiplicity']})"
+            )
+        if sig["elements"] != ref["elements"]:
+            mismatches.append(
+                f"Atomic identity or atom order mismatch between {ref['file']} ({ref['atom_count']} atoms) "
+                f"and {sig['file']} ({sig['atom_count']} atoms)"
+            )
+        if sig["frozen_indices"] != ref["frozen_indices"]:
+            mismatches.append(
+                f"Frozen constraint set mismatch between {ref['file']} ({ref['frozen_indices']}) "
+                f"and {sig['file']} ({sig['frozen_indices']})"
+            )
+        if sig["theory_tokens"] != ref["theory_tokens"]:
+            mismatches.append(
+                f"Theory/solvent keyword mismatch between {ref['file']} ({ref['theory_tokens']}) "
+                f"and {sig['file']} ({sig['theory_tokens']})"
+            )
+
+    return {
+        "homogeneous": len(mismatches) == 0,
+        "stage_count": len(signatures),
+        "files": [s["file"] for s in signatures],
+        "atom_count": ref["atom_count"],
+        "charge": ref["charge"],
+        "multiplicity": ref["multiplicity"],
+        "frozen_indices": ref["frozen_indices"],
+        "theory_tokens": ref["theory_tokens"],
+        "mismatches": mismatches,
     }

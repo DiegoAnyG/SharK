@@ -810,6 +810,7 @@ def _workflow_control_unlocked(command: str, arguments: list[str]) -> int:
         bad = {"failed", "interrupted", "timed_out", "invalid", "invalidated", "invalid_manifest", "completed_export_failed", "skipped"}
         stage_bad = bool(manifest and any(
             stage.get("observed_status", stage.get("status")) in bad
+            and not (stage.get("observed_status", stage.get("status")) == "skipped" and stage.get("validation") == "not_applicable")
             for stage in manifest.get("stages", {}).values()
         ))
         return int(stage_bad or any(
@@ -984,7 +985,8 @@ def _workflow_control_unlocked(command: str, arguments: list[str]) -> int:
 
     tier4_stage = stages.get("tier_4")
     if tier4_stage and not (
-        tier4_stage.get("status") == "completed" and tier4_stage.get("validation") == "validated"
+        (tier4_stage.get("status") == "completed" and tier4_stage.get("validation") == "validated")
+        or (tier4_stage.get("status") == "skipped" and tier4_stage.get("validation") == "not_applicable")
     ):
         from .workflows.tier4_resume import resume_tier4_workflow
 
@@ -1005,12 +1007,14 @@ def _workflow_control_unlocked(command: str, arguments: list[str]) -> int:
         handled = True
         update_workflow_stage(root, "tier_4", status="running", validation="pending")
         try:
-            result = resume_tier4_workflow(
-                tier4_dir,
-                timeout=options.timeout,
-                full_thermo=full_thermo,
-                optimize_adduct=optimize_adduct,
-            )
+            resume_kwargs = {
+                "timeout": options.timeout,
+                "full_thermo": full_thermo,
+                "optimize_adduct": optimize_adduct,
+            }
+            if "run_irc" in parameters:
+                resume_kwargs["run_irc"] = bool(parameters["run_irc"])
+            result = resume_tier4_workflow(tier4_dir, **resume_kwargs)
         except KeyboardInterrupt:
             update_workflow_stage(
                 root, "tier_4", status="interrupted", validation="failed",
@@ -1140,6 +1144,11 @@ def main(argv=None):
     parser.add_argument('--mechanism', default='generic_covalent_addition', help='Declared covalent reaction mechanism (e.g. carbonyl_addition, michael_addition, furoxan_heterocycle_attack, aromatic_substitution_snar)')
     parser.add_argument('--optimize-adduct', action='store_true', help='Optimize the covalent adduct product geometry in Tier 4 to obtain Card 4 bond nature metrics')
     parser.add_argument('--full-thermo', '--gibbs-thermo', action='store_true', dest='full_thermo', help='Compute complete Gibbs free energy thermochemistry (Delta G‡, Delta G_rxn, k_chem, half-life t1/2) by calculating vibrational frequencies on reactant complex and product adduct')
+    parser.add_argument('--keep-going', action='store_true', help='Continue independent downstream stages (e.g. isolated ligand DFT, reporting) when an upstream stage such as Tier 4 is not applicable or skipped')
+    parser.add_argument('--md-preset', default='amber99sb-ildn_spce', help='Validated GROMACS force-field/water/ion preset (default: amber99sb-ildn_spce)')
+    parser.add_argument('--fukui-charge-scheme', choices=['loewdin', 'hirshfeld'], default='loewdin', help='Population scheme for condensed Fukui analysis (default: loewdin)')
+    parser.add_argument('--redox', action='store_true', help='Compute Delta-SCF vertical/adiabatic electron affinity, ionization potential, reorganization energy, and standard reduction potential')
+    parser.add_argument('--irc', action='store_true', help='Generate and optionally run Intrinsic Reaction Coordinate (IRC) connectivity verification in Tier 4')
     parser.add_argument('--report-from-evidence', help='Generate HTML dossier directly from an existing evidence.json file without running calculations')
     parser.add_argument('--kill-orphans', action='store_true', help='Deprecated unsafe global cleanup option (always refused).')
     args = parser.parse_args(arguments)
@@ -1284,6 +1293,8 @@ def main(argv=None):
         args.full_thermo = True
     if args.fukui:
         args.dft = True
+    if getattr(args, 'redox', False):
+        args.dft = True
     if getattr(args, 'full_thermo', False):
         args.covalent = True
         args.tier_4_ts = True
@@ -1392,6 +1403,7 @@ def main(argv=None):
                 "target": args.target,
                 "compounds": args.compound,
                 "pose": args.pose,
+                "md_preset": args.md_preset,
             }
         if args.cluster_nac:
             stage_specs["trajectory_clustering"] = {
@@ -1428,6 +1440,8 @@ def main(argv=None):
                 "topology_sha256": topology_hash,
                 "trajectory_sha256": trajectory_hash,
             }
+            if getattr(args, 'irc', False):
+                stage_specs["tier_4"]["run_irc"] = True
         if args.dft:
             stage_specs["ligand_dft"] = {
                 "method": args.theory,
@@ -1448,6 +1462,10 @@ def main(argv=None):
                 "maxcore_mb": args.maxcore,
                 "fukui": args.fukui,
             }
+            if getattr(args, 'fukui_charge_scheme', 'loewdin') != 'loewdin':
+                stage_specs["ligand_dft"]["fukui_charge_scheme"] = args.fukui_charge_scheme
+            if getattr(args, 'redox', False):
+                stage_specs["ligand_dft"]["redox"] = True
         initialize_workflow_manifest(
             args.work_dir,
             project=session.project_name,
@@ -1549,6 +1567,7 @@ def main(argv=None):
             nprocs=preflight_nprocs,
             maxcore_mb=preflight_maxcore,
             ligand_request=preflight_ligand_request,
+            md_preset=args.md_preset,
         )
         preflight.write(Path(args.work_dir) / "preflight.json")
         update_workflow_stage(
@@ -1598,6 +1617,7 @@ def main(argv=None):
                     work_dir=Path(args.work_dir) / 'md' if (args.work_dir and not args.pipeline_dir) else None,
                     timeout=args.timeout,
                     ligand_net_charge=preflight.ligand_charges.get(pose.ligand_id.casefold()),
+                    md_preset=args.md_preset,
                 )
                 last_md_res = res
                 print(f"[MD] Status: {res.status} | Directory: {res.run_dir}")
@@ -1625,6 +1645,7 @@ def main(argv=None):
                 md_details = {
                     "sim_time_ns": last_md_res.sim_time_ns,
                     "run_id": last_md_res.run_id,
+                    "md_preset": args.md_preset,
                     "artifact_hashes": last_md_res.artifact_hashes or {},
                 }
                 try:
@@ -1898,31 +1919,75 @@ def main(argv=None):
                         break
 
             target_residue = args.target_residue or auto_target_residue
-            if not target_residue:
-                raise WorkflowStageError(
-                    "tier_4",
-                    "REACTION_CENTER_UNRESOLVED",
-                    "Tier 4 could not identify a receptor nucleophile near the selected ligand; "
-                    "provide --target-residue after reviewing the structure",
-                    "validation",
-                )
-            print(f"[TIER 4] Extracting {args.qm_model.upper()} QM cluster for {p.ligand_id} against {target_residue} in {p.receptor_id} (pH {args.ph:.1f})...")
-            cluster = extract_qm_cluster(
-                receptor_pdb=rec_path,
-                ligand_pose=lig_pose,
-                model_type=args.qm_model,
-                target_residue=target_residue,
-                ligand_smiles=lig_smiles,
-                charge=args.charge,
-                multiplicity=args.multiplicity,
-                ph=args.ph,
-                electrophile_atom=getattr(args, 'electrophile_atom', None),
+            non_reactive_md = (
+                bool(clustering_info)
+                and clustering_info.get("p_nac") is not None
+                and float(clustering_info.get("p_nac")) == 0.0
+                and int(clustering_info.get("reactive_frame_count") or 0) == 0
             )
-            print(f"[TIER 4] Extracted cluster '{cluster.name}': {cluster.n_atoms} atoms")
-            if cluster.nucleophile_idx is not None and cluster.electrophile_idx is not None:
-                nucl_lbl = cluster.atoms[cluster.nucleophile_idx].label
-                el_lbl = cluster.atoms[cluster.electrophile_idx].label
-                print(f"[TIER 4] Reaction coordinate: Nucleophile {nucl_lbl} <--> Electrophile {el_lbl}")
+            if not target_residue or (non_reactive_md and not args.orca_cluster_sp):
+                if getattr(args, 'keep_going', False) or non_reactive_md:
+                    skip_reason = (
+                        "MD ensemble has P_NAC = 0.0% and no reactive frames; Tier 4 transition-state modeling is not applicable"
+                        if non_reactive_md
+                        else "Tier 4 could not identify a receptor nucleophile near the selected ligand; skipped under --keep-going"
+                    )
+                    print(f"[TIER 4] [SKIPPED] {skip_reason}")
+                    if args.orca_cluster_sp:
+                        update_workflow_stage(
+                            args.work_dir,
+                            "cluster_qm",
+                            status="skipped",
+                            validation="not_applicable",
+                            reason=skip_reason,
+                        )
+                    if args.tier_4_ts:
+                        update_workflow_stage(
+                            args.work_dir,
+                            "tier_4",
+                            status="skipped",
+                            validation="not_applicable",
+                            reason=skip_reason,
+                        )
+                        if covalent_summary is not None:
+                            covalent_summary['transition_state'] = {
+                                'status': 'skipped',
+                                'validation': 'not_applicable',
+                                'structure_provenance': structure_provenance,
+                                'is_first_order_ts': False,
+                                'activation_barrier_kcal': None,
+                                'delta_g_activation_kcal': None,
+                                'kinetic_feasibility': 'Not applicable (non-reactive MD ensemble, P_NAC = 0%)' if non_reactive_md else 'Not applicable',
+                                'summary': skip_reason,
+                                'warnings': [skip_reason],
+                            }
+                    cluster = None
+                else:
+                    raise WorkflowStageError(
+                        "tier_4",
+                        "REACTION_CENTER_UNRESOLVED",
+                        "Tier 4 could not identify a receptor nucleophile near the selected ligand; "
+                        "provide --target-residue after reviewing the structure",
+                        "validation",
+                    )
+            else:
+                print(f"[TIER 4] Extracting {args.qm_model.upper()} QM cluster for {p.ligand_id} against {target_residue} in {p.receptor_id} (pH {args.ph:.1f})...")
+                cluster = extract_qm_cluster(
+                    receptor_pdb=rec_path,
+                    ligand_pose=lig_pose,
+                    model_type=args.qm_model,
+                    target_residue=target_residue,
+                    ligand_smiles=lig_smiles,
+                    charge=args.charge,
+                    multiplicity=args.multiplicity,
+                    ph=args.ph,
+                    electrophile_atom=getattr(args, 'electrophile_atom', None),
+                )
+                print(f"[TIER 4] Extracted cluster '{cluster.name}': {cluster.n_atoms} atoms")
+                if cluster.nucleophile_idx is not None and cluster.electrophile_idx is not None:
+                    nucl_lbl = cluster.atoms[cluster.nucleophile_idx].label
+                    el_lbl = cluster.atoms[cluster.electrophile_idx].label
+                    print(f"[TIER 4] Reaction coordinate: Nucleophile {nucl_lbl} <--> Electrophile {el_lbl}")
 
             if covalent_summary is not None and cluster and cluster.atoms:
                 cluster_res_atoms = []
@@ -1941,7 +2006,7 @@ def main(argv=None):
                 if cluster_res_atoms and not covalent_summary.get('target_residue_atoms'):
                     covalent_summary['target_residue_atoms'] = cluster_res_atoms
 
-            if args.orca_cluster_sp:
+            if args.orca_cluster_sp and cluster is not None:
                 active_stage = "cluster_qm"
                 update_workflow_stage(args.work_dir, "cluster_qm", status="running", validation="pending")
                 if args.full_gold_standard:
@@ -1987,7 +2052,7 @@ def main(argv=None):
                             action="Inspect the cluster QM output and resume this stage",
                         )
 
-            if args.tier_4_ts:
+            if args.tier_4_ts and cluster is not None:
                 active_stage = "tier_4"
                 update_workflow_stage(
                     args.work_dir,
@@ -2059,18 +2124,23 @@ def main(argv=None):
                             f"{labels}; provide --electrophile-atom after chemical review"
                         )
 
-                tier4_blocked = val_res.severity == "BLOCKING" or assignment_message is not None
+                non_reactive_reason = (
+                    "MD ensemble has P_NAC = 0.0% and no reactive frames; Tier 4 transition-state modeling is not applicable"
+                    if non_reactive_md else None
+                )
+                tier4_blocked = val_res.severity == "BLOCKING" or assignment_message is not None or non_reactive_md
+                tier4_not_applicable = non_reactive_md or (tier4_blocked and getattr(args, 'keep_going', False))
                 if tier4_blocked:
-                    block_reason = assignment_message or val_res.message
+                    block_reason = non_reactive_reason or assignment_message or val_res.message
                     print(f"[TIER 4] [SKIPPED] {block_reason}", file=sys.stderr)
                     update_workflow_stage(
                         args.work_dir,
                         "tier_4",
                         status="skipped",
-                        validation="not_evaluated",
+                        validation="not_applicable" if tier4_not_applicable else "not_evaluated",
                         reason=block_reason,
                     )
-                    if args.execute:
+                    if args.execute and not tier4_not_applicable:
                         add_failure(
                             "tier_4", "REACTION_CENTER_AMBIGUOUS" if assignment_message else "REACTION_PAIR_BLOCKED",
                             block_reason, "validation",
@@ -2132,11 +2202,16 @@ def main(argv=None):
                 if args.execute and not tier4_blocked:
                     from .workflows.tier4_resume import resume_tier4_workflow
                     try:
+                        tier4_resume_kwargs = {
+                            "timeout": args.timeout,
+                            "full_thermo": getattr(args, 'full_thermo', False),
+                            "optimize_adduct": getattr(args, 'optimize_adduct', False),
+                        }
+                        if getattr(args, 'irc', False):
+                            tier4_resume_kwargs["run_irc"] = True
                         resumed = resume_tier4_workflow(
                             ts_work_dir,
-                            timeout=args.timeout,
-                            full_thermo=getattr(args, 'full_thermo', False),
-                            optimize_adduct=getattr(args, 'optimize_adduct', False),
+                            **tier4_resume_kwargs,
                         )
                         print("[TIER 4] Dependency-validated execution: " + ", ".join(
                             f"{stage}={status}" for stage, status in resumed.items()
@@ -2551,15 +2626,16 @@ def main(argv=None):
                 else:
                     if covalent_summary is not None:
                         covalent_summary['transition_state'] = {
-                            'status': 'not_evaluated',
+                            'status': 'skipped' if tier4_not_applicable else 'not_evaluated',
+                            'validation': 'not_applicable' if tier4_not_applicable else 'not_evaluated',
                             'structure_provenance': structure_provenance,
                             'model_type': cluster.model_type,
                             'is_first_order_ts': False,
                             'activation_barrier_kcal': None,
                             'delta_g_activation_kcal': None,
-                            'kinetic_feasibility': 'Not evaluated',
-                            'summary': f"Tier 4 was skipped during preflight: {val_res.message}",
-                            'warnings': val_res.warnings or [val_res.message],
+                            'kinetic_feasibility': 'Not applicable (non-reactive MD ensemble, P_NAC = 0%)' if non_reactive_md else 'Not evaluated',
+                            'summary': non_reactive_reason or f"Tier 4 was skipped during preflight: {val_res.message}",
+                            'warnings': ([non_reactive_reason] if non_reactive_reason else (val_res.warnings or [val_res.message])),
                         }
 
         if covalent_summary is not None:
@@ -2792,7 +2868,17 @@ def main(argv=None):
                 record = run_orca_job(job, timeout=args.timeout) if args.execute else json.loads(
                     (job / 'job.json').read_text(encoding='utf-8'))
                 if args.execute and args.fukui and record.get('status') == 'completed':
-                    record['fukui'] = run_fukui_analysis(job, timeout=args.timeout)
+                    fukui_kwargs = {"timeout": args.timeout}
+                    if getattr(args, 'fukui_charge_scheme', 'loewdin') != 'loewdin':
+                        fukui_kwargs["charge_scheme"] = args.fukui_charge_scheme
+                    record['fukui'] = run_fukui_analysis(job, **fukui_kwargs)
+                if getattr(args, 'redox', False) and (not args.execute or record.get('status') == 'completed'):
+                    from .workflows.redox_qm import prepare_and_run_redox_workflow
+                    record['redox'] = prepare_and_run_redox_workflow(
+                        job,
+                        execute=args.execute,
+                        timeout=args.timeout,
+                    )
                 records.append(record)
                 print(f"[DFT] {record['selection']['ligand_id']}: {record['status']} ({job})")
             out_file = Path(args.html) if args.html else Path(args.work_dir) / 'dossier.html'
@@ -2818,6 +2904,7 @@ def main(argv=None):
                 record.get("status") == "completed"
                 and record.get("orbital_export", {}).get("status") != "failed"
                 and (not args.fukui or record.get("fukui", {}).get("status") == "completed")
+                and (not getattr(args, 'redox', False) or record.get("redox", {}).get("status") == "completed")
                 for record in records
             )
             update_workflow_stage(
@@ -2842,6 +2929,13 @@ def main(argv=None):
                             f"Finite-difference Fukui analysis failed: "
                             f"{record.get('fukui', {}).get('error', 'charged-state calculation did not complete')}",
                             "validation", "Inspect the preserved charged-state outputs and run shark resume",
+                        )
+                    elif getattr(args, 'redox', False) and record.get('redox', {}).get('status') != 'completed':
+                        add_failure(
+                            "ligand_dft", "REDOX_ANALYSIS_FAILED",
+                            f"Delta-SCF redox analysis failed: "
+                            f"{record.get('redox', {}).get('error', 'redox state calculation did not complete')}",
+                            "validation", "Inspect the preserved redox outputs and run shark resume",
                         )
         active_stage = "reporting"
         poses = _get_selected_poses()
@@ -2946,6 +3040,27 @@ def main(argv=None):
             'prepared' if not args.execute and (args.dft or args.run_md or args.tier_4_ts or args.orca_cluster_sp)
             else 'completed'
         )
+        pocket_breakdown = (
+            session.summarize_by_target_and_pocket(
+                ligand_id=args.compound[0] if args.compound and len(args.compound) == 1 else None,
+                target=args.target,
+            )
+            if hasattr(session, "summarize_by_target_and_pocket")
+            else []
+        )
+        dft_descriptors_payload = {}
+        if covalent_summary and covalent_summary.get("cdft"):
+            dft_descriptors_payload["cdft"] = dict(covalent_summary["cdft"])
+        if qm_summary and qm_summary.get("jobs"):
+            dft_descriptors_payload["jobs"] = [
+                {
+                    "ligand_id": rec.get("selection", {}).get("ligand_id"),
+                    "status": rec.get("status"),
+                    "fukui": rec.get("fukui"),
+                    "redox": rec.get("redox"),
+                }
+                for rec in qm_summary["jobs"]
+            ]
         analysis_result = SharKAnalysisResult(
             analysis_id=str(session.project_name),
             workflow={
@@ -2960,6 +3075,7 @@ def main(argv=None):
             binding={
                 'docking_score': d_score if 'd_score' in locals() else None,
                 'affinity_score': tot_feas.affinity_score if 'tot_feas' in locals() else None,
+                'pocket_breakdown': pocket_breakdown,
             },
             static_reactive_geometry={
                 'rgi_static': tot_feas.rgi_static if 'tot_feas' in locals() else None,
@@ -2970,6 +3086,7 @@ def main(argv=None):
             transition_state=covalent_summary.get('transition_state', {}) if covalent_summary else {},
             adduct=covalent_summary.get('adduct_qm', {}) if covalent_summary else {},
             feasibility=covalent_summary.get('total_feasibility', {}) if covalent_summary else {},
+            dft_descriptors=dft_descriptors_payload,
             completeness=completeness,
             warnings=result_warnings,
             provenance={'project': session.project_name, 'work_dir': '.'},

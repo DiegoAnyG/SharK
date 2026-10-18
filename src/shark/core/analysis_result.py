@@ -14,10 +14,15 @@ from typing import Any, Dict, List, Optional
 
 VALID_STATUSES = {
     "computed",
+    "validated",
     "model_derived",
     "not_evaluated",
+    "not_applicable",
     "not_available",
+    "skipped",
     "failed",
+    "invalidated",
+    "inconclusive",
     "incomplete",
     "legacy",
 }
@@ -31,6 +36,14 @@ VALID_EVIDENCE_TYPES = {
     "docking_derived",
     "experimental",
     "legacy_unknown",
+}
+
+FORMAL_OUTCOME_STATES = {
+    "PREPARED",
+    "COMPLETED_VALIDATED",
+    "INVALIDATED",
+    "INCONCLUSIVE",
+    "NON_REACTIVE_ENSEMBLE",
 }
 
 
@@ -106,9 +119,60 @@ class SharKAnalysisResult:
     transition_state: Dict[str, Any] = field(default_factory=dict)
     adduct: Dict[str, Any] = field(default_factory=dict)
     feasibility: Dict[str, Any] = field(default_factory=dict)
+    experimental: Dict[str, Any] = field(default_factory=dict)
+    dft_descriptors: Dict[str, Any] = field(default_factory=dict)
+    evidence_layers: Dict[str, Any] = field(default_factory=dict)
     completeness: Dict[str, Any] = field(default_factory=dict)
     warnings: List[str] = field(default_factory=list)
     provenance: Dict[str, Any] = field(default_factory=dict)
+
+    def compute_formal_outcome_state(self) -> str:
+        """Classify the overall workflow into a formal JOSS/scientific outcome state.
+
+        States:
+        - PREPARED: Inputs generated, external calculations not yet executed.
+        - INVALIDATED: Completed or cached outputs failed scientific/fingerprint validation.
+        - NON_REACTIVE_ENSEMBLE: MD completed and validated with P_NAC == 0.0 (covalent attack ruled out by ensemble).
+        - COMPLETED_VALIDATED: All requested stages completed and passed scientific validators.
+        - INCONCLUSIVE: Partial execution, missing TS verification, or degraded stages.
+        """
+        wf_status = str(self.workflow.get("status", "completed")).lower()
+        ts_stat = str(self.transition_state.get("status", "")).lower() if isinstance(self.transition_state, dict) else ""
+        if wf_status in ("invalid", "invalidated") or ts_stat == "invalid":
+            return "INVALIDATED"
+        p_nac_raw = self.dynamics.get("p_nac") if isinstance(self.dynamics, dict) else None
+        p_nac_val = p_nac_raw.get("value") if isinstance(p_nac_raw, dict) else (
+            p_nac_raw.value if isinstance(p_nac_raw, EvidenceValue) else p_nac_raw
+        )
+        if p_nac_val is not None and float(p_nac_val) == 0.0 and ts_stat in ("not_applicable", "skipped", "not_evaluated", ""):
+            if not self.workflow.get("degraded", False):
+                return "NON_REACTIVE_ENSEMBLE"
+        if wf_status == "prepared":
+            return "PREPARED"
+        if wf_status == "completed" and not self.workflow.get("degraded", False):
+            return "COMPLETED_VALIDATED"
+        return "INCONCLUSIVE"
+
+    def build_evidence_layers(self) -> Dict[str, Any]:
+        """Return strictly separated epistemological layers without conflating proxies and observables."""
+        outcome = self.compute_formal_outcome_state()
+        return {
+            "experimental_measurement": self.experimental or {"status": "not_provided"},
+            "docking_score": self.binding or {"status": "not_evaluated"},
+            "dft_descriptor": self.dft_descriptors or {"status": "not_evaluated"},
+            "md_score": self.dynamics or {"status": "not_evaluated"},
+            "reaction_evidence": {
+                "static_reactive_geometry": self.static_reactive_geometry or {"status": "not_evaluated"},
+                "cluster_qm": self.cluster_qm or {"status": "not_evaluated"},
+                "transition_state": self.transition_state or {"status": "not_evaluated"},
+                "adduct": self.adduct or {"status": "not_evaluated"},
+            },
+            "validated_outcome": {
+                "formal_state": outcome,
+                "feasibility": self.feasibility or {"status": "not_evaluated"},
+                "degraded": bool(self.workflow.get("degraded", False)),
+            },
+        }
 
     def to_dict(self) -> Dict[str, Any]:
         """Serializes the result to a nested dictionary."""
@@ -121,6 +185,7 @@ class SharKAnalysisResult:
                 return [_serialize_item(v) for v in val]
             return val
 
+        layers = self.evidence_layers if self.evidence_layers else self.build_evidence_layers()
         return {
             "schema_version": self.schema_version,
             "analysis_id": self.analysis_id,
@@ -132,6 +197,9 @@ class SharKAnalysisResult:
             "transition_state": _serialize_item(self.transition_state),
             "adduct": _serialize_item(self.adduct),
             "feasibility": _serialize_item(self.feasibility),
+            "experimental": _serialize_item(self.experimental),
+            "dft_descriptors": _serialize_item(self.dft_descriptors),
+            "evidence_layers": _serialize_item(layers),
             "completeness": _serialize_item(self.completeness),
             "warnings": list(self.warnings),
             "provenance": _serialize_item(self.provenance),
@@ -222,7 +290,9 @@ class SharKAnalysisResult:
             schema_version="2.0",
             analysis_id=d.get("analysis_id", ""),
             workflow=d.get("workflow", {}),
+            experimental=d.get("experimental", {}),
             binding=d.get("binding", {}),
+            dft_descriptors=d.get("dft_descriptors", {}),
             static_reactive_geometry=d.get("static_reactive_geometry", {}),
             dynamics=d.get("dynamics", {}),
             cluster_qm=d.get("cluster_qm", {}),
@@ -230,6 +300,7 @@ class SharKAnalysisResult:
             adduct=d.get("adduct", {}),
             feasibility=d.get("feasibility", {}),
             completeness=d.get("completeness", {}),
+            evidence_layers=d.get("evidence_layers", {}),
             warnings=warnings,
             provenance=d.get("provenance", {}),
         )
