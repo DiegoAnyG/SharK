@@ -2550,6 +2550,25 @@ def main(argv=None):
                             'is_first_order_ts': ts_verif.is_valid_first_order_saddle_point if ts_verif else False,
                             'warnings': profile.warnings,
                         }
+                        from .analysis.transition_state import parse_orca_irc_output, validate_tier4_homogeneity
+                        try:
+                            covalent_summary['transition_state']['homogeneity'] = validate_tier4_homogeneity(ts_work_dir)
+                        except Exception:
+                            pass
+                        irc_cand = ts_work_dir / '02b_irc.out'
+                        if irc_cand.is_file():
+                            try:
+                                irc_res = parse_orca_irc_output(irc_cand)
+                                covalent_summary['transition_state']['irc'] = {
+                                    'connects_reactant_and_product': irc_res.connects_reactant_and_product,
+                                    'forward_completed': irc_res.forward_completed,
+                                    'backward_completed': irc_res.backward_completed,
+                                    'delta_e_forward_kcal': irc_res.delta_e_forward_kcal,
+                                    'delta_e_backward_kcal': irc_res.delta_e_backward_kcal,
+                                    'summary': irc_res.summary,
+                                }
+                            except Exception:
+                                pass
                     tier4_valid = bool(ts_verif and ts_verif.is_valid_first_order_saddle_point)
                     update_workflow_stage(
                         args.work_dir,
@@ -2623,6 +2642,26 @@ def main(argv=None):
                             status="prepared",
                             validation="not_evaluated",
                         )
+                    if covalent_summary is not None and isinstance(covalent_summary.get('transition_state'), dict):
+                        from .analysis.transition_state import parse_orca_irc_output, validate_tier4_homogeneity
+                        try:
+                            covalent_summary['transition_state']['homogeneity'] = validate_tier4_homogeneity(ts_work_dir)
+                        except Exception:
+                            pass
+                        irc_cand = ts_work_dir / '02b_irc.out'
+                        if irc_cand.is_file():
+                            try:
+                                irc_res = parse_orca_irc_output(irc_cand)
+                                covalent_summary['transition_state']['irc'] = {
+                                    'connects_reactant_and_product': irc_res.connects_reactant_and_product,
+                                    'forward_completed': irc_res.forward_completed,
+                                    'backward_completed': irc_res.backward_completed,
+                                    'delta_e_forward_kcal': irc_res.delta_e_forward_kcal,
+                                    'delta_e_backward_kcal': irc_res.delta_e_backward_kcal,
+                                    'summary': irc_res.summary,
+                                }
+                            except Exception:
+                                pass
                 else:
                     if covalent_summary is not None:
                         covalent_summary['transition_state'] = {
@@ -3061,6 +3100,17 @@ def main(argv=None):
                 }
                 for rec in qm_summary["jobs"]
             ]
+        stage_timings = {}
+        if execution_manifest and isinstance(execution_manifest.get("stages"), dict):
+            for st_name, st_rec in execution_manifest["stages"].items():
+                if isinstance(st_rec, dict):
+                    stage_timings[st_name] = {
+                        "status": st_rec.get("status"),
+                        "validation": st_rec.get("validation"),
+                        "elapsed_seconds": st_rec.get("elapsed_seconds"),
+                        "started_utc": st_rec.get("started_utc"),
+                        "completed_utc": st_rec.get("completed_utc"),
+                    }
         analysis_result = SharKAnalysisResult(
             analysis_id=str(session.project_name),
             workflow={
@@ -3071,6 +3121,7 @@ def main(argv=None):
                 'degradation_reason': '; '.join(workflow_failures) if workflow_failures else None,
                 'failures': structured_failures,
                 'recovery': recovery,
+                'stage_timings': stage_timings,
             },
             binding={
                 'docking_score': d_score if 'd_score' in locals() else None,
@@ -3098,6 +3149,17 @@ def main(argv=None):
         except Exception as e:
             print(f"[NOTE] Could not write evidence JSON: {e}")
 
+        from .workflows.md_bridge import resolve_md_preset
+        try:
+            active_md_preset = resolve_md_preset(getattr(args, 'md_preset', 'amber99sb-ildn_spce'))
+        except ValueError:
+            active_md_preset = resolve_md_preset('amber99sb-ildn_spce')
+        ff_desc = (
+            f"{active_md_preset['protein_ff'].upper()} (protein) + "
+            f"{active_md_preset['ligand_ff'].upper()}/{active_md_preset['charge_method'].upper()} (ligand) + "
+            f"{active_md_preset['water_model'].upper()} ({active_md_preset['salt_concentration_m']} M {active_md_preset['ions']})"
+        )
+
         md_summary = None
         if 'last_md_res' in locals() and last_md_res:
             prep_dir = last_md_res.run_dir / '00_prep'
@@ -3118,7 +3180,8 @@ def main(argv=None):
                 'plots': md_plots,
                 'dashboard_path': str(last_md_res.dashboard_path) if last_md_res.dashboard_path else md_plots.get('md_analysis_dashboard.png'),
                 'clustering': clustering_info if 'clustering_info' in locals() else None,
-                'force_fields': 'AMBER99SB-ILDN (protein) + GAFF2/AM1-BCC (ligand) + SPC/E (0.15 M NaCl)',
+                'md_preset': active_md_preset['name'],
+                'force_fields': ff_desc,
             }
         elif getattr(args, 'trajectory', None):
             traj_p = Path(args.trajectory).resolve()
@@ -3152,7 +3215,8 @@ def main(argv=None):
                 'plots': md_plots,
                 'dashboard_path': md_plots.get('md_analysis_dashboard.png'),
                 'clustering': clustering_info if 'clustering_info' in locals() else None,
-                'force_fields': 'AMBER99SB-ILDN (protein) + GAFF2/AM1-BCC (ligand) + SPC/E (0.15 M NaCl)',
+                'md_preset': active_md_preset['name'],
+                'force_fields': ff_desc,
             }
 
         generate_html_dossier(session.project_name, poses_data, out_file,

@@ -248,12 +248,16 @@ def generate_html_dossier(project_name: str, poses_data: list[dict], out_html: s
     """
     out_path = Path(out_html)
     workflow_data = {}
+    evidence_layers = {}
+    pocket_breakdown_rows = []
 
     # If a structured SharKAnalysisResult is passed, adapt it for the dossier
     if result is not None:
         r_dict = result.to_dict() if hasattr(result, 'to_dict') else result
         project_name = r_dict.get('analysis_id') or project_name
         workflow_data = r_dict.get('workflow') or {}
+        evidence_layers = r_dict.get('evidence_layers') or {}
+        pocket_breakdown_rows = list((r_dict.get('binding') or {}).get('pocket_breakdown') or [])
 
         # 1. Attempt to load rich covalent_feasibility.json if covalent_summary is absent
         if covalent_summary is None:
@@ -545,11 +549,61 @@ def generate_html_dossier(project_name: str, poses_data: list[dict], out_html: s
         if (covalent_summary and covalent_summary.get('clustering')) else
         'Docking scores and supplied electronic descriptors are computational estimates, not measured affinity.'
     )
+    if not pocket_breakdown_rows and jobs:
+        for job in jobs:
+            pb = (job.get('selection') or {}).get('pocket_breakdown')
+            if isinstance(pb, list) and pb:
+                pocket_breakdown_rows = list(pb)
+                break
+
+    pocket_breakdown_html = ''
+    if pocket_breakdown_rows:
+        pb_rows_html = []
+        for pb_row in pocket_breakdown_rows:
+            t_id = escape(str(pb_row.get('target_id', 'N/A')))
+            p_id = escape(str(pb_row.get('pocket_id', 'principal')))
+            c_id = escape(str(pb_row.get('ligand_id', 'N/A')))
+            p_cnt = escape(str(pb_row.get('pose_count', 1)))
+            best_sc = _number(pb_row.get('best_score'), 2)
+            mean_sc = _number(pb_row.get('mean_score'), 2)
+            std_sc = _number(pb_row.get('std_score'), 2)
+            iqr_sc = _number(pb_row.get('iqr_score'), 2)
+            min_sc = _number(pb_row.get('min_score'), 2)
+            max_sc = _number(pb_row.get('max_score'), 2)
+            eff_sc = _number(pb_row.get('mean_effectiveness'), 1) if pb_row.get('mean_effectiveness') is not None else 'N/A'
+            pb_rows_html.append(
+                '<tr>'
+                f'<td><strong>{t_id}</strong></td>'
+                f'<td><span class="badge" style="background:#f1f5f9;color:#1e293b;">{p_id}</span></td>'
+                f'<td>{c_id}</td>'
+                f'<td>{p_cnt}</td>'
+                f'<td><strong>{best_sc}</strong></td>'
+                f'<td>{mean_sc} &plusmn; {std_sc}</td>'
+                f'<td>{iqr_sc}</td>'
+                f'<td>{min_sc} / {max_sc}</td>'
+                f'<td>{eff_sc}</td>'
+                '</tr>'
+            )
+        pocket_breakdown_html = (
+            '<div style="margin-top:20px;">'
+            '<h3>Target &amp; Binding Pocket Disaggregation (PoliScreen Multi-Pocket Summary)</h3>'
+            '<p style="font-size:13px;color:var(--muted);margin:4px 0 12px;">'
+            'Disaggregated statistics per canonical target (<code>target_id</code>) and binding pocket '
+            '(<code>pocket_id</code>, e.g., catalytic <code>principal</code> vs allosteric <code>Pk1</code>). '
+            'Distinct pockets are never collapsed into a single receptor average.</p>'
+            '<div class="table-wrap"><table><thead><tr>'
+            '<th>Target ID</th><th>Pocket ID</th><th>Compound</th><th>Poses</th>'
+            '<th>Best Score / kcal mol⁻¹</th><th>Mean &plusmn; SD / kcal mol⁻¹</th>'
+            '<th>IQR / kcal mol⁻¹</th><th>Min / Max / kcal mol⁻¹</th><th>Mean Effectiveness / %</th>'
+            '</tr></thead><tbody>' + ''.join(pb_rows_html) + '</tbody></table></div></div>'
+        )
+
     docking = ('<section id="docking"><div class="section-heading"><span>Context</span><h2>Docking poses</h2></div>'
                f'<p>{docking_p_text}</p>'
                '<div class="table-wrap"><table><thead><tr><th>Ligand</th><th>Pose</th><th>Docking / kcal mol⁻¹</th>'
                '<th>Supplied binding ΔE</th><th>HOMO / eV</th><th>LUMO / eV</th><th>Gap / eV</th></tr></thead><tbody>'
-               + ''.join(pose_rows) + '</tbody></table></div></section>') if pose_rows else ''
+               + ''.join(pose_rows) + '</tbody></table></div>'
+               + pocket_breakdown_html + '</section>') if (pose_rows or pocket_breakdown_html) else ''
 
     md_plots = _find_md_plots(md_summary, covalent_summary, out_path.parent)
     clustering = (covalent_summary.get('clustering') if covalent_summary else None) or (md_summary.get('clustering') if md_summary else None)
@@ -563,6 +617,7 @@ def generate_html_dossier(project_name: str, poses_data: list[dict], out_html: s
             or 20.0
         )
         ff_str = (md_summary.get('force_fields') if md_summary else None) or "AMBER99SB-ILDN (protein) + GAFF2/AM1-BCC (ligand) + SPC/E (0.15 M NaCl)"
+        md_preset_label = escape(str((md_summary.get('md_preset') if md_summary else None) or "amber99sb-ildn_spce"))
         n_frames = clustering.get('total_sampled_frames', 401) if clustering else 401
         top_pop = f"{clustering.get('top_cluster_fraction', 0.95) * 100:.1f}%" if clustering and clustering.get('top_cluster_fraction') else "Dominant cluster"
         medoid_t = f"{clustering.get('medoid_time_ns'):.2f} ns" if clustering and clustering.get('medoid_time_ns') else "Solvated medoid"
@@ -587,9 +642,9 @@ def generate_html_dossier(project_name: str, poses_data: list[dict], out_html: s
             <small style="color:#087b70;font-weight:600;">dt = 2.0 fs · NPT Ensemble (300 K)</small>
           </div>
           <div style="background:#fff;border:1px solid var(--line);border-radius:10px;padding:16px;">
-            <small style="color:var(--muted);text-transform:uppercase;font-size:11px;font-weight:700;">Classical Force Fields</small>
-            <strong style="display:block;font-size:14px;color:var(--ink);margin:4px 0;line-height:1.3;">AMBER99SB-ILDN + GAFF2</strong>
-            <small style="color:var(--muted);">AM1-BCC charges · SPC/E water</small>
+            <small style="color:var(--muted);text-transform:uppercase;font-size:11px;font-weight:700;">Classical Force Fields ({md_preset_label})</small>
+            <strong style="display:block;font-size:14px;color:var(--ink);margin:4px 0;line-height:1.3;">{escape(ff_str)}</strong>
+            <small style="color:var(--muted);">Validated MD Preset</small>
           </div>
           <div style="background:#fff;border:1px solid var(--line);border-radius:10px;padding:16px;">
             <small style="color:var(--muted);text-transform:uppercase;font-size:11px;font-weight:700;">Ionic Neutralization</small>
@@ -780,6 +835,28 @@ def generate_html_dossier(project_name: str, poses_data: list[dict], out_html: s
             prov = ts_info.get('structure_provenance', {})
             prov_src = prov.get('structure_source', 'N/A')
 
+            irc_info = ts_info.get('irc') or {}
+            if irc_info.get('connects_reactant_and_product') is True:
+                df_val = irc_info.get('delta_e_forward_kcal')
+                db_val = irc_info.get('delta_e_backward_kcal')
+                irc_str = (
+                    f"Verified (forward ΔE = {_number(df_val, 2)} kcal/mol, "
+                    f"backward ΔE = {_number(db_val, 2)} kcal/mol)"
+                )
+            elif irc_info:
+                irc_str = escape(str(irc_info.get('summary', 'Incomplete IRC pathway')))
+            else:
+                irc_str = 'Not evaluated'
+
+            homog_info = ts_info.get('homogeneity') or {}
+            if homog_info.get('homogeneous') is True:
+                homog_str = 'Verified (homogeneous theory/solvent/charge/multiplicity)'
+            elif homog_info.get('homogeneous') is False:
+                mismatches = '; '.join(str(m) for m in (homog_info.get('mismatches') or []))
+                homog_str = f"Mismatch detected ({escape(mismatches)})"
+            else:
+                homog_str = 'Not evaluated'
+
             ts_items = [
                 ('Starting structure source', str(prov_src)),
                 (f'Activation barrier ({barrier_sym})', act_str),
@@ -788,6 +865,8 @@ def generate_html_dossier(project_name: str, poses_data: list[dict], out_html: s
                 ('Estimated half-life (t1/2)', str(ts_info.get('half_life', 'N/A'))),
                 ('Active site model', f"{str(ts_info.get('model_type', 'minimal')).capitalize()} Model"),
                 ('First-order TS verified', 'Yes (strictly 1 imaginary frequency)' if ts_verified else 'No'),
+                ('IRC pathway connectivity', irc_str),
+                ('Inter-stage homogeneity audit', homog_str),
             ]
             ts_block = (
                 '<div class="insight" style="margin: 16px 0; border-left: 4px solid #087b70; padding-left: 14px;">'
@@ -1211,18 +1290,40 @@ def generate_html_dossier(project_name: str, poses_data: list[dict], out_html: s
             for atom in atoms
         )
         setup = fukui.get('setup') or {}
+        scheme_raw = str(fukui.get('charge_scheme') or setup.get('charge_scheme', 'loewdin')).strip()
+        scheme_disp = 'Hirshfeld' if scheme_raw.lower() == 'hirshfeld' else 'Loewdin'
         state_labels = {'n': 'N', 'n_plus_1': 'N+1', 'n_minus_1': 'N-1'}
         state_text = ', '.join(
             f"{state_labels.get(name, name)}: q={state.get('charge')}, M={state.get('multiplicity')}"
             for name, state in (setup.get('states') or {}).items()
         )
+        val_metrics = fukui.get('validation_metrics') or {}
+        norm_text = ''
+        if val_metrics:
+            s_fp = _number(val_metrics.get('sum_f_plus'), 4)
+            s_fm = _number(val_metrics.get('sum_f_minus'), 4)
+            s_fz = _number(val_metrics.get('sum_f_zero'), 4)
+            norm_text = (
+                f' <strong>Normalization:</strong> &Sigma;f<sup>+</sup> = {s_fp}, '
+                f'&Sigma;f<sup>&minus;</sup> = {s_fm}, &Sigma;f<sup>0</sup> = {s_fz}.'
+            )
+        states_rec = fukui.get('states') or {}
+        s2_parts = []
+        for st_key, st_lbl in (('n_plus_1', 'N+1'), ('n_minus_1', 'N-1')):
+            st_d = states_rec.get(st_key) or {}
+            if st_d.get('spin_contamination_s2') is not None:
+                s2_parts.append(
+                    f"{st_lbl} &lt;S<sup>2</sup>&gt; = {_number(st_d.get('spin_contamination_s2'), 4)} "
+                    f"(ideal {_number(st_d.get('ideal_s2', 0.75), 3)})"
+                )
+        s2_text = f' <strong>Doublet spin check:</strong> {", ".join(s2_parts)}.' if s2_parts else ''
         fukui_blocks.append(
-            f'<article class="insight" style="margin:16px 0;"><h3>{ligand}</h3>'
+            f'<article class="insight" style="margin:16px 0;"><h3>{ligand} ({escape(scheme_disp)} Population Scheme)</h3>'
             '<p>Validated vertical finite differences from frozen-geometry N, N+1 and N-1 ORCA '
-            f'single points using {escape(str(setup.get("charge_scheme", "Loewdin")))} charges. '
+            f'single points using {escape(scheme_disp)} charges. '
             'Atom indices are zero-based. Negative condensed values are retained rather than clipped.</p>'
             f'<p><strong>States:</strong> {escape(state_text)}; '
-            f'<strong>geometry:</strong> {escape(str(setup.get("geometry_source", "N/A")))}.</p>'
+            f'<strong>geometry:</strong> {escape(str(setup.get("geometry_source", "N/A")))}.{norm_text}{s2_text}</p>'
             '<div class="table-wrap"><table><thead><tr><th>Atom index</th><th>Element</th>'
             '<th>f<sup>+</sup></th><th>f<sup>−</sup></th><th>f<sup>0</sup></th>'
             '<th>ω<sub>k</sub> / eV</th></tr></thead><tbody>' + rows_html + '</tbody></table></div></article>'
@@ -1231,12 +1332,52 @@ def generate_html_dossier(project_name: str, poses_data: list[dict], out_html: s
         '<section id="fukui"><div class="section-heading"><span>01B / Local reactivity</span>'
         '<h2>Finite-Difference Condensed Fukui Functions</h2></div>'
         '<p>These local descriptors are reported only when all three frozen-geometry charge states '
-        'complete and their Löwdin populations pass charge and atom-count validation.</p>'
+        'complete and their atomic populations (Löwdin or Hirshfeld) and doublet spin expectations pass validation.</p>'
         + ''.join(fukui_blocks) + '</section>'
     ) if fukui_blocks else ''
 
+    redox_blocks = []
+    for job in jobs:
+        redox = job.get('redox') or {}
+        if not redox and not (job.get('parameters') or {}).get('redox'):
+            continue
+        ligand = escape(str(job.get('selection', {}).get('ligand_id', 'Unnamed ligand')))
+        r_status = str(redox.get('status', 'not_evaluated'))
+        thermo = redox.get('thermodynamics') or {}
+        if r_status == 'completed' and thermo:
+            redox_items = [
+                ('Vertical Electron Affinity (EA_vert)', f"{_number(thermo.get('vertical_electron_affinity_ev'), 3)} eV"),
+                ('Vertical Ionization Potential (IP_vert)', f"{_number(thermo.get('vertical_ionization_potential_ev'), 3)} eV"),
+                ('Adiabatic Electron Affinity (EA_adiab)', f"{_number(thermo.get('adiabatic_electron_affinity_ev'), 3)} eV" if thermo.get('adiabatic_electron_affinity_ev') is not None else 'Not evaluated (vertical only)'),
+                ('Reorganization Energy (λ)', f"{_number(thermo.get('reorganization_energy_ev'), 3)} eV" if thermo.get('reorganization_energy_ev') is not None else 'Not evaluated'),
+                ('Solvated Reduction Free Energy (ΔG°_solv,red)', f"{_number(thermo.get('delta_g_solv_red_kcal_mol'), 2)} kcal/mol"),
+                ('Standard Potential E°_red vs SHE', f"{_number(thermo.get('e_red_vs_she_v'), 3)} V"),
+                ('Standard Potential E°_red vs SCE', f"{_number(thermo.get('e_red_vs_sce_v'), 3)} V"),
+                ('Standard Potential E°_red vs Ag/AgCl', f"{_number(thermo.get('e_red_vs_ag_agcl_v'), 3)} V"),
+            ]
+            redox_blocks.append(
+                f'<article class="insight" style="margin:16px 0;"><h3>{ligand} — Delta-SCF Redox Profile</h3>'
+                '<dl style="margin-top:10px;">'
+                + ''.join(f'<div><dt>{escape(k)}</dt><dd><strong>{v}</strong></dd></div>' for k, v in redox_items)
+                + '</dl></article>'
+            )
+        else:
+            r_err = escape(str(redox.get('error') or 'One-electron redox states prepared and awaiting ORCA execution.'))
+            redox_blocks.append(
+                f'<article class="method" style="margin:16px 0;"><h3>{ligand} — Delta-SCF Redox Profile</h3>'
+                f'<p class="notice">Redox workflow status: <strong>{escape(r_status.upper())}</strong>. {r_err}</p></article>'
+            )
+    redox_html = (
+        '<section id="redox"><div class="section-heading"><span>01C / Electrochemistry</span>'
+        '<h2>Delta-SCF One-Electron Redox Thermodynamics</h2></div>'
+        '<p>Vertical and adiabatic electron affinities, ionization potentials, reorganization energies, and standard '
+        'reduction potentials referenced against SHE, SCE, and Ag/AgCl electrodes.</p>'
+        + ''.join(redox_blocks) + '</section>'
+    ) if redox_blocks else ''
+    fukui_html = fukui_html + redox_html
+
     workflow_html = ''
-    if workflow_data:
+    if workflow_data or evidence_layers:
         recovery = workflow_data.get('recovery') or {}
         failures = workflow_data.get('failures') or []
 
@@ -1253,10 +1394,84 @@ def generate_html_dossier(project_name: str, poses_data: list[dict], out_html: s
             for item in failures
         ) or '<li>No structured failures recorded.</li>'
         status = str(workflow_data.get('status', 'unknown')).upper()
+        formal_state = str(
+            ((evidence_layers.get('validated_outcome') or {}).get('formal_state'))
+            or status
+        ).upper()
+
+        epistemic_html = ''
+        if evidence_layers:
+            layer_labels = [
+                ('experimental_measurement', '1. Experimental Measurement', 'Direct wet-lab observable (never inferred from computation)'),
+                ('docking_score', '2. Reversible Docking Recognition', 'Empirical scoring proxy and multi-pocket dispersion'),
+                ('dft_descriptor', '3. Isolated-Ligand DFT & Redox', 'Intrinsic frontier orbital, condensed Fukui, and Delta-SCF redox descriptors'),
+                ('md_score', '4. Classical MD & P_NAC Ensemble', 'Explicit-solvent conformational stability and near-attack persistence'),
+                ('reaction_evidence', '5. Active-Site Reaction & TS/IRC', 'Cluster QM, first-order saddle point, and IRC pathway verification'),
+                ('validated_outcome', '6. Validated Scientific Outcome', 'Formal epistemic classification and 3-pillar feasibility status'),
+            ]
+            layer_rows = []
+            for l_key, l_title, l_desc in layer_labels:
+                l_val = evidence_layers.get(l_key) or {}
+                if l_key == 'validated_outcome':
+                    l_summary = f"Formal state: <strong>{escape(str(l_val.get('formal_state', formal_state)))}</strong> (degraded={bool(l_val.get('degraded', False))})"
+                elif isinstance(l_val, dict) and l_val.get('status') in ('not_provided', 'not_evaluated'):
+                    l_summary = escape(str(l_val.get('status')))
+                elif l_key == 'docking_score':
+                    pb_cnt = len(l_val.get('pocket_breakdown') or [])
+                    l_summary = f"Best score: {_number(l_val.get('docking_score'), 2)} kcal/mol ({pb_cnt} target-pocket group(s))"
+                elif l_key == 'md_score':
+                    l_summary = (
+                        f"P_NAC = {_number(float(l_val.get('p_nac', 0.0)) * 100.0, 1)}% "
+                        f"({l_val.get('reactive_frame_count', 0)} reactive frame(s))"
+                        if l_val.get('p_nac') is not None else "Not evaluated"
+                    )
+                else:
+                    l_summary = "Recorded in structured evidence"
+                layer_rows.append(
+                    f'<tr><td><strong>{escape(l_title)}</strong></td>'
+                    f'<td>{escape(l_desc)}</td>'
+                    f'<td>{l_summary}</td></tr>'
+                )
+            epistemic_html = (
+                '<div style="margin-top:14px;">'
+                '<h4 style="margin:0 0 8px;">Six-Layer Epistemological Evidence Separation</h4>'
+                '<div class="table-wrap"><table><thead><tr>'
+                '<th>Epistemic Layer</th><th>Scientific Boundary</th><th>Recorded State</th>'
+                '</tr></thead><tbody>' + ''.join(layer_rows) + '</tbody></table></div></div>'
+            )
+
+        timing_html = ''
+        stage_timings = workflow_data.get('stage_timings') or {}
+        if stage_timings:
+            t_rows = []
+            for st_key, st_info in stage_timings.items():
+                if not isinstance(st_info, dict):
+                    continue
+                el_sec = st_info.get('elapsed_seconds')
+                el_str = f"{float(el_sec):.2f} s" if isinstance(el_sec, (int, float)) else 'N/A'
+                t_rows.append(
+                    f'<tr><td><code>{escape(str(st_key))}</code></td>'
+                    f'<td>{escape(str(st_info.get("status", "unknown")))}</td>'
+                    f'<td>{escape(str(st_info.get("validation", "not_evaluated")))}</td>'
+                    f'<td>{el_str}</td></tr>'
+                )
+            if t_rows:
+                timing_html = (
+                    '<div style="margin-top:14px;">'
+                    '<h4 style="margin:0 0 8px;">Stage Execution &amp; Timing Telemetry</h4>'
+                    '<div class="table-wrap"><table><thead><tr>'
+                    '<th>Stage</th><th>Runtime Status</th><th>Scientific Validation</th><th>Elapsed Duration</th>'
+                    '</tr></thead><tbody>' + ''.join(t_rows) + '</tbody></table></div></div>'
+                )
+
         workflow_html = (
             '<div style="margin-top:18px;padding:16px;border:1px solid #cbd5e1;border-radius:10px;background:#f8fafc;">'
-            '<h3 style="margin:0 0 8px;">Workflow Completion and Recovery</h3>'
-            f'<p><strong>Status: {escape(status)}</strong>. Completed means process output exists; only validated entries are reusable without rerun.</p>'
+            '<div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:8px;">'
+            '<h3 style="margin:0;">Workflow Completion and Recovery</h3>'
+            f'<span class="badge" style="background:#0f172a;color:#f8fafc;">Formal Outcome: {escape(formal_state)}</span>'
+            '</div>'
+            f'<p><strong>Status: {escape(status)}</strong> · <strong>Formal Outcome State: {escape(formal_state)}</strong>. '
+            'Completed means process output exists; only validated entries are reusable without rerun.</p>'
             '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:12px;">'
             f'<div><h4>Reusable without rerun</h4><ul>{recovery_items("reusable", "None")}</ul></div>'
             f'<div><h4>Review before reuse</h4><ul>{recovery_items("review_required", "None")}</ul></div>'
@@ -1264,7 +1479,9 @@ def generate_html_dossier(project_name: str, poses_data: list[dict], out_html: s
             f'<div><h4>Not yet performed</h4><ul>{recovery_items("pending", "None")}</ul></div>'
             '</div>'
             f'<h4>Structured failures</h4><ul>{failure_rows}</ul>'
-            '</div>'
+            + epistemic_html
+            + timing_html
+            + '</div>'
         )
     provenance = _redact_local_paths(dict(
         schema_version=1,
