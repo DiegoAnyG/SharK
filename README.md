@@ -5,14 +5,13 @@
 <h1 align="center">SharK</h1>
 
 <p align="center">
-  <strong>Democratizing Computational Chemistry — Science Without Barriers</strong>
+  <strong>Quantum & Molecular Chemistry Made (almost) Easy</strong>
 </p>
 
 <p align="center">
   <a href="#overview">Overview</a> •
   <a href="#key-features">Key Features</a> •
-  <a href="#quickstart">Quickstart</a> •
-  <a href="#license">Philosophy</a>
+  <a href="#quickstart">Quickstart</a>
 </p>
 
 ---
@@ -181,9 +180,3 @@ Covalent Near-Attack Conformations can be evaluated via `--covalent` across pose
 Private notes, calculations and reports are excluded from version control. Tests using
 private benchmark data can locate it through `SHARK_TEST_DATA` (or `TOPICS_TEST_DATA`)
 and skip when it is unavailable. The session and DFT workflow tests use synthetic inputs.
-
----
-
-## Philosophy
-
-Scientific progress should not be locked behind financial paywalls or proprietary software suites. **SharK** is developed under the premise that rigorous computational chemistry and biophysical discovery tools should be freely accessible to researchers, students, and institutions worldwide.
